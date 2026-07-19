@@ -8,29 +8,71 @@ still needs a physical security key attached to the local machine.
 
 ## Requirements
 
-Local host:
+### SSH
+
+You need SSH access from the local host to the remote host.
+
+- `remote-chrome launch --foreground HOST` can use normal interactive SSH.
+- The default detached tmux launch requires noninteractive SSH, such as an SSH
+  key, agent, or an already-open SSH control connection.
+- YubiKey forwarding requires noninteractive SSH because USB/IP setup runs
+  multiple remote commands.
+
+### Chrome Over Waypipe
+
+Local host requirements:
 
 - `bash`
 - `ssh`
 - `waypipe`
 - `tmux`
-- `usbip`
-- `sudo` access for `modprobe`, `usbip bind`, and cleanup
+- a graphical Wayland session
 
-Remote host:
+Remote host requirements:
 
-- `ssh` access
+- `waypipe`
 - `google-chrome-stable`
+
+The launcher starts Chrome with:
+
+```bash
+--ozone-platform=wayland --disable-gpu --disable-features=Vulkan --new-window
+```
+
+Waypipe is intentionally kept as a prerequisite rather than installed by this
+script. Package names and setup differ enough across distros that automatic
+installation would add churn and surprising behavior.
+
+### YubiKey Forwarding
+
+Local host requirements:
+
 - `usbip`
-- `sudo` access for `modprobe vhci-hcd` and `usbip attach`
+- a local YubiKey visible in `usbip list -l`
+- `sudo` access for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and
+  starting/stopping `usbipd`
+
+Remote host requirements:
+
+- `usbip`
+- passwordless remote `sudo` for `modprobe vhci-hcd`, `usbip attach`, and
+  `usbip detach`
 - `libfido2` for optional `fido2-token` verification
+
+Passwordless remote `sudo` is a hard requirement for YubiKey forwarding. The
+remote commands run over noninteractive SSH and cannot complete a sudo prompt.
+
+### Arch Example
 
 On Arch-family systems:
 
 ```bash
 sudo pacman -S --needed waypipe tmux usbip
-ssh remote-host 'sudo pacman -S --needed usbip libfido2'
+ssh remote-host 'sudo pacman -S --needed waypipe usbip libfido2'
 ```
+
+Install Google Chrome on the remote host through the appropriate channel for
+that machine.
 
 ## Install
 
@@ -56,7 +98,9 @@ The host can also be the first argument:
 remote-chrome remote-host
 ```
 
-The default tmux session name is `remote-chrome-HOST`.
+The default tmux session name is `remote-chrome-HOST`, with characters that are
+awkward for tmux targets replaced by underscores. For example, `remote.example`
+becomes `remote-chrome-remote_example`.
 
 Check or stop the session:
 
@@ -77,9 +121,43 @@ Run in the foreground instead of tmux:
 remote-chrome launch remote-host --foreground
 ```
 
+Detached tmux mode is the default because it keeps Chrome and Waypipe alive if
+the launching terminal exits, and it gives you a stable place to inspect logs:
+
+```bash
+tmux attach -t remote-chrome-remote-host
+tmux capture-pane -pt remote-chrome-remote-host:chrome
+```
+
+A user systemd service would also work, but tmux keeps this tool dependency-light
+and easy to inspect.
+
+### Existing Remote Chrome Processes
+
+Chrome has single-instance behavior per user-data directory. If Chrome is
+already running on the remote host, a new invocation can delegate to that
+existing browser process, which means the tab or window opens in the remote
+host's normal desktop session instead of the Waypipe session.
+
+`--new-window` does not fully solve this because the existing browser process
+can still handle the request.
+
+By default, `remote-chrome launch` checks for an existing remote Chrome browser
+process and stops before launching if one is found. Use one of these options:
+
+```bash
+remote-chrome launch remote-host --kill-existing
+remote-chrome launch remote-host --kill-existing --yes
+remote-chrome launch remote-host --allow-existing
+```
+
+Use `--kill-existing` only after saving anything important in the remote browser.
+Use `--allow-existing` only when you know the existing browser process uses a
+different `--user-data-dir`.
+
 ## Forward A YubiKey
 
-For an interactive WebAuthn prompt, use foreground mode. It starts USB/IP
+For an interactive WebAuthn prompt, foreground mode starts USB/IP
 forwarding and cleans up when you press Ctrl-C:
 
 ```bash
@@ -99,6 +177,25 @@ remote-chrome yubikey stop remote-host
 
 While forwarding is active, the YubiKey is attached to the remote host, so local
 apps may not be able to use it.
+
+You can also start YubiKey forwarding with the Chrome tmux session:
+
+```bash
+remote-chrome launch remote-host --with-yubikey
+```
+
+This creates a second tmux window named `yubikey` in the same session. Stopping
+the tmux session sends the forwarding process a signal, and it detaches/unbinds
+the YubiKey during cleanup.
+
+If you prefer an explicit prompt when a local YubiKey is detected:
+
+```bash
+remote-chrome launch remote-host --ask-yubikey
+```
+
+The tool does not auto-forward a detected YubiKey by default. Forwarding gives
+the remote host access to the USB device, so it stays opt-in.
 
 ## Configuration
 
