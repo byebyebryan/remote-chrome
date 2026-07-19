@@ -1,0 +1,526 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM="${0##*/}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  $PROGRAM launch HOST [-- CHROME_ARGS...]
+  $PROGRAM HOST [-- CHROME_ARGS...]
+  $PROGRAM stop HOST
+  $PROGRAM status HOST
+  $PROGRAM yubikey run HOST
+  $PROGRAM yubikey start HOST
+  $PROGRAM yubikey stop HOST
+  $PROGRAM yubikey status HOST
+
+Chrome options:
+      --session NAME       tmux session name
+      --foreground         run Chrome remoting in the foreground
+      --chrome-command CMD remote Chrome command, default: google-chrome-stable
+
+YubiKey options:
+      --usb-id ID          local USB id, default: 1050:0407
+      --port PORT          USB/IP TCP port, default: 3240
+      --socket PATH        SSH control socket path
+      --keep-usbipd        leave local usbipd running on yubikey stop
+
+Environment:
+  REMOTE_CHROME_COMMAND
+  REMOTE_CHROME_SESSION_PREFIX
+  REMOTE_CHROME_YUBIKEY_USB_ID
+  REMOTE_CHROME_USBIP_PORT
+  REMOTE_CHROME_YUBIKEY_SOCKET
+  REMOTE_CHROME_STOP_USBIPD
+USAGE
+}
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null || die "Missing required command: $1"
+}
+
+safe_name() {
+  local value="$1"
+  value="${value//[^[:alnum:]_.-]/_}"
+  printf '%s\n' "$value"
+}
+
+quote_command() {
+  printf '%q ' "$@"
+}
+
+chrome_default_session() {
+  printf '%s-%s\n' "${REMOTE_CHROME_SESSION_PREFIX:-remote-chrome}" "$(safe_name "$1")"
+}
+
+chrome_launch() {
+  local host=""
+  local session=""
+  local foreground=0
+  local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
+  local chrome_args=("--ozone-platform=wayland" "--disable-gpu" "--disable-features=Vulkan")
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session)
+        [ "$#" -ge 2 ] || die "$1 requires a session name."
+        session="$2"
+        shift 2
+        ;;
+      --session=*)
+        session="${1#*=}"
+        shift
+        ;;
+      --foreground|--no-tmux)
+        foreground=1
+        shift
+        ;;
+      --chrome-command)
+        [ "$#" -ge 2 ] || die "$1 requires a command."
+        chrome_command="$2"
+        shift 2
+        ;;
+      --chrome-command=*)
+        chrome_command="${1#*=}"
+        shift
+        ;;
+      --)
+        shift
+        chrome_args+=("$@")
+        break
+        ;;
+      -*)
+        die "Unknown launch option: $1"
+        ;;
+      *)
+        if [ -z "$host" ]; then
+          host="$1"
+        else
+          chrome_args+=("$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$host" ] || die "Remote host is required. Example: $PROGRAM launch HOST"
+  [ -n "$session" ] || session="$(chrome_default_session "$host")"
+
+  need ssh
+  need waypipe
+
+  local command=(waypipe --no-gpu ssh "$host" "$chrome_command" "${chrome_args[@]}")
+
+  if [ "$foreground" = "1" ]; then
+    exec "${command[@]}"
+  fi
+
+  need tmux
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    die "tmux session already exists: $session"
+  fi
+
+  tmux new-session -d -s "$session" "$(quote_command "${command[@]}")"
+  echo "Started remote Chrome on $host in tmux session $session."
+}
+
+chrome_stop() {
+  local host=""
+  local session=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session)
+        [ "$#" -ge 2 ] || die "$1 requires a session name."
+        session="$2"
+        shift 2
+        ;;
+      --session=*)
+        session="${1#*=}"
+        shift
+        ;;
+      -*)
+        die "Unknown stop option: $1"
+        ;;
+      *)
+        [ -z "$host" ] || die "Unexpected argument: $1"
+        host="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$session" ] || {
+    [ -n "$host" ] || die "Host or --session is required."
+    session="$(chrome_default_session "$host")"
+  }
+
+  need tmux
+  tmux kill-session -t "$session"
+  echo "Stopped tmux session $session."
+}
+
+chrome_status() {
+  local host=""
+  local session=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session)
+        [ "$#" -ge 2 ] || die "$1 requires a session name."
+        session="$2"
+        shift 2
+        ;;
+      --session=*)
+        session="${1#*=}"
+        shift
+        ;;
+      -*)
+        die "Unknown status option: $1"
+        ;;
+      *)
+        [ -z "$host" ] || die "Unexpected argument: $1"
+        host="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$session" ] || {
+    [ -n "$host" ] || die "Host or --session is required."
+    session="$(chrome_default_session "$host")"
+  }
+
+  need tmux
+  if tmux has-session -t "$session" 2>/dev/null; then
+    echo "running: $session"
+  else
+    echo "not running: $session"
+  fi
+}
+
+yk_action=""
+yk_remote=""
+yk_usb_id="${REMOTE_CHROME_YUBIKEY_USB_ID:-1050:0407}"
+yk_usbip_port="${REMOTE_CHROME_USBIP_PORT:-3240}"
+yk_control_socket="${REMOTE_CHROME_YUBIKEY_SOCKET:-}"
+yk_stop_usbipd="${REMOTE_CHROME_STOP_USBIPD:-1}"
+yk_cleanup_done=0
+
+yk_usage() {
+  cat <<USAGE
+Usage:
+  $PROGRAM yubikey run HOST
+  $PROGRAM yubikey start HOST
+  $PROGRAM yubikey stop HOST
+  $PROGRAM yubikey status HOST
+
+The HOST may also appear before the action:
+  $PROGRAM yubikey HOST run
+USAGE
+}
+
+yk_set_action() {
+  [ -z "$yk_action" ] || die "Only one YubiKey action may be specified."
+  yk_action="$1"
+}
+
+yk_parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      run|start|stop|status)
+        yk_set_action "$1"
+        shift
+        ;;
+      --usb-id)
+        [ "$#" -ge 2 ] || die "$1 requires a USB id."
+        yk_usb_id="$2"
+        shift 2
+        ;;
+      --usb-id=*)
+        yk_usb_id="${1#*=}"
+        shift
+        ;;
+      --port)
+        [ "$#" -ge 2 ] || die "$1 requires a port."
+        yk_usbip_port="$2"
+        shift 2
+        ;;
+      --port=*)
+        yk_usbip_port="${1#*=}"
+        shift
+        ;;
+      --socket)
+        [ "$#" -ge 2 ] || die "$1 requires a path."
+        yk_control_socket="$2"
+        shift 2
+        ;;
+      --socket=*)
+        yk_control_socket="${1#*=}"
+        shift
+        ;;
+      --keep-usbipd)
+        yk_stop_usbipd=0
+        shift
+        ;;
+      -h|--help|help)
+        yk_usage
+        exit 0
+        ;;
+      -*)
+        die "Unknown YubiKey option: $1"
+        ;;
+      *)
+        [ -z "$yk_remote" ] || die "Unexpected argument: $1"
+        yk_remote="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$yk_action" ] || {
+    yk_usage >&2
+    exit 2
+  }
+
+  [ -n "$yk_remote" ] || die "Remote host is required. Example: $PROGRAM yubikey run HOST"
+
+  if [ -z "$yk_control_socket" ]; then
+    yk_control_socket="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-$(safe_name "$yk_remote").sock"
+  fi
+}
+
+yk_ssh() {
+  ssh -o BatchMode=yes "$yk_remote" "$@"
+}
+
+yk_find_busids() {
+  usbip list -l |
+    awk -v wanted="$yk_usb_id" '
+      /^ - busid / {
+        busid = $3
+        id = $4
+        gsub(/[()]/, "", id)
+        if (id == wanted) {
+          print busid
+        }
+      }
+    '
+}
+
+yk_first_busid() {
+  yk_find_busids | sed -n '1p'
+}
+
+yk_ensure_local_ready() {
+  need ssh
+  need usbip
+  need ss
+
+  if ! sudo modprobe usbip-host; then
+    cat >&2 <<EOF
+Could not load usbip-host for running kernel $(uname -r).
+If the kernel was upgraded recently, reboot so /lib/modules matches the
+running kernel, then retry.
+EOF
+    exit 1
+  fi
+
+  if ! ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
+    sudo usbipd -D -t "$yk_usbip_port" >/dev/null 2>&1
+  fi
+}
+
+yk_ensure_remote_ready() {
+  yk_ssh "command -v usbip >/dev/null && sudo modprobe vhci-hcd"
+}
+
+yk_close_tunnel() {
+  if [ -S "$yk_control_socket" ]; then
+    ssh -S "$yk_control_socket" -O exit "$yk_remote" >/dev/null 2>&1 || true
+    [ -S "$yk_control_socket" ] && unlink "$yk_control_socket" || true
+  fi
+}
+
+yk_open_tunnel() {
+  if [ -S "$yk_control_socket" ]; then
+    if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+      return
+    fi
+    unlink "$yk_control_socket"
+  fi
+
+  ssh -M -S "$yk_control_socket" -fN \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=2 \
+    -R "127.0.0.1:${yk_usbip_port}:127.0.0.1:${yk_usbip_port}" \
+    "$yk_remote"
+}
+
+yk_remote_detach_ports() {
+  yk_ssh 'bash -s' -- "$yk_usb_id" <<'REMOTE_SCRIPT' || true
+usb_id="$1"
+
+usbip port 2>/dev/null |
+  awk -v wanted="$usb_id" '
+    /^Port [0-9]+:/ {
+      port = $2
+      sub(":", "", port)
+    }
+    index($0, wanted) || /Yubico\.com|YubiKey/ {
+      if (port != "") {
+        print port
+      }
+    }
+  ' |
+  while read -r port; do
+    sudo usbip detach -p "$port" >/dev/null 2>&1 || true
+  done
+REMOTE_SCRIPT
+}
+
+yk_start() {
+  yk_ensure_local_ready
+  yk_ensure_remote_ready
+
+  local busid
+  busid="$(yk_first_busid)"
+  if [ -z "${busid:-}" ]; then
+    echo "No local YubiKey found with USB id $yk_usb_id." >&2
+    echo "Current local USB/IP devices:" >&2
+    usbip list -l >&2 || true
+    exit 1
+  fi
+
+  sudo usbip bind -b "$busid" >/dev/null 2>&1 || true
+  yk_open_tunnel
+
+  if ! yk_ssh "usbip list -r 127.0.0.1 | grep -q '$busid:'"; then
+    echo "Remote host cannot see exported busid $busid through the SSH tunnel." >&2
+    exit 1
+  fi
+
+  yk_remote_detach_ports
+  yk_ssh "sudo usbip attach -r 127.0.0.1 -b '$busid'"
+
+  echo "Forwarded local YubiKey $yk_usb_id busid $busid to $yk_remote."
+  yk_ssh "fido2-token -L 2>/dev/null || { echo 'Install libfido2 on the remote to verify with fido2-token.'; lsusb | grep -Ei 'Yubi|1050' || true; }"
+}
+
+yk_stop() {
+  yk_remote_detach_ports
+  yk_close_tunnel
+
+  yk_find_busids | while read -r busid; do
+    [ -n "$busid" ] && sudo usbip unbind -b "$busid" >/dev/null 2>&1 || true
+  done
+
+  if [ "$yk_stop_usbipd" = "1" ]; then
+    sudo systemctl stop usbipd >/dev/null 2>&1 || true
+    sudo pkill -x usbipd >/dev/null 2>&1 || true
+  fi
+
+  echo "Stopped YubiKey USB/IP forwarding for $yk_remote."
+}
+
+yk_cleanup() {
+  trap - EXIT INT TERM
+  if [ "$yk_cleanup_done" = "0" ]; then
+    yk_cleanup_done=1
+    yk_stop
+  fi
+}
+
+yk_run() {
+  trap yk_cleanup EXIT
+  trap 'yk_cleanup; exit 130' INT
+  trap 'yk_cleanup; exit 143' TERM
+
+  yk_start
+  echo "YubiKey forwarding is active. Press Ctrl-C to stop and clean up."
+
+  while true; do
+    sleep 86400 &
+    wait "$!"
+  done
+}
+
+yk_status() {
+  echo "Remote: $yk_remote"
+  echo "Local USB id: $yk_usb_id"
+
+  echo
+  echo "Local YubiKey candidates:"
+  yk_find_busids | sed 's/^/  busid /' || true
+  lsusb | grep -Ei 'Yubi|1050' || true
+
+  echo
+  echo "Local usbipd listener:"
+  ss -ltnp 2>/dev/null | grep ":${yk_usbip_port}\\b" || echo "  not listening"
+
+  echo
+  echo "SSH tunnel:"
+  if [ -S "$yk_control_socket" ] && ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+    echo "  active: $yk_control_socket"
+  else
+    echo "  inactive: $yk_control_socket"
+  fi
+
+  echo
+  echo "Remote USB/IP ports:"
+  yk_ssh "usbip port 2>/dev/null || true"
+
+  echo
+  echo "Remote FIDO tokens:"
+  yk_ssh "fido2-token -L 2>/dev/null || lsusb | grep -Ei 'Yubi|1050' || true"
+}
+
+yubikey_main() {
+  yk_parse_args "$@"
+
+  case "$yk_action" in
+    run) yk_run ;;
+    start) yk_start ;;
+    stop) yk_stop ;;
+    status) yk_status ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+
+  case "$command" in
+    launch)
+      shift
+      chrome_launch "$@"
+      ;;
+    stop)
+      shift
+      chrome_stop "$@"
+      ;;
+    status)
+      shift
+      chrome_status "$@"
+      ;;
+    yubikey|yk)
+      shift
+      yubikey_main "$@"
+      ;;
+    -h|--help|help|"")
+      usage
+      ;;
+    *)
+      chrome_launch "$@"
+      ;;
+  esac
+}
+
+main "$@"
