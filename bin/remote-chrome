@@ -745,7 +745,9 @@ yk_local_candidate_exists() {
 yk_close_tunnel() {
   if [ -S "$yk_control_socket" ]; then
     ssh -S "$yk_control_socket" -O exit "$yk_remote" >/dev/null 2>&1 || true
-    [ -S "$yk_control_socket" ] && unlink "$yk_control_socket" || true
+    if [ -S "$yk_control_socket" ]; then
+      unlink "$yk_control_socket" || true
+    fi
   fi
 }
 
