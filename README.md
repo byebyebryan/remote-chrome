@@ -62,27 +62,63 @@ Remote host requirements:
 Passwordless remote `sudo` is a hard requirement for YubiKey forwarding. The
 remote commands run over noninteractive SSH and cannot complete a sudo prompt.
 
-### Arch Example
+### Remote Host Setup (Arch)
 
-On Arch-family systems:
+On an Arch-family remote host, install the remote-side packages:
 
 ```bash
-sudo pacman -S --needed waypipe tmux usbip
 ssh remote-host 'sudo pacman -S --needed waypipe usbip libfido2'
 ```
 
 Install Google Chrome on the remote host through the appropriate channel for
 that machine.
 
-## Install
+## Local Setup
 
-Clone the repo and put `bin` on your `PATH`, or copy `bin/remote-chrome` to a
-directory already on your `PATH`.
+On an Arch-family local host, install the runtime dependencies:
+
+```bash
+sudo pacman -S --needed waypipe tmux usbip
+```
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/byebyebryan/remote-chrome.git
-export PATH="$PWD/remote-chrome/bin:$PATH"
+cd remote-chrome
 ```
+
+For an editable checkout, link the launcher into the user-local executable
+directory:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+ln -s "$PWD/bin/remote-chrome" "$HOME/.local/bin/remote-chrome"
+```
+
+Alternatively, install a standalone copy:
+
+```bash
+install -Dm755 bin/remote-chrome "$HOME/.local/bin/remote-chrome"
+```
+
+Make sure `$HOME/.local/bin` is on `PATH`. Add this to the appropriate shell
+startup file if it is not already configured:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Verify the local setup:
+
+```bash
+command -v remote-chrome
+remote-chrome --help
+usbip list -l
+```
+
+The final command should list a connected YubiKey when YubiKey forwarding will
+be used. Chrome-only sessions do not require a YubiKey or the `usbip` tools.
 
 ## Launch Chrome
 
