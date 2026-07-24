@@ -1,5 +1,7 @@
 # remote-chrome
 
+[![CI](https://github.com/byebyebryan/remote-chrome/actions/workflows/ci.yml/badge.svg)](https://github.com/byebyebryan/remote-chrome/actions/workflows/ci.yml)
+
 `remote-chrome` starts Google Chrome on a remote Linux host over Waypipe and can
 temporarily forward a local YubiKey to that host for WebAuthn/FIDO prompts.
 
@@ -285,3 +287,7 @@ sudo pacman -S --needed shellcheck
 
 The check script runs Bash syntax validation, ShellCheck, the command-level
 test suite, and `git diff --check`. The same checks run in GitHub Actions.
+
+## License
+
+Released under the [MIT License](LICENSE).
