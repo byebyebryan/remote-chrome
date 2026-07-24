@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+command -v shellcheck >/dev/null || {
+  echo "Missing required development command: shellcheck" >&2
+  exit 1
+}
+
+bash -n bin/remote-chrome tests/remote-chrome_test.sh scripts/check
+shellcheck bin/remote-chrome tests/remote-chrome_test.sh scripts/check
+bash tests/remote-chrome_test.sh
+git diff --check

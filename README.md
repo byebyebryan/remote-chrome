@@ -48,6 +48,7 @@ installation would add churn and surprising behavior.
 Local host requirements:
 
 - `usbip`
+- `ss` from `iproute2`
 - a local YubiKey visible in `usbip list -l`
 - `sudo` access for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and
   starting/stopping `usbipd`
@@ -78,7 +79,7 @@ that machine.
 On an Arch-family local host, install the runtime dependencies:
 
 ```bash
-sudo pacman -S --needed waypipe tmux usbip
+sudo pacman -S --needed waypipe tmux usbip iproute2
 ```
 
 Clone the repository:
@@ -272,3 +273,15 @@ The local `usbipd` daemon may still listen on the local host's network
 interfaces while forwarding is active, depending on your distro's `usbipd`
 behavior. Run `remote-chrome yubikey stop HOST` after use, or use
 `remote-chrome yubikey run HOST` and stop it with Ctrl-C.
+
+## Development
+
+Install ShellCheck and run the repository checks:
+
+```bash
+sudo pacman -S --needed shellcheck
+./scripts/check
+```
+
+The check script runs Bash syntax validation, ShellCheck, the command-level
+test suite, and `git diff --check`. The same checks run in GitHub Actions.
