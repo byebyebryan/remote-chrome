@@ -149,11 +149,43 @@ test_remote_preflight_uses_scoped_sudo_command() (
     fail "remote preflight still requires unrestricted sudo via true"
 )
 
+test_custom_chrome_command_is_in_process_pattern() (
+  local pattern
+  pattern="$(chrome_process_pattern "/usr/bin/chromium-browser")"
+
+  assert_contains "$pattern" "chromium-browser"
+  [[ "/usr/bin/chromium-browser --profile-directory=Default" =~ $pattern ]] ||
+    fail "custom Chrome executable did not match its process pattern"
+  [[ ! "/usr/bin/chromium-browser-helper --type=utility" =~ $pattern ]] ||
+    fail "custom Chrome process pattern matched a longer executable name"
+)
+
+test_chrome_command_rejects_shell_syntax() (
+  if (chrome_process_pattern "chromium --incognito" >/dev/null 2>&1); then
+    fail "Chrome command with shell syntax unexpectedly passed validation"
+  fi
+)
+
+test_existing_process_check_uses_custom_command() (
+  local ssh_arguments=""
+  ssh() {
+    ssh_arguments="$*"
+    return 0
+  }
+
+  chrome_existing_processes "test-host" "/usr/bin/chromium-browser"
+  assert_contains "$ssh_arguments" "pgrep"
+  assert_contains "$ssh_arguments" "chromium-browser"
+)
+
 tests=(
   test_start_rolls_back_partial_setup
   test_successful_start_records_exact_state
   test_stop_cleans_only_recorded_busid
   test_remote_preflight_uses_scoped_sudo_command
+  test_custom_chrome_command_is_in_process_pattern
+  test_chrome_command_rejects_shell_syntax
+  test_existing_process_check_uses_custom_command
 )
 
 for test_name in "${tests[@]}"; do

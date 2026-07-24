@@ -176,7 +176,7 @@ chrome_launch() {
   need ssh
   need waypipe
   chrome_preflight "$host" "$chrome_command" "$foreground"
-  chrome_handle_existing "$host" "$allow_existing" "$kill_existing" "$assume_yes" "$foreground"
+  chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$kill_existing" "$assume_yes" "$foreground"
 
   if [ "$ask_yubikey" = "1" ] && [ "$with_yubikey" = "0" ] && yk_local_candidate_exists; then
     if confirm "Local YubiKey detected. Forward it for this Chrome session?"; then
@@ -256,25 +256,58 @@ chrome_preflight() {
   fi
 }
 
+chrome_process_pattern() {
+  local chrome_command="$1"
+  local command_name="${chrome_command##*/}"
+  local escaped_name
+
+  [ -n "$command_name" ] || die "Chrome command must not be empty."
+  case "$command_name" in
+    *[![:alnum:]_.+-]*)
+      die "Chrome command must be an executable path or name without shell syntax: $chrome_command"
+      ;;
+  esac
+
+  escaped_name="${command_name//./\\.}"
+  escaped_name="${escaped_name//+/\\+}"
+  printf '(^|/)(google-chrome|google-chrome-stable|chrome|%s)( |$)\n' "$escaped_name"
+}
+
 chrome_existing_processes() {
   local host="$1"
-  ssh -o BatchMode=yes "$host" '
-    pgrep -u "$(id -u)" -af "(^|/)(google-chrome|google-chrome-stable|chrome)( |$)" 2>/dev/null |
-      grep -v -- "--type=" |
-      grep -v "chrome_crashpad_handler" ||
+  local chrome_command="$2"
+  local process_pattern
+  process_pattern="$(chrome_process_pattern "$chrome_command")"
+
+  ssh -o BatchMode=yes "$host" "
+    pgrep -u \"\$(id -u)\" -af '$process_pattern' 2>/dev/null |
+      grep -v -- --type= |
+      grep -v chrome_crashpad_handler ||
       true
-  '
+  "
+}
+
+chrome_kill_existing() {
+  local host="$1"
+  local chrome_command="$2"
+  local process_pattern
+  process_pattern="$(chrome_process_pattern "$chrome_command")"
+
+  ssh -o BatchMode=yes "$host" "
+    pkill -u \"\$(id -u)\" -f '$process_pattern' || true
+  "
 }
 
 chrome_handle_existing() {
   local host="$1"
-  local allow_existing="$2"
-  local kill_existing="$3"
-  local assume_yes="$4"
-  local foreground="$5"
+  local chrome_command="$2"
+  local allow_existing="$3"
+  local kill_existing="$4"
+  local assume_yes="$5"
+  local foreground="$6"
   local existing
 
-  if ! existing="$(chrome_existing_processes "$host")"; then
+  if ! existing="$(chrome_existing_processes "$host" "$chrome_command")"; then
     if [ "$foreground" = "1" ]; then
       echo "Could not check for existing remote Chrome processes; continuing in foreground mode." >&2
       return 0
@@ -290,9 +323,7 @@ chrome_handle_existing() {
   if [ "$kill_existing" = "1" ]; then
     printf 'Remote Chrome appears to be running on %s:\n%s\n' "$host" "$existing" >&2
     if [ "$assume_yes" = "1" ] || confirm "Kill existing remote Chrome processes before launching?"; then
-      ssh -o BatchMode=yes "$host" '
-        pkill -u "$(id -u)" -f "(^|/)(google-chrome|google-chrome-stable|chrome)( |$)" || true
-      '
+      chrome_kill_existing "$host" "$chrome_command"
       return 0
     fi
     die "Canceled before killing remote Chrome."
