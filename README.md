@@ -214,6 +214,11 @@ remote-chrome yubikey stop remote-host
 While forwarding is active, the YubiKey is attached to the remote host, so local
 apps may not be able to use it.
 
+The tool records the exact local bus ID and any `usbipd` process it started in a
+state file beside the SSH control socket. Cleanup only detaches that recorded
+device. A pre-existing system `usbipd` is never stopped, and a tool-started
+daemon remains running while other USB/IP exports still exist.
+
 You can also start YubiKey forwarding with the Chrome tmux session:
 
 ```bash
@@ -250,6 +255,9 @@ REMOTE_CHROME_USBIP_PORT=3240
 REMOTE_CHROME_YUBIKEY_SOCKET=${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-remote-host.sock
 REMOTE_CHROME_STOP_USBIPD=1
 ```
+
+Set `REMOTE_CHROME_STOP_USBIPD=0`, or pass `--keep-usbipd` to a `yubikey`
+command, to leave a tool-started daemon running after cleanup.
 
 If `modprobe usbip-host` fails locally after a kernel upgrade, reboot so the
 running kernel matches `/lib/modules`.

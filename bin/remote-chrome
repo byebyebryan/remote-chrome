@@ -402,6 +402,11 @@ yk_usbip_port="${REMOTE_CHROME_USBIP_PORT:-3240}"
 yk_control_socket="${REMOTE_CHROME_YUBIKEY_SOCKET:-}"
 yk_stop_usbipd="${REMOTE_CHROME_STOP_USBIPD:-1}"
 yk_cleanup_done=0
+yk_state_file=""
+yk_usbipd_pid_file=""
+yk_active_busid=""
+yk_started_usbipd=0
+yk_usbipd_pid=""
 
 yk_usage() {
   cat <<USAGE
@@ -484,6 +489,8 @@ yk_parse_args() {
   if [ -z "$yk_control_socket" ]; then
     yk_control_socket="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-$(safe_name "$yk_remote").sock"
   fi
+  yk_validate_settings
+  yk_set_runtime_paths
 }
 
 yk_prepare_for_launch() {
@@ -520,6 +527,95 @@ yk_prepare_for_launch() {
   if [ -z "$yk_control_socket" ]; then
     yk_control_socket="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-$(safe_name "$yk_remote").sock"
   fi
+  yk_validate_settings
+  yk_set_runtime_paths
+}
+
+yk_validate_settings() {
+  if [[ ! "$yk_usbip_port" =~ ^[0-9]+$ ]] ||
+    [ "$((10#$yk_usbip_port))" -lt 1 ] ||
+    [ "$((10#$yk_usbip_port))" -gt 65535 ]; then
+    die "USB/IP port must be an integer from 1 through 65535."
+  fi
+  yk_usbip_port="$((10#$yk_usbip_port))"
+}
+
+yk_set_runtime_paths() {
+  yk_state_file="${yk_control_socket}.state"
+  yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-$(safe_name "$yk_usbip_port").pid"
+}
+
+yk_reset_runtime_state() {
+  yk_active_busid=""
+  yk_started_usbipd=0
+  yk_usbipd_pid=""
+}
+
+yk_write_state() {
+  local state_tmp="${yk_state_file}.tmp.$$"
+  local old_umask
+  old_umask="$(umask)"
+  umask 077
+
+  if ! {
+    printf 'remote\t%s\n' "$yk_remote"
+    printf 'busid\t%s\n' "$yk_active_busid"
+    printf 'started_usbipd\t%s\n' "$yk_started_usbipd"
+    printf 'usbipd_pid\t%s\n' "$yk_usbipd_pid"
+  } >"$state_tmp"; then
+    umask "$old_umask"
+    rm -f "$state_tmp"
+    return 1
+  fi
+
+  if ! mv -f "$state_tmp" "$yk_state_file"; then
+    umask "$old_umask"
+    rm -f "$state_tmp"
+    return 1
+  fi
+  umask "$old_umask"
+}
+
+yk_load_state() {
+  [ -f "$yk_state_file" ] || return 1
+
+  local key
+  local value
+  local state_remote=""
+  yk_reset_runtime_state
+
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      remote) state_remote="$value" ;;
+      busid) yk_active_busid="$value" ;;
+      started_usbipd) yk_started_usbipd="$value" ;;
+      usbipd_pid) yk_usbipd_pid="$value" ;;
+    esac
+  done <"$yk_state_file"
+
+  if [ "$state_remote" != "$yk_remote" ]; then
+    echo "YubiKey state belongs to $state_remote, not $yk_remote: $yk_state_file" >&2
+    return 2
+  fi
+  if [ -z "$yk_active_busid" ]; then
+    echo "YubiKey state is missing its USB bus id: $yk_state_file" >&2
+    return 2
+  fi
+  case "$yk_started_usbipd" in
+    0|1) ;;
+    *)
+      echo "YubiKey state has an invalid usbipd ownership flag: $yk_state_file" >&2
+      return 2
+      ;;
+  esac
+  if [ -n "$yk_usbipd_pid" ] && [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
+    echo "YubiKey state has an invalid usbipd pid: $yk_state_file" >&2
+    return 2
+  fi
+  if [ "$yk_started_usbipd" = "1" ] && [ -z "$yk_usbipd_pid" ]; then
+    echo "YubiKey state is missing the owned usbipd pid: $yk_state_file" >&2
+    return 2
+  fi
 }
 
 yk_ssh() {
@@ -544,12 +640,21 @@ yk_first_busid() {
   yk_find_busids | sed -n '1p'
 }
 
+yk_owned_usbipd_running() {
+  local pid="$1"
+  local command_line
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" = "usbipd" ] || return 1
+  command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$command_line" == *"--pid=$yk_usbipd_pid_file"* ]]
+}
+
 yk_ensure_local_ready() {
   need ssh
   need usbip
   need ss
 
-  sudo -v
+  sudo -v || return $?
 
   if ! sudo modprobe usbip-host; then
     cat >&2 <<EOF
@@ -557,25 +662,46 @@ Could not load usbip-host for running kernel $(uname -r).
 If the kernel was upgraded recently, reboot so /lib/modules matches the
 running kernel, then retry.
 EOF
-    exit 1
+    return 1
   fi
 
   if ! ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
-    sudo usbipd -D -t "$yk_usbip_port" >/dev/null 2>&1
+    sudo rm -f "$yk_usbipd_pid_file" || return $?
+    if ! sudo usbipd --daemon --pid="$yk_usbipd_pid_file" \
+      --tcp-port "$yk_usbip_port" >/dev/null 2>&1; then
+      echo "Could not start usbipd on local port $yk_usbip_port." >&2
+      return 1
+    fi
+    yk_started_usbipd=1
+    yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+    if [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
+      echo "usbipd started without recording a valid pid in $yk_usbipd_pid_file." >&2
+      return 1
+    fi
+  elif [ -f "$yk_usbipd_pid_file" ]; then
+    yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+    if yk_owned_usbipd_running "$yk_usbipd_pid"; then
+      yk_started_usbipd=1
+    else
+      yk_usbipd_pid=""
+      sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1 || true
+    fi
   fi
 }
 
 yk_ensure_remote_ready() {
-  yk_ssh "command -v usbip >/dev/null && sudo -n true && sudo -n modprobe vhci-hcd" ||
-    die "YubiKey forwarding needs noninteractive SSH to $yk_remote, remote usbip, and passwordless remote sudo for modprobe/usbip."
+  if ! yk_ssh "command -v usbip >/dev/null && sudo -n modprobe vhci-hcd"; then
+    echo "YubiKey forwarding needs noninteractive SSH to $yk_remote, remote usbip, and passwordless remote sudo for modprobe vhci-hcd." >&2
+    return 1
+  fi
 }
 
 yk_preflight_for_tmux() {
   need usbip
   need ssh
   sudo -v
-  yk_ssh "command -v usbip >/dev/null && sudo -n true" ||
-    die "YubiKey tmux launch needs noninteractive SSH to $yk_remote and passwordless remote sudo."
+  yk_ssh "command -v usbip >/dev/null && sudo -n modprobe vhci-hcd" ||
+    die "YubiKey tmux launch needs noninteractive SSH to $yk_remote, remote usbip, and passwordless sudo for modprobe vhci-hcd."
   yk_local_candidate_exists ||
     die "No local YubiKey found with USB id $yk_usb_id."
 }
@@ -608,18 +734,24 @@ yk_open_tunnel() {
     "$yk_remote"
 }
 
-yk_remote_detach_ports() {
-  yk_ssh 'bash -s' -- "$yk_usb_id" <<'REMOTE_SCRIPT' || true
-usb_id="$1"
+yk_remote_detach_busid() {
+  local busid="$1"
+  yk_ssh 'bash -s' -- "$busid" <<'REMOTE_SCRIPT'
+busid="$1"
 
 usbip port 2>/dev/null |
-  awk -v wanted="$usb_id" '
+  awk -v wanted="$busid" '
     /^Port [0-9]+:/ {
       port = $2
       sub(":", "", port)
     }
-    index($0, wanted) || /Yubico\.com|YubiKey/ {
-      if (port != "") {
+    {
+      marker = "/" wanted
+      position = index($0, marker)
+      if (position > 0) {
+        following = substr($0, position + length(marker), 1)
+      }
+      if (position > 0 && (following == "" || following ~ /[[:space:]]/) && port != "") {
         print port
       }
     }
@@ -630,9 +762,48 @@ usbip port 2>/dev/null |
 REMOTE_SCRIPT
 }
 
-yk_start() {
-  yk_ensure_local_ready
-  yk_ensure_remote_ready
+yk_other_exports_exist() {
+  local candidate
+  for candidate in /sys/bus/usb/drivers/usbip-host/*; do
+    [ -L "$candidate" ] && return 0
+  done
+  return 1
+}
+
+yk_stop_owned_usbipd() {
+  [ "$yk_started_usbipd" = "1" ] || return 0
+
+  if [ "$yk_stop_usbipd" != "1" ]; then
+    echo "Leaving tool-started usbipd pid $yk_usbipd_pid running by request."
+    return 0
+  fi
+
+  if yk_other_exports_exist; then
+    echo "Leaving tool-started usbipd running because other USB/IP exports remain." >&2
+    return 0
+  fi
+
+  if yk_owned_usbipd_running "$yk_usbipd_pid"; then
+    sudo kill "$yk_usbipd_pid" >/dev/null 2>&1 || true
+  fi
+  sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1 || true
+}
+
+yk_rollback_start() {
+  if [ -n "$yk_active_busid" ]; then
+    yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1 || true
+  fi
+  yk_close_tunnel
+  if [ -n "$yk_active_busid" ]; then
+    sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
+  fi
+  yk_stop_owned_usbipd
+  rm -f "$yk_state_file"
+}
+
+yk_start_impl() {
+  yk_ensure_local_ready || return $?
+  yk_ensure_remote_ready || return $?
 
   local busid
   busid="$(yk_first_busid)"
@@ -640,38 +811,76 @@ yk_start() {
     echo "No local YubiKey found with USB id $yk_usb_id." >&2
     echo "Current local USB/IP devices:" >&2
     usbip list -l >&2 || true
-    exit 1
+    return 1
   fi
 
-  sudo usbip bind -b "$busid" >/dev/null 2>&1 || true
-  yk_open_tunnel
+  if ! sudo usbip bind -b "$busid" >/dev/null 2>&1; then
+    echo "Could not bind local YubiKey busid $busid to usbip-host." >&2
+    return 1
+  fi
+  yk_active_busid="$busid"
+
+  yk_open_tunnel || return $?
 
   if ! yk_ssh "usbip list -r 127.0.0.1 | grep -q '$busid:'"; then
     echo "Remote host cannot see exported busid $busid through the SSH tunnel." >&2
-    exit 1
+    return 1
   fi
 
-  yk_remote_detach_ports
-  yk_ssh "sudo -n usbip attach -r 127.0.0.1 -b '$busid'"
+  yk_remote_detach_busid "$busid" >/dev/null 2>&1 || true
+  if ! yk_ssh "sudo -n usbip attach -r 127.0.0.1 -b '$busid'"; then
+    echo "Could not attach remote YubiKey busid $busid." >&2
+    return 1
+  fi
+  yk_write_state || return $?
 
   echo "Forwarded local YubiKey $yk_usb_id busid $busid to $yk_remote."
-  yk_ssh "fido2-token -L 2>/dev/null || { echo 'Install libfido2 on the remote to verify with fido2-token.'; lsusb | grep -Ei 'Yubi|1050' || true; }"
+  yk_ssh "fido2-token -L 2>/dev/null || { echo 'Install libfido2 on the remote to verify with fido2-token.'; command -v lsusb >/dev/null && lsusb | grep -Ei 'Yubi|1050' || true; }" ||
+    echo "Forwarding succeeded, but remote FIDO verification was unavailable." >&2
+}
+
+yk_start() {
+  yk_reset_runtime_state
+
+  if [ -e "$yk_state_file" ]; then
+    echo "YubiKey forwarding already has managed state: $yk_state_file" >&2
+    echo "Run '$PROGRAM yubikey stop $yk_remote' before starting it again." >&2
+    return 1
+  fi
+  if [ -S "$yk_control_socket" ]; then
+    if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+      echo "YubiKey forwarding already has an active SSH tunnel: $yk_control_socket" >&2
+      return 1
+    fi
+    unlink "$yk_control_socket"
+  fi
+
+  local code=0
+  yk_start_impl || code=$?
+  if [ "$code" -ne 0 ]; then
+    yk_rollback_start
+    return "$code"
+  fi
 }
 
 yk_stop() {
-  yk_remote_detach_ports
+  local load_code=0
+  yk_load_state || load_code=$?
+  if [ "$load_code" -eq 1 ]; then
+    echo "No managed YubiKey forwarding state for $yk_remote."
+    return 0
+  fi
+  [ "$load_code" -eq 0 ] || return "$load_code"
+
+  yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1 ||
+    echo "Could not detach remote USB/IP busid $yk_active_busid; continuing local cleanup." >&2
   yk_close_tunnel
 
-  yk_find_busids | while read -r busid; do
-    [ -n "$busid" ] && sudo usbip unbind -b "$busid" >/dev/null 2>&1 || true
-  done
+  sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
+  yk_stop_owned_usbipd
+  rm -f "$yk_state_file"
 
-  if [ "$yk_stop_usbipd" = "1" ]; then
-    sudo systemctl stop usbipd >/dev/null 2>&1 || true
-    sudo pkill -x usbipd >/dev/null 2>&1 || true
-  fi
-
-  echo "Stopped YubiKey USB/IP forwarding for $yk_remote."
+  echo "Stopped YubiKey USB/IP forwarding for $yk_remote (busid $yk_active_busid)."
 }
 
 yk_cleanup() {
@@ -739,9 +948,9 @@ yubikey_main() {
 }
 
 main() {
-  local command="${1:-}"
+  local subcommand="${1:-}"
 
-  case "$command" in
+  case "$subcommand" in
     launch)
       shift
       chrome_launch "$@"
@@ -767,4 +976,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
