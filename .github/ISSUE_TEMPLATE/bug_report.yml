@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible problem with Chrome transport or YubiKey forwarding
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include hostnames, usernames, SSH material, or hardware-token secrets.
+        Report security vulnerabilities through the private security link instead.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Chrome over Waypipe
+        - YubiKey forwarding
+        - Both
+        - Installation or documentation
+    validations:
+      required: true
+
+  - type: input
+    id: local-system
+    attributes:
+      label: Local system
+      description: Linux distribution, desktop/session type, and relevant package versions
+      placeholder: Arch Linux, Wayland, waypipe 0.11.0
+    validations:
+      required: true
+
+  - type: input
+    id: remote-system
+    attributes:
+      label: Remote system
+      description: Linux distribution and relevant Chrome, Waypipe, or USB/IP versions
+      placeholder: Arch Linux, google-chrome-stable, waypipe 0.11.0
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: remote-chrome revision
+      description: Commit from `git rev-parse --short HEAD`
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: Include the exact command and sanitized output
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Include relevant tmux output, SSH behavior, or reproduction details
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed sensitive host, SSH, and hardware-token information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
