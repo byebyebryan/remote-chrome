@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
+VERSION="1.0.0"
 
 usage() {
   cat <<USAGE
@@ -20,6 +21,9 @@ Chrome options:
       --yubikey-port PORT  USB/IP TCP port, default: 3240
       --allow-existing     launch even if remote Chrome is already running
       --yes                do not prompt before killing remote Chrome
+
+General options:
+      -V, --version        print version and exit
 
 Environment:
   REMOTE_CHROME_COMMAND
@@ -840,6 +844,9 @@ main() {
     _yubikey-run)
       shift
       _yubikey_run_main "$@"
+      ;;
+    -V|--version|version)
+      echo "$PROGRAM $VERSION"
       ;;
     -h|--help|help|"")
       usage

@@ -302,6 +302,13 @@ test_internal_yubikey_run_sets_up_forwarding() (
   [ "$yk_usbip_port" = "3300" ] || fail "internal yubikey run ignored --port"
 )
 
+test_version_flag_reports_version() (
+  local output
+  output="$(main --version)"
+  assert_contains "$output" "$VERSION"
+  [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
+)
+
 tests=(
   test_start_rolls_back_partial_setup
   test_successful_start_records_exact_state
@@ -317,6 +324,7 @@ tests=(
   test_existing_process_yes_skips_prompt
   test_find_busids_matches_usb_id
   test_internal_yubikey_run_sets_up_forwarding
+  test_version_flag_reports_version
 )
 
 for test_name in "${tests[@]}"; do
