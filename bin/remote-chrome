@@ -6,30 +6,20 @@ PROGRAM="${0##*/}"
 usage() {
   cat <<USAGE
 Usage:
-  $PROGRAM launch HOST [-- CHROME_ARGS...]
   $PROGRAM HOST [-- CHROME_ARGS...]
+  $PROGRAM launch HOST [-- CHROME_ARGS...]
   $PROGRAM stop HOST
   $PROGRAM status HOST
-  $PROGRAM yubikey run HOST
-  $PROGRAM yubikey start HOST
-  $PROGRAM yubikey stop HOST
-  $PROGRAM yubikey status HOST
 
 Chrome options:
       --session NAME       tmux session name
       --foreground         run Chrome remoting in the foreground
       --chrome-command CMD remote Chrome command, default: google-chrome-stable
-      --with-yubikey       forward a local YubiKey in another tmux window
-      --ask-yubikey        ask to forward if a local YubiKey is detected
+      --with-yubikey       forward a local YubiKey in a second tmux window
+      --yubikey-usb-id ID  local USB id, default: 1050:0407
+      --yubikey-port PORT  USB/IP TCP port, default: 3240
       --allow-existing     launch even if remote Chrome is already running
-      --kill-existing      ask before killing remote Chrome before launch
-      --yes                do not prompt with --kill-existing
-
-YubiKey options:
-      --usb-id ID          local USB id, default: 1050:0407
-      --port PORT          USB/IP TCP port, default: 3240
-      --socket PATH        SSH control socket path
-      --keep-usbipd        leave local usbipd running on yubikey stop
+      --yes                do not prompt before killing remote Chrome
 
 Environment:
   REMOTE_CHROME_COMMAND
@@ -79,9 +69,7 @@ chrome_launch() {
   local session=""
   local foreground=0
   local with_yubikey=0
-  local ask_yubikey=0
   local allow_existing=0
-  local kill_existing=0
   local assume_yes=0
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
   local chrome_args=("--ozone-platform=wayland" "--disable-gpu" "--disable-features=Vulkan" "--new-window")
@@ -115,10 +103,6 @@ chrome_launch() {
         with_yubikey=1
         shift
         ;;
-      --ask-yubikey)
-        ask_yubikey=1
-        shift
-        ;;
       --yubikey-usb-id)
         [ "$#" -ge 2 ] || die "$1 requires a USB id."
         yk_usb_id="$2"
@@ -141,10 +125,6 @@ chrome_launch() {
         ;;
       --allow-existing)
         allow_existing=1
-        shift
-        ;;
-      --kill-existing)
-        kill_existing=1
         shift
         ;;
       --yes|-y)
@@ -176,23 +156,17 @@ chrome_launch() {
   need ssh
   need waypipe
   chrome_preflight "$host" "$chrome_command" "$foreground"
-  chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$kill_existing" "$assume_yes" "$foreground"
-
-  if [ "$ask_yubikey" = "1" ] && [ "$with_yubikey" = "0" ] && yk_local_candidate_exists; then
-    if confirm "Local YubiKey detected. Forward it for this Chrome session?"; then
-      with_yubikey=1
-    fi
-  fi
+  chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
 
   local command=(waypipe --no-gpu ssh "$host" "$chrome_command" "${chrome_args[@]}")
 
   if [ "$foreground" = "1" ]; then
     if [ "$with_yubikey" = "1" ]; then
       yk_prepare_for_launch "$host" "${yubikey_args[@]}"
+      yk_start
       trap 'yk_stop; exit 130' INT
       trap 'yk_stop; exit 143' TERM
       trap 'yk_stop' EXIT
-      yk_start
       "${command[@]}"
       local code=$?
       yk_stop
@@ -216,7 +190,7 @@ chrome_launch() {
   if [ "$with_yubikey" = "1" ]; then
     local self
     self="$(script_path)"
-    local yk_command=("$self" yubikey run "$host" "${yubikey_args[@]}")
+    local yk_command=("$self" _yubikey-run "$host" "${yubikey_args[@]}")
     tmux new-window -d -t "$session" -n yubikey "$(quote_command "${yk_command[@]}")"
   fi
 
@@ -302,9 +276,8 @@ chrome_handle_existing() {
   local host="$1"
   local chrome_command="$2"
   local allow_existing="$3"
-  local kill_existing="$4"
-  local assume_yes="$5"
-  local foreground="$6"
+  local assume_yes="$4"
+  local foreground="$5"
   local existing
 
   if ! existing="$(chrome_existing_processes "$host" "$chrome_command")"; then
@@ -320,23 +293,16 @@ chrome_handle_existing() {
     return 0
   fi
 
-  if [ "$kill_existing" = "1" ]; then
-    printf 'Remote Chrome appears to be running on %s:\n%s\n' "$host" "$existing" >&2
-    if [ "$assume_yes" = "1" ] || confirm "Kill existing remote Chrome processes before launching?"; then
-      chrome_kill_existing "$host" "$chrome_command"
-      return 0
-    fi
-    die "Canceled before killing remote Chrome."
+  printf 'Remote Chrome appears to be running on %s:\n%s\n' "$host" "$existing" >&2
+  if [ "$assume_yes" = "1" ] || confirm "Kill existing remote Chrome processes before launching?"; then
+    chrome_kill_existing "$host" "$chrome_command"
+    return 0
   fi
 
   cat >&2 <<EOF
-Remote Chrome appears to be running on $host:
-$existing
-
-Chrome may delegate this launch to the existing remote browser instead of the
-Waypipe session. Close remote Chrome first, or rerun with --kill-existing after
-saving remote browser state. Use --allow-existing only if you know the existing
-process uses a different user-data-dir.
+Canceled. The existing remote Chrome process still owns the profile.
+Use --allow-existing only if you know the existing process uses a different
+user-data-dir.
 EOF
   exit 1
 }
@@ -344,7 +310,6 @@ EOF
 chrome_stop() {
   local host=""
   local session=""
-  local had_yubikey=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -374,14 +339,10 @@ chrome_stop() {
   }
 
   need tmux
-  if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qx yubikey; then
-    had_yubikey=1
-  fi
-
   tmux kill-session -t "$session"
   echo "Stopped tmux session $session."
 
-  if [ "$had_yubikey" = "1" ] && [ -n "$host" ]; then
+  if [ -n "$host" ]; then
     yk_prepare_for_launch "$host"
     yk_stop || true
   fi
@@ -426,7 +387,6 @@ chrome_status() {
   fi
 }
 
-yk_action=""
 yk_remote=""
 yk_usb_id="${REMOTE_CHROME_YUBIKEY_USB_ID:-1050:0407}"
 yk_usbip_port="${REMOTE_CHROME_USBIP_PORT:-3240}"
@@ -439,94 +399,8 @@ yk_active_busid=""
 yk_started_usbipd=0
 yk_usbipd_pid=""
 
-yk_usage() {
-  cat <<USAGE
-Usage:
-  $PROGRAM yubikey run HOST
-  $PROGRAM yubikey start HOST
-  $PROGRAM yubikey stop HOST
-  $PROGRAM yubikey status HOST
-
-The HOST may also appear before the action:
-  $PROGRAM yubikey HOST run
-USAGE
-}
-
-yk_set_action() {
-  [ -z "$yk_action" ] || die "Only one YubiKey action may be specified."
-  yk_action="$1"
-}
-
-yk_parse_args() {
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      run|start|stop|status)
-        yk_set_action "$1"
-        shift
-        ;;
-      --usb-id)
-        [ "$#" -ge 2 ] || die "$1 requires a USB id."
-        yk_usb_id="$2"
-        shift 2
-        ;;
-      --usb-id=*)
-        yk_usb_id="${1#*=}"
-        shift
-        ;;
-      --port)
-        [ "$#" -ge 2 ] || die "$1 requires a port."
-        yk_usbip_port="$2"
-        shift 2
-        ;;
-      --port=*)
-        yk_usbip_port="${1#*=}"
-        shift
-        ;;
-      --socket)
-        [ "$#" -ge 2 ] || die "$1 requires a path."
-        yk_control_socket="$2"
-        shift 2
-        ;;
-      --socket=*)
-        yk_control_socket="${1#*=}"
-        shift
-        ;;
-      --keep-usbipd)
-        yk_stop_usbipd=0
-        shift
-        ;;
-      -h|--help|help)
-        yk_usage
-        exit 0
-        ;;
-      -*)
-        die "Unknown YubiKey option: $1"
-        ;;
-      *)
-        [ -z "$yk_remote" ] || die "Unexpected argument: $1"
-        yk_remote="$1"
-        shift
-        ;;
-    esac
-  done
-
-  [ -n "$yk_action" ] || {
-    yk_usage >&2
-    exit 2
-  }
-
-  [ -n "$yk_remote" ] || die "Remote host is required. Example: $PROGRAM yubikey run HOST"
-
-  if [ -z "$yk_control_socket" ]; then
-    yk_control_socket="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-$(safe_name "$yk_remote").sock"
-  fi
-  yk_validate_settings
-  yk_set_runtime_paths
-}
-
 yk_prepare_for_launch() {
   yk_remote="$1"
-  yk_action="run"
   shift
 
   while [ "$#" -gt 0 ]; do
@@ -730,9 +604,10 @@ yk_ensure_remote_ready() {
 yk_preflight_for_tmux() {
   need usbip
   need ssh
-  sudo -v
+  sudo -v ||
+    die "YubiKey forwarding needs local sudo for usbip."
   yk_ssh "command -v usbip >/dev/null && sudo -n modprobe vhci-hcd" ||
-    die "YubiKey tmux launch needs noninteractive SSH to $yk_remote, remote usbip, and passwordless sudo for modprobe vhci-hcd."
+    die "YubiKey launch needs noninteractive SSH to $yk_remote, remote usbip, and passwordless sudo for modprobe vhci-hcd."
   yk_local_candidate_exists ||
     die "No local YubiKey found with USB id $yk_usb_id."
 }
@@ -877,7 +752,7 @@ yk_start() {
 
   if [ -e "$yk_state_file" ]; then
     echo "YubiKey forwarding already has managed state: $yk_state_file" >&2
-    echo "Run '$PROGRAM yubikey stop $yk_remote' before starting it again." >&2
+    echo "Stop the existing $PROGRAM session for $yk_remote before starting it again." >&2
     return 1
   fi
   if [ -S "$yk_control_socket" ]; then
@@ -939,45 +814,11 @@ yk_run() {
   done
 }
 
-yk_status() {
-  echo "Remote: $yk_remote"
-  echo "Local USB id: $yk_usb_id"
-
-  echo
-  echo "Local YubiKey candidates:"
-  yk_find_busids | sed 's/^/  busid /' || true
-  lsusb | grep -Ei 'Yubi|1050' || true
-
-  echo
-  echo "Local usbipd listener:"
-  ss -ltnp 2>/dev/null | grep ":${yk_usbip_port}\\b" || echo "  not listening"
-
-  echo
-  echo "SSH tunnel:"
-  if [ -S "$yk_control_socket" ] && ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
-    echo "  active: $yk_control_socket"
-  else
-    echo "  inactive: $yk_control_socket"
-  fi
-
-  echo
-  echo "Remote USB/IP ports:"
-  yk_ssh "usbip port 2>/dev/null || true"
-
-  echo
-  echo "Remote FIDO tokens:"
-  yk_ssh "fido2-token -L 2>/dev/null || lsusb | grep -Ei 'Yubi|1050' || true"
-}
-
-yubikey_main() {
-  yk_parse_args "$@"
-
-  case "$yk_action" in
-    run) yk_run ;;
-    start) yk_start ;;
-    stop) yk_stop ;;
-    status) yk_status ;;
-  esac
+_yubikey_run_main() {
+  local host="$1"
+  shift
+  yk_prepare_for_launch "$host" "$@"
+  yk_run
 }
 
 main() {
@@ -996,9 +837,9 @@ main() {
       shift
       chrome_status "$@"
       ;;
-    yubikey|yk)
+    _yubikey-run)
       shift
-      yubikey_main "$@"
+      _yubikey_run_main "$@"
       ;;
     -h|--help|help|"")
       usage

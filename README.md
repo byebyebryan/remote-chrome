@@ -128,13 +128,13 @@ be used. Chrome-only sessions do not require a YubiKey or the `usbip` tools.
 Start Chrome on the remote host in a detached tmux session:
 
 ```bash
-remote-chrome launch remote-host
+remote-chrome remote-host
 ```
 
-The host can also be the first argument:
+The explicit `launch` subcommand is equivalent:
 
 ```bash
-remote-chrome remote-host
+remote-chrome launch remote-host
 ```
 
 The default tmux session name is `remote-chrome-HOST`, with characters that are
@@ -182,64 +182,54 @@ host's normal desktop session instead of the Waypipe session.
 can still handle the request.
 
 By default, `remote-chrome launch` checks for an existing remote Chrome browser
-process and stops before launching if one is found. Use one of these options:
+process and asks before killing it. Confirm the prompt to kill it, or answer no
+to cancel the launch. Use these options to change that:
 
 ```bash
-remote-chrome launch remote-host --kill-existing
-remote-chrome launch remote-host --kill-existing --yes
 remote-chrome launch remote-host --allow-existing
+remote-chrome launch remote-host --yes
 ```
 
-Use `--kill-existing` only after saving anything important in the remote browser.
 Use `--allow-existing` only when you know the existing browser process uses a
-different `--user-data-dir`.
+different `--user-data-dir`. Use `--yes` to skip the prompt and always kill the
+existing browser, after saving anything important in it.
 
 ## Forward A YubiKey
 
-For an interactive WebAuthn prompt, foreground mode starts USB/IP
-forwarding and cleans up when you press Ctrl-C:
+YubiKey forwarding is opt-in and always runs as part of a Chrome launch. Start
+it with `--with-yubikey`; it opens a second tmux window named `yubikey` in the
+same session:
 
 ```bash
-remote-chrome yubikey run remote-host
+remote-chrome remote-host --with-yubikey
 ```
 
-Leave that terminal open while completing the browser prompt. Touch the physical
-YubiKey locally when Chrome asks for it.
-
-The explicit start/stop form is available when needed:
+For a foreground session, forwarding starts before Chrome and cleans up when
+Chrome exits:
 
 ```bash
-remote-chrome yubikey start remote-host
-remote-chrome yubikey status remote-host
-remote-chrome yubikey stop remote-host
+remote-chrome launch remote-host --foreground --with-yubikey
 ```
 
 While forwarding is active, the YubiKey is attached to the remote host, so local
-apps may not be able to use it.
+apps may not be able to use it. Forwarding is opt-in because the remote host
+gets access to the USB device.
+
+Closing the remote Chrome browser only exits the `chrome` tmux window. The
+`yubikey` window and forwarding keep running until you stop the whole session.
+Stopping the session is the explicit teardown for both:
+
+```bash
+remote-chrome stop HOST
+```
+
+That sends the forwarding process a signal, and it detaches/unbinds the YubiKey
+during cleanup.
 
 The tool records the exact local bus ID and any `usbipd` process it started in a
 state file beside the SSH control socket. Cleanup only detaches that recorded
 device. A pre-existing system `usbipd` is never stopped, and a tool-started
 daemon remains running while other USB/IP exports still exist.
-
-You can also start YubiKey forwarding with the Chrome tmux session:
-
-```bash
-remote-chrome launch remote-host --with-yubikey
-```
-
-This creates a second tmux window named `yubikey` in the same session. Stopping
-the tmux session sends the forwarding process a signal, and it detaches/unbinds
-the YubiKey during cleanup.
-
-If you prefer an explicit prompt when a local YubiKey is detected:
-
-```bash
-remote-chrome launch remote-host --ask-yubikey
-```
-
-The tool does not auto-forward a detected YubiKey by default. Forwarding gives
-the remote host access to the USB device, so it stays opt-in.
 
 ## Configuration
 
@@ -259,8 +249,8 @@ REMOTE_CHROME_YUBIKEY_SOCKET=${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-remo
 REMOTE_CHROME_STOP_USBIPD=1
 ```
 
-Set `REMOTE_CHROME_STOP_USBIPD=0`, or pass `--keep-usbipd` to a `yubikey`
-command, to leave a tool-started daemon running after cleanup.
+Set `REMOTE_CHROME_STOP_USBIPD=0` to leave a tool-started daemon running after
+cleanup.
 
 If `modprobe usbip-host` fails locally after a kernel upgrade, reboot so the
 running kernel matches `/lib/modules`.
@@ -273,8 +263,8 @@ hosts you trust.
 The script uses an SSH reverse tunnel bound to `127.0.0.1` on the remote side.
 The local `usbipd` daemon may still listen on the local host's network
 interfaces while forwarding is active, depending on your distro's `usbipd`
-behavior. Run `remote-chrome yubikey stop HOST` after use, or use
-`remote-chrome yubikey run HOST` and stop it with Ctrl-C.
+behavior. `remote-chrome stop HOST` tears the forwarding down together with the
+Chrome session.
 
 ## Development
 
