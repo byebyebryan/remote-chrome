@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 usage() {
   cat <<USAGE
@@ -16,7 +16,8 @@ Chrome options:
       --session NAME       tmux session name
       --foreground         run Chrome remoting in the foreground
       --chrome-command CMD remote Chrome command, default: google-chrome-stable
-      --with-yubikey       forward a local YubiKey in a second tmux window
+      --with-yubikey       require forwarding a local YubiKey
+      --no-yubikey         skip YubiKey detection and forwarding
       --yubikey-usb-id ID  local USB id, default: 1050:0407
       --yubikey-port PORT  USB/IP TCP port, default: 3240
       --allow-existing     launch even if remote Chrome is already running
@@ -32,6 +33,9 @@ Environment:
   REMOTE_CHROME_USBIP_PORT
   REMOTE_CHROME_YUBIKEY_SOCKET
   REMOTE_CHROME_STOP_USBIPD
+  REMOTE_CHROME_YUBIKEY_TIMEOUT
+  REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT
+  REMOTE_CHROME_YUBIKEY_READY_GRACE
 USAGE
 }
 
@@ -72,7 +76,7 @@ chrome_launch() {
   local host=""
   local session=""
   local foreground=0
-  local with_yubikey=0
+  local yubikey_mode="auto"
   local allow_existing=0
   local assume_yes=0
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
@@ -104,7 +108,11 @@ chrome_launch() {
         shift
         ;;
       --with-yubikey)
-        with_yubikey=1
+        yubikey_mode="force"
+        shift
+        ;;
+      --no-yubikey)
+        yubikey_mode="off"
         shift
         ;;
       --yubikey-usb-id)
@@ -160,47 +168,78 @@ chrome_launch() {
   need ssh
   need waypipe
   chrome_preflight "$host" "$chrome_command" "$foreground"
+
+  local forwarding_expected=0
+  if [ "$yubikey_mode" != "off" ]; then
+    yk_prepare_for_launch "$host" "${yubikey_args[@]}"
+    case "$yubikey_mode" in
+      force)
+        forwarding_expected=1
+        echo "YubiKey forwarding was requested for $host."
+        ;;
+      auto)
+        if yk_local_candidate_exists; then
+          forwarding_expected=1
+          echo "Detected local YubiKey $yk_usb_id; forwarding is expected."
+        else
+          echo "No local YubiKey with USB id $yk_usb_id detected; continuing without forwarding."
+        fi
+        ;;
+    esac
+  else
+    echo "YubiKey forwarding disabled by --no-yubikey."
+  fi
+
+  # Check launch ownership before inspecting or mutating remote Chrome.  A
+  # previous tmux session or managed/provisional YubiKey state means this
+  # launch is a duplicate and must abort without touching the browser.
+  if [ "$foreground" != "1" ]; then
+    need tmux
+    if tmux has-session -t "$session" 2>/dev/null; then
+      die "tmux session already exists: $session"
+    fi
+  fi
+  if [ "$forwarding_expected" = "1" ] &&
+    { [ -e "$yk_state_file" ] || [ -e "$yk_attempt_lock" ]; }; then
+    die "YubiKey forwarding already has an active or provisional attempt for $yk_remote; stop it before launching again."
+  fi
+
+  # Complete forwarding preflight before checking/killing an existing remote
+  # Chrome, so a local or remote module failure cannot disturb browser state.
+  if [ "$forwarding_expected" = "1" ]; then
+    yk_preflight_for_forwarding 1
+  fi
   chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
 
   local command=(waypipe --no-gpu ssh "$host" "$chrome_command" "${chrome_args[@]}")
 
   if [ "$foreground" = "1" ]; then
-    if [ "$with_yubikey" = "1" ]; then
-      yk_prepare_for_launch "$host" "${yubikey_args[@]}"
+    if [ "$forwarding_expected" = "1" ]; then
+      # Install cleanup traps before setup so Ctrl-C during module loading,
+      # tunnel creation, attach, or readiness polling cannot leak resources.
+      trap 'yk_cleanup; exit 130' INT
+      trap 'yk_cleanup; exit 143' TERM
+      trap 'yk_cleanup; exit 129' HUP
+      trap 'yk_cleanup' EXIT
       yk_start
-      trap 'yk_stop; exit 130' INT
-      trap 'yk_stop; exit 143' TERM
-      trap 'yk_stop' EXIT
       "${command[@]}"
       local code=$?
       yk_stop
-      trap - EXIT INT TERM
+      trap - EXIT INT TERM HUP
       return "$code"
     fi
     exec "${command[@]}"
   fi
 
-  need tmux
-  if [ "$with_yubikey" = "1" ]; then
-    yk_prepare_for_launch "$host" "${yubikey_args[@]}"
-    yk_preflight_for_tmux
-  fi
-
-  if tmux has-session -t "$session" 2>/dev/null; then
-    die "tmux session already exists: $session"
-  fi
-
-  tmux new-session -d -s "$session" -n chrome "$(quote_command "${command[@]}")"
-  if [ "$with_yubikey" = "1" ]; then
-    local self
-    self="$(script_path)"
-    local yk_command=("$self" _yubikey-run "$host" "${yubikey_args[@]}")
-    tmux new-window -d -t "$session" -n yubikey "$(quote_command "${yk_command[@]}")"
+  if [ "$forwarding_expected" = "1" ]; then
+    chrome_launch_detached_with_yubikey "$host" "$session" "$(quote_command "${command[@]}")" "${yubikey_args[@]}"
+  else
+    tmux new-session -d -s "$session" -n chrome "$(quote_command "${command[@]}")"
   fi
 
   echo "Started remote Chrome on $host in tmux session $session."
-  if [ "$with_yubikey" = "1" ]; then
-    echo "YubiKey forwarding is running in tmux window ${session}:yubikey."
+  if [ "$forwarding_expected" = "1" ]; then
+    echo "YubiKey forwarding is ready in tmux window ${session}:yubikey."
   fi
 }
 
@@ -343,12 +382,16 @@ chrome_stop() {
   }
 
   need tmux
-  tmux kill-session -t "$session"
-  echo "Stopped tmux session $session."
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    echo "Stopped tmux session $session."
+  else
+    echo "tmux session not found: $session" >&2
+  fi
 
   if [ -n "$host" ]; then
     yk_prepare_for_launch "$host"
-    yk_stop || true
+    yk_stop || echo "YubiKey cleanup reported an error; inspect $yk_state_file." >&2
   fi
 }
 
@@ -386,8 +429,28 @@ chrome_status() {
   need tmux
   if tmux has-session -t "$session" 2>/dev/null; then
     echo "running: $session"
+    tmux list-windows -t "$session" -F 'window: #{window_name} (#{window_index})' 2>/dev/null || true
   else
     echo "not running: $session"
+  fi
+
+  if [ -n "$host" ]; then
+    yk_prepare_for_launch "$host"
+    local state_code=0
+    yk_load_state || state_code=$?
+    case "$state_code" in
+      0)
+        printf 'yubikey: phase=%s readiness=%s' "${yk_phase:-unknown}" "${yk_readiness:-unknown}"
+        [ -n "$yk_active_busid" ] && printf ' busid=%s' "$yk_active_busid"
+        printf '\n'
+        ;;
+      1)
+        echo "yubikey: no managed state"
+        ;;
+      *)
+        echo "yubikey: invalid managed state ($yk_state_file)" >&2
+        ;;
+    esac
   fi
 }
 
@@ -396,10 +459,21 @@ yk_usb_id="${REMOTE_CHROME_YUBIKEY_USB_ID:-1050:0407}"
 yk_usbip_port="${REMOTE_CHROME_USBIP_PORT:-3240}"
 yk_control_socket="${REMOTE_CHROME_YUBIKEY_SOCKET:-}"
 yk_stop_usbipd="${REMOTE_CHROME_STOP_USBIPD:-1}"
+yk_usbip_host_sysfs="${REMOTE_CHROME_USBIP_HOST_SYSFS:-/sys/bus/usb/drivers/usbip-host}"
 yk_cleanup_done=0
 yk_state_file=""
 yk_usbipd_pid_file=""
+yk_log_file=""
+yk_attempt_lock=""
+yk_attempt_owned=0
+yk_attempt_token="${REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN:-}"
+yk_phase="idle"
+yk_readiness="none"
+yk_tunnel_open=0
 yk_active_busid=""
+yk_bind_state="none"
+yk_bound_before=0
+yk_attach_state="none"
 yk_started_usbipd=0
 yk_usbipd_pid=""
 
@@ -441,6 +515,9 @@ yk_prepare_for_launch() {
 }
 
 yk_validate_settings() {
+  if [[ ! "$yk_usb_id" =~ ^[[:xdigit:]]{1,4}:[[:xdigit:]]{1,4}$ ]]; then
+    die "YubiKey USB id must be hexadecimal vendor:product (for example 1050:0407)."
+  fi
   if [[ ! "$yk_usbip_port" =~ ^[0-9]+$ ]] ||
     [ "$((10#$yk_usbip_port))" -lt 1 ] ||
     [ "$((10#$yk_usbip_port))" -gt 65535 ]; then
@@ -451,24 +528,81 @@ yk_validate_settings() {
 
 yk_set_runtime_paths() {
   yk_state_file="${yk_control_socket}.state"
+  yk_log_file="${yk_state_file}.log"
+  yk_attempt_lock="${yk_state_file}.lock"
   yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-$(safe_name "$yk_usbip_port").pid"
 }
 
 yk_reset_runtime_state() {
+  yk_phase="idle"
+  yk_readiness="none"
+  yk_tunnel_open=0
   yk_active_busid=""
+  yk_bind_state="none"
+  yk_bound_before=0
+  yk_attach_state="none"
   yk_started_usbipd=0
   yk_usbipd_pid=""
+}
+
+yk_release_attempt() {
+  if [ -n "$yk_attempt_lock" ] && [ -d "$yk_attempt_lock" ]; then
+    rmdir -- "$yk_attempt_lock" >/dev/null 2>&1 || true
+  fi
+  yk_attempt_owned=0
+}
+
+yk_release_orphan_attempt() {
+  # A lock is created before the first state write, so a lock with no state
+  # cannot own any USB/IP resources yet.  Only remove the exact empty lock
+  # directory; a non-empty or otherwise unusual path is left untouched.
+  [ -n "$yk_attempt_lock" ] || return 0
+  [ -e "$yk_state_file" ] && return 0
+  [ -d "$yk_attempt_lock" ] || return 0
+  rmdir -- "$yk_attempt_lock"
+}
+
+yk_acquire_attempt() {
+  if [ -e "$yk_state_file" ]; then
+    echo "YubiKey forwarding already has managed state: $yk_state_file" >&2
+    echo "Stop the existing $PROGRAM session for $yk_remote before starting it again." >&2
+    return 1
+  fi
+  if ! mkdir -- "$yk_attempt_lock" 2>/dev/null; then
+    echo "YubiKey forwarding setup is already being started (lock: $yk_attempt_lock)." >&2
+    echo "Wait for that attempt or use stop $yk_remote to clean its managed state." >&2
+    return 1
+  fi
+  yk_attempt_owned=1
+  if [ -z "$yk_attempt_token" ]; then
+    yk_attempt_token="${BASHPID:-$$}.${RANDOM}.${SECONDS}"
+  fi
+  return 0
 }
 
 yk_write_state() {
   local state_tmp="${yk_state_file}.tmp.$$"
   local old_umask
+
+  if [ "$yk_attempt_owned" = "1" ] &&
+    { [ -z "$yk_attempt_lock" ] || [ ! -d "$yk_attempt_lock" ]; }; then
+    echo "YubiKey attempt lock disappeared before state could be persisted: $yk_attempt_lock" >&2
+    return 1
+  fi
+
   old_umask="$(umask)"
   umask 077
 
   if ! {
     printf 'remote\t%s\n' "$yk_remote"
+    printf 'attempt_token\t%s\n' "$yk_attempt_token"
+    printf 'phase\t%s\n' "$yk_phase"
+    printf 'readiness\t%s\n' "$yk_readiness"
     printf 'busid\t%s\n' "$yk_active_busid"
+    printf 'bind_state\t%s\n' "$yk_bind_state"
+    printf 'bound_before\t%s\n' "$yk_bound_before"
+    printf 'attach_state\t%s\n' "$yk_attach_state"
+    printf 'tunnel_open\t%s\n' "$yk_tunnel_open"
     printf 'started_usbipd\t%s\n' "$yk_started_usbipd"
     printf 'usbipd_pid\t%s\n' "$yk_usbipd_pid"
   } >"$state_tmp"; then
@@ -491,12 +625,20 @@ yk_load_state() {
   local key
   local value
   local state_remote=""
+  local modern_state=0
   yk_reset_runtime_state
 
   while IFS=$'\t' read -r key value; do
     case "$key" in
       remote) state_remote="$value" ;;
+      attempt_token) modern_state=1; yk_attempt_token="$value" ;;
+      phase) modern_state=1; yk_phase="$value" ;;
+      readiness) modern_state=1; yk_readiness="$value" ;;
       busid) yk_active_busid="$value" ;;
+      bind_state) modern_state=1; yk_bind_state="$value" ;;
+      bound_before) modern_state=1; yk_bound_before="$value" ;;
+      attach_state) modern_state=1; yk_attach_state="$value" ;;
+      tunnel_open) modern_state=1; yk_tunnel_open="$value" ;;
       started_usbipd) yk_started_usbipd="$value" ;;
       usbipd_pid) yk_usbipd_pid="$value" ;;
     esac
@@ -506,9 +648,48 @@ yk_load_state() {
     echo "YubiKey state belongs to $state_remote, not $yk_remote: $yk_state_file" >&2
     return 2
   fi
-  if [ -z "$yk_active_busid" ]; then
-    echo "YubiKey state is missing its USB bus id: $yk_state_file" >&2
-    return 2
+  if [ "$modern_state" = "0" ]; then
+    yk_readiness="unknown"
+    if [ -n "$yk_active_busid" ]; then
+      yk_phase="legacy-active"
+    else
+      yk_phase="legacy-provisional"
+    fi
+  fi
+  [ -n "$yk_phase" ] || yk_phase="unknown"
+  [ -n "$yk_readiness" ] || yk_readiness="unknown"
+  case "$yk_tunnel_open" in
+    0|1) ;;
+    *)
+      echo "YubiKey state has an invalid tunnel ownership flag: $yk_state_file" >&2
+      return 2
+      ;;
+  esac
+  case "$yk_bound_before" in
+    0|1) ;;
+    *)
+      echo "YubiKey state has an invalid prior-bind flag: $yk_state_file" >&2
+      return 2
+      ;;
+  esac
+  case "$yk_attach_state" in
+    none|attempting|attached) ;;
+    *)
+      echo "YubiKey state has an invalid remote-attach phase: $yk_state_file" >&2
+      return 2
+      ;;
+  esac
+  if [ "$yk_bind_state" = "none" ] && [ -n "$yk_active_busid" ]; then
+    # State written by v1.0.0 had no bind phase; a recorded bus ID represented
+    # a successful bind and is safe to clean up exactly.
+    yk_bind_state="bound"
+  fi
+  if [ -z "$yk_attach_state" ] || {
+    [ -n "$yk_active_busid" ] &&
+      { [ "$yk_phase" = "idle" ] || [ "$yk_phase" = "attached" ] ||
+        [ "$yk_phase" = "ready" ] || [ "$yk_phase" = "legacy-active" ]; };
+  }; then
+    yk_attach_state="attached"
   fi
   case "$yk_started_usbipd" in
     0|1) ;;
@@ -521,24 +702,54 @@ yk_load_state() {
     echo "YubiKey state has an invalid usbipd pid: $yk_state_file" >&2
     return 2
   fi
-  if [ "$yk_started_usbipd" = "1" ] && [ -z "$yk_usbipd_pid" ]; then
+  if [ "$yk_started_usbipd" = "1" ] && [ -z "$yk_usbipd_pid" ] &&
+    [ "$yk_phase" != "usbipd-starting" ] &&
+    [ "$yk_phase" != "usbipd-started" ] && [ "$yk_phase" != "starting" ]; then
     echo "YubiKey state is missing the owned usbipd pid: $yk_state_file" >&2
     return 2
   fi
 }
 
 yk_ssh() {
-  ssh -o BatchMode=yes "$yk_remote" "$@"
+  ssh -o BatchMode=yes -o ConnectTimeout="${REMOTE_CHROME_SSH_TIMEOUT:-5}" \
+    -o ConnectionAttempts=1 "$yk_remote" "$@"
+}
+
+yk_sysfs_busids() {
+  local candidate vendor product
+  local wanted_vendor="${yk_usb_id%%:*}"
+  local wanted_product="${yk_usb_id#*:}"
+  wanted_vendor="${wanted_vendor,,}"
+  wanted_product="${wanted_product,,}"
+
+  for candidate in /sys/bus/usb/devices/*; do
+    [ -d "$candidate" ] || continue
+    [ -r "$candidate/idVendor" ] || continue
+    [ -r "$candidate/idProduct" ] || continue
+    vendor="$(tr -d '[:space:]' <"$candidate/idVendor" 2>/dev/null || true)"
+    product="$(tr -d '[:space:]' <"$candidate/idProduct" 2>/dev/null || true)"
+    if [ "${vendor,,}" = "$wanted_vendor" ] && [ "${product,,}" = "$wanted_product" ]; then
+      basename -- "$candidate"
+    fi
+  done
 }
 
 yk_find_busids() {
+  local sysfs_busids
+  sysfs_busids="$(yk_sysfs_busids)"
+  if [ -n "$sysfs_busids" ]; then
+    printf '%s\n' "$sysfs_busids"
+    return 0
+  fi
+
+  command -v usbip >/dev/null 2>&1 || return 0
   usbip list -l |
-    awk -v wanted="$yk_usb_id" '
+    awk -v wanted="${yk_usb_id,,}" '
       /^ - busid / {
         busid = $3
         id = $4
         gsub(/[()]/, "", id)
-        if (id == wanted) {
+        if (tolower(id) == wanted) {
           print busid
         }
       }
@@ -558,35 +769,135 @@ yk_owned_usbipd_running() {
   [[ "$command_line" == *"--pid=$yk_usbipd_pid_file"* ]]
 }
 
+yk_wait_local_usbipd() {
+  local timeout="${REMOTE_CHROME_USBIP_TIMEOUT:-5}"
+  local attempt
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5
+  [ "$timeout" -gt 0 ] || timeout=1
+  timeout="$((10#$timeout))"
+  for ((attempt = 0; attempt < timeout; attempt++)); do
+    if ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "usbipd did not listen on local TCP port $yk_usbip_port within ${timeout}s." >&2
+  return 1
+}
+
+yk_print_local_module_diagnostic() {
+  local kernel="$(uname -r 2>/dev/null || echo unknown)"
+  local modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
+  local dirs=""
+  if [ -d "$modules_root" ]; then
+    dirs="$(find "$modules_root" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null || true)"
+  fi
+  echo "Local USB/IP module diagnostics:" >&2
+  echo "  running kernel: $kernel" >&2
+  echo "  available $modules_root directories: ${dirs:-none}" >&2
+  echo "  required module: usbip-host" >&2
+  echo "  If the kernel was upgraded recently, reboot so the running kernel matches /lib/modules, then retry." >&2
+}
+
+yk_local_module_preflight() {
+  local kernel="$(uname -r)"
+  local module_path=""
+  local modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
+  local module_tree="$modules_root/$kernel"
+
+  if [ ! -d "$module_tree" ]; then
+    yk_print_local_module_diagnostic
+    return 1
+  fi
+
+  if command -v modinfo >/dev/null 2>&1; then
+    if ! module_path="$(modinfo -n usbip-host 2>&1)"; then
+      printf '%s\n' "$module_path" >&2
+      yk_print_local_module_diagnostic
+      return 1
+    fi
+  else
+    module_path="$(find "$module_tree" -type f \( -name 'usbip-host.ko' -o -name 'usbip-host.ko.*' \) -print -quit 2>/dev/null || true)"
+  fi
+
+  if [ -z "$module_path" ] || [ ! -e "$module_path" ] || [[ "$module_path" != "$module_tree"/* ]]; then
+    [ -n "$module_path" ] && printf 'Local modinfo usbip-host result: %s\n' "$module_path" >&2
+    yk_print_local_module_diagnostic
+    return 1
+  fi
+  return 0
+}
+
+yk_remote_module_preflight() {
+  local remote_script
+  remote_script='set -u
+kernel=$(uname -r 2>&1) || exit $?
+printf "Remote USB/IP diagnostics (kernel): %s\\n" "$kernel" >&2
+dirs=$(find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf "%f " 2>/dev/null || true)
+printf "Remote available /lib/modules directories: %s\\n" "${dirs:-none}" >&2
+command -v usbip >/dev/null 2>&1 || { echo "Remote prerequisite missing: usbip" >&2; exit 127; }
+command -v timeout >/dev/null 2>&1 || { echo "Remote prerequisite missing: timeout" >&2; exit 127; }
+tree="/lib/modules/$kernel"
+if [ ! -d "$tree" ]; then
+  echo "Remote module tree is missing for running kernel $kernel." >&2
+  echo "If the kernel was upgraded recently, reboot the remote host so it matches /lib/modules." >&2
+  exit 1
+fi
+module_path=""
+if command -v modinfo >/dev/null 2>&1; then
+  module_path=$(modinfo -n vhci-hcd 2>&1) || { printf "%s\\n" "$module_path" >&2; exit 1; }
+else
+  module_path=$(find "$tree" -type f \( -name "vhci-hcd.ko" -o -name "vhci-hcd.ko.*" \) -print -quit 2>/dev/null || true)
+fi
+if [ -z "$module_path" ] || [ ! -e "$module_path" ] || [ "${module_path#"$tree"/}" = "$module_path" ]; then
+  [ -n "$module_path" ] && printf "Remote modinfo vhci-hcd result: %s\\n" "$module_path" >&2
+  echo "Remote vhci-hcd module is not available for running kernel $kernel." >&2
+  echo "If the kernel was upgraded recently, reboot the remote host so it matches /lib/modules." >&2
+  exit 1
+fi
+sudo -n modprobe vhci-hcd'
+
+  yk_ssh "$remote_script"
+}
+
 yk_ensure_local_ready() {
   need ssh
   need usbip
   need ss
+  need timeout
 
   sudo -v || return $?
 
+  yk_local_module_preflight || return $?
+
   if ! sudo modprobe usbip-host; then
-    cat >&2 <<EOF
-Could not load usbip-host for running kernel $(uname -r).
-If the kernel was upgraded recently, reboot so /lib/modules matches the
-running kernel, then retry.
-EOF
+    echo "Could not load local usbip-host for running kernel $(uname -r)." >&2
+    yk_print_local_module_diagnostic
     return 1
   fi
 
   if ! ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
     sudo rm -f "$yk_usbipd_pid_file" || return $?
+    yk_started_usbipd=1
+    yk_phase="usbipd-starting"
+    # Record ownership before invoking the daemon so a signal during startup
+    # still gives rollback a pid-file path to inspect.
+    yk_write_state || return $?
     if ! sudo usbipd --daemon --pid="$yk_usbipd_pid_file" \
       --tcp-port "$yk_usbip_port" >/dev/null 2>&1; then
       echo "Could not start usbipd on local port $yk_usbip_port." >&2
       return 1
     fi
-    yk_started_usbipd=1
     yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
     if [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
       echo "usbipd started without recording a valid pid in $yk_usbipd_pid_file." >&2
       return 1
     fi
+    yk_phase="usbipd-started"
+    # Persist the validated daemon PID before subsequent visibility/attach
+    # work so an interruption can still stop this daemon through `stop HOST`.
+    yk_write_state || return $?
+    yk_wait_local_usbipd || return $?
   elif [ -f "$yk_usbipd_pid_file" ]; then
     yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
     if yk_owned_usbipd_running "$yk_usbipd_pid"; then
@@ -599,25 +910,36 @@ EOF
 }
 
 yk_ensure_remote_ready() {
-  if ! yk_ssh "command -v usbip >/dev/null && sudo -n modprobe vhci-hcd"; then
-    echo "YubiKey forwarding needs noninteractive SSH to $yk_remote, remote usbip, and passwordless remote sudo for modprobe vhci-hcd." >&2
+  if ! yk_remote_module_preflight; then
+    echo "Remote YubiKey preflight failed for $yk_remote (kernel/module/sudo/usbip check)." >&2
     return 1
   fi
 }
 
 yk_preflight_for_tmux() {
-  need usbip
+  yk_preflight_for_forwarding 1
+}
+
+yk_preflight_for_forwarding() {
   need ssh
-  sudo -v ||
-    die "YubiKey forwarding needs local sudo for usbip."
-  yk_ssh "command -v usbip >/dev/null && sudo -n modprobe vhci-hcd" ||
-    die "YubiKey launch needs noninteractive SSH to $yk_remote, remote usbip, and passwordless sudo for modprobe vhci-hcd."
+  need usbip
+  need ss
+  need timeout
+  # Local sudo may authenticate interactively before a detached session is
+  # created; only remote sudo is required to be noninteractive.
+  sudo -v || die "YubiKey forwarding needs local sudo for usbip."
+  yk_local_module_preflight || die "Local YubiKey USB/IP preflight failed."
+  if ! sudo modprobe usbip-host; then
+    echo "Local sudo could not load usbip-host for running kernel $(uname -r)." >&2
+    yk_print_local_module_diagnostic
+    die "Local YubiKey USB/IP preflight failed."
+  fi
+  yk_remote_module_preflight || die "Remote YubiKey USB/IP preflight failed for $yk_remote."
   yk_local_candidate_exists ||
     die "No local YubiKey found with USB id $yk_usb_id."
 }
 
 yk_local_candidate_exists() {
-  need usbip
   [ -n "$(yk_first_busid)" ]
 }
 
@@ -628,22 +950,41 @@ yk_close_tunnel() {
       unlink "$yk_control_socket" || true
     fi
   fi
+  yk_tunnel_open=0
 }
 
 yk_open_tunnel() {
   if [ -S "$yk_control_socket" ]; then
     if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+      yk_tunnel_open=1
       return
     fi
-    unlink "$yk_control_socket"
+    unlink "$yk_control_socket" || true
   fi
 
   ssh -M -S "$yk_control_socket" -fN \
     -o ExitOnForwardFailure=yes \
+    -o ConnectTimeout="${REMOTE_CHROME_SSH_TIMEOUT:-5}" \
+    -o ConnectionAttempts=1 \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=2 \
     -R "127.0.0.1:${yk_usbip_port}:127.0.0.1:${yk_usbip_port}" \
-    "$yk_remote"
+    "$yk_remote" || return $?
+
+  local timeout="${REMOTE_CHROME_TUNNEL_TIMEOUT:-5}"
+  local attempt
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5
+  [ "$timeout" -gt 0 ] || timeout=1
+  timeout="$((10#$timeout))"
+  for ((attempt = 0; attempt < timeout; attempt++)); do
+    if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+      yk_tunnel_open=1
+      return 0
+    fi
+    sleep 1
+  done
+  echo "SSH USB/IP tunnel did not become ready within ${timeout}s for $yk_remote." >&2
+  return 1
 }
 
 yk_remote_detach_busid() {
@@ -651,13 +992,20 @@ yk_remote_detach_busid() {
   yk_ssh 'bash -s' -- "$busid" <<'REMOTE_SCRIPT'
 busid="$1"
 
-usbip port 2>/dev/null |
+if ! port_output="$(timeout 5 sudo -n usbip port 2>&1)"; then
+  echo "Could not inspect remote USB/IP ports while detaching busid $busid:" >&2
+  printf '%s\n' "$port_output" >&2
+  exit 1
+fi
+
+ports="$(printf '%s\n' "$port_output" |
   awk -v wanted="$busid" '
     /^Port [0-9]+:/ {
       port = $2
       sub(":", "", port)
     }
     {
+      following = ""
       marker = "/" wanted
       position = index($0, marker)
       if (position > 0) {
@@ -667,23 +1015,39 @@ usbip port 2>/dev/null |
         print port
       }
     }
-  ' |
-  while read -r port; do
-    sudo -n usbip detach -p "$port" >/dev/null 2>&1 || true
-  done
+  ')"
+
+detach_failed=0
+while IFS= read -r port; do
+  [ -n "$port" ] || continue
+  if ! timeout 5 sudo -n usbip detach -p "$port" >/dev/null; then
+    echo "Could not detach remote USB/IP port $port for busid $busid." >&2
+    detach_failed=1
+  fi
+done <<<"$ports"
+exit "$detach_failed"
 REMOTE_SCRIPT
 }
 
 yk_other_exports_exist() {
-  local candidate
-  for candidate in /sys/bus/usb/drivers/usbip-host/*; do
-    [ -L "$candidate" ] && return 0
+  local candidate name
+  for candidate in "$yk_usbip_host_sysfs"/*; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    name="${candidate##*/}"
+    # usbip-host/module is a permanent driver symlink, not an export.
+    [ "$name" = "module" ] && continue
+    [[ "$name" =~ ^[0-9]+-[0-9] ]] || continue
+    return 0
   done
   return 1
 }
 
 yk_stop_owned_usbipd() {
   [ "$yk_started_usbipd" = "1" ] || return 0
+
+  if [ -z "$yk_usbipd_pid" ] && [ -f "$yk_usbipd_pid_file" ]; then
+    yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+  fi
 
   if [ "$yk_stop_usbipd" != "1" ]; then
     echo "Leaving tool-started usbipd pid $yk_usbipd_pid running by request."
@@ -701,23 +1065,283 @@ yk_stop_owned_usbipd() {
   sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1 || true
 }
 
+yk_remote_probe_readiness() {
+  local vendor="${yk_usb_id%%:*}"
+  local product="${yk_usb_id#*:}"
+  local remote_script
+
+  remote_script=$(cat <<'REMOTE_READINESS'
+set +e
+wanted_vendor='__VENDOR__'
+wanted_product='__PRODUCT__'
+hidraw_root="${REMOTE_CHROME_HIDRAW_ROOT:-/sys/class/hidraw}"
+normalize_id() {
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  value="${value#0x}"
+  while [ "$value" != "0" ] && [ "${value#0}" != "$value" ]; do value="${value#0}"; done
+  printf '%s' "$value"
+}
+property() {
+  key="$1"
+  printf '%s\n' "$properties" | awk -F= -v key="$key" '$1 == key {print tolower($2); exit}'
+}
+target_hidraw() {
+  device="$1"
+  require_fido="$2"
+  properties="$(udevadm info --query=property --name="$device" 2>/dev/null || udevadm info --query=property --path="$device" 2>/dev/null)"
+  [ -n "$properties" ] || return 1
+  vendor_id="$(normalize_id "$(property ID_VENDOR_ID)")"
+  product_id="$(normalize_id "$(property ID_MODEL_ID)")"
+  [ "$vendor_id" = "$(normalize_id "$wanted_vendor")" ] || return 1
+  [ "$product_id" = "$(normalize_id "$wanted_product")" ] || return 1
+  if [ "$require_fido" = 1 ]; then
+    printf '%s\n' "$properties" | grep -Eiq '(^|[[:space:]])(ID_INPUT_FIDO|ID_FIDO_TOKEN|ID_SECURITY_TOKEN)=1($|[[:space:]])|ID_MODEL(_FROM_DATABASE)?=.*(fido|security)' || return 1
+  fi
+  return 0
+}
+if command -v udevadm >/dev/null 2>&1 && command -v fido2-token >/dev/null 2>&1; then
+  fido_output="$(timeout 3 fido2-token -L 2>/dev/null)"
+  for device in $(printf '%s\n' "$fido_output" | awk -F: '/^\/dev\/hidraw/ {print $1}'); do
+    case "$device" in
+      /dev/hidraw*) target_hidraw "$device" 1 && { echo verified-fido; exit 0; } ;;
+    esac
+  done
+fi
+if command -v udevadm >/dev/null 2>&1; then
+  for hidraw in "$hidraw_root"/hidraw*; do
+    [ -e "$hidraw" ] || continue
+    device="/dev/${hidraw##*/}"
+    target_hidraw "$device" 1 && { echo usb-only; exit 0; }
+  done
+fi
+echo not-ready
+exit 1
+REMOTE_READINESS
+)
+  local normalized_vendor="${vendor,,}"
+  local normalized_product="${product,,}"
+  remote_script="${remote_script//__VENDOR__/$normalized_vendor}"
+  remote_script="${remote_script//__PRODUCT__/$normalized_product}"
+
+  local output
+  if output="$(yk_ssh "$remote_script" 2>&1)"; then
+    case "$output" in
+      *verified-fido*)
+        yk_readiness="verified-fido"
+        return 0
+        ;;
+      *usb-only*)
+        yk_readiness="usb-only"
+        return 0
+        ;;
+    esac
+  fi
+  yk_readiness="${output:-not-ready}"
+  return 1
+}
+
+yk_wait_remote_ready() {
+  local timeout="${REMOTE_CHROME_YUBIKEY_TIMEOUT:-15}"
+  local interval="${REMOTE_CHROME_YUBIKEY_POLL_INTERVAL:-1}"
+  local started elapsed remaining
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=15
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=1
+  [ "$timeout" -gt 0 ] || timeout=1
+  timeout="$((10#$timeout))"
+  interval="$((10#$interval))"
+
+  started="$SECONDS"
+  while [ $((SECONDS - started)) -lt "$timeout" ]; do
+    if yk_remote_probe_readiness; then
+      return 0
+    fi
+    elapsed=$((SECONDS - started))
+    remaining=$((timeout - elapsed))
+    [ "$remaining" -gt 0 ] || break
+    [ "$interval" -gt "$remaining" ] && interval="$remaining"
+    sleep "$interval"
+  done
+
+  echo "Remote YubiKey did not enumerate as a FIDO/hidraw device within ${timeout}s." >&2
+  echo "Last remote readiness result: ${yk_readiness:-not-ready}" >&2
+  echo "Inspect the ${yk_remote} yubikey pane and verify fido2-token/udev visibility." >&2
+  return 1
+}
+
+chrome_detached_session=""
+chrome_detached_cleanup_done=0
+chrome_detached_yk_owned=0
+chrome_detached_yk_token=""
+
+chrome_detached_cleanup() {
+  [ "$chrome_detached_cleanup_done" = "0" ] || return 0
+  chrome_detached_cleanup_done=1
+  if [ -n "$chrome_detached_session" ]; then
+    tmux kill-session -t "$chrome_detached_session" >/dev/null 2>&1 || true
+  fi
+  if [ "$chrome_detached_yk_owned" = "1" ]; then
+    yk_stop >/dev/null 2>&1 || true
+  fi
+}
+
+chrome_wait_for_yubikey_window() {
+  local host="$1"
+  local session="$2"
+  local timeout="${REMOTE_CHROME_YUBIKEY_TIMEOUT:-15}"
+  local bootstrap_timeout="${REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT:-30}"
+  local readiness_grace="${REMOTE_CHROME_YUBIKEY_READY_GRACE:-5}"
+  local phase readiness pane_state
+  local bootstrap_started="$SECONDS"
+  local readiness_started=""
+  local pane_output log_output
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=15
+  [ "$timeout" -gt 0 ] || timeout=1
+  [[ "$bootstrap_timeout" =~ ^[0-9]+$ ]] || bootstrap_timeout=30
+  [ "$bootstrap_timeout" -gt 0 ] || bootstrap_timeout=1
+  [[ "$readiness_grace" =~ ^[0-9]+$ ]] || readiness_grace=5
+  [ "$readiness_grace" -gt 0 ] || readiness_grace=1
+  timeout="$((10#$timeout))"
+  bootstrap_timeout="$((10#$bootstrap_timeout))"
+  readiness_grace="$((10#$readiness_grace))"
+
+  while true; do
+    if [ -f "$yk_state_file" ]; then
+      local state_token
+      state_token="$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file" 2>/dev/null || true)"
+      if [ "$state_token" != "$chrome_detached_yk_token" ]; then
+        echo "YubiKey state belongs to another launch attempt; refusing to clean it." >&2
+        break
+      fi
+      chrome_detached_yk_owned=1
+      phase="$(awk -F '\t' '$1 == "phase" {print $2; exit}' "$yk_state_file" 2>/dev/null || true)"
+      readiness="$(awk -F '\t' '$1 == "readiness" {print $2; exit}' "$yk_state_file" 2>/dev/null || true)"
+      if [ "$phase" = "ready" ]; then
+        echo "YubiKey forwarding is ready ($readiness)."
+        return 0
+      fi
+      case "$phase" in
+        attached|waiting-readiness)
+          [ -n "$readiness_started" ] || readiness_started="$SECONDS"
+          ;;
+      esac
+    fi
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+      break
+    fi
+    pane_state="$(tmux list-panes -t "$session:yubikey" -F '#{pane_dead}' 2>/dev/null || true)"
+    if [[ "$pane_state" == *1* ]]; then
+      break
+    fi
+    if [ -n "$readiness_started" ]; then
+      # The child has its own bounded readiness deadline.  Keep the parent
+      # alive for a small additional grace period so its final state write,
+      # tmux polling, and one in-flight SSH probe can be observed.
+      [ $((SECONDS - readiness_started)) -lt "$((timeout + readiness_grace))" ] || break
+    else
+      [ $((SECONDS - bootstrap_started)) -lt "$bootstrap_timeout" ] || break
+    fi
+    sleep 1
+  done
+
+  pane_output="$(tmux capture-pane -p -t "$session:yubikey" 2>&1 || true)"
+  if [ -n "$pane_output" ]; then
+    echo "YubiKey bootstrap pane output:" >&2
+    printf '%s\n' "$pane_output" >&2
+  fi
+  if [ -f "$yk_log_file" ]; then
+    log_output="$(cat "$yk_log_file" 2>/dev/null || true)"
+    if [ -n "$log_output" ] && [ "$log_output" != "$pane_output" ]; then
+      echo "YubiKey bootstrap log:" >&2
+      printf '%s\n' "$log_output" >&2
+    fi
+  fi
+  echo "YubiKey forwarding failed or timed out before readiness on $host." >&2
+  return 1
+}
+
+chrome_launch_detached_with_yubikey() {
+  local host="$1"
+  local session="$2"
+  local chrome_command_line="$3"
+  shift 3
+  local self
+  local yk_command_line
+
+  self="$(script_path)"
+  chrome_detached_yk_token="${BASHPID:-$$}.${RANDOM}.${SECONDS}"
+  local yk_command=(env "REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN=$chrome_detached_yk_token" "$self" _yubikey-run "$host" "$@")
+  yk_command_line="$(quote_command "${yk_command[@]}")"
+  chrome_detached_session="$session"
+  chrome_detached_cleanup_done=0
+  chrome_detached_yk_owned=0
+  trap 'chrome_detached_cleanup; exit 130' INT
+  trap 'chrome_detached_cleanup; exit 143' TERM
+  trap 'chrome_detached_cleanup; exit 129' HUP
+
+  if [ -e "$yk_state_file" ] || [ -e "$yk_attempt_lock" ]; then
+    echo "YubiKey forwarding already has an active or provisional attempt for $yk_remote; stop it before launching again." >&2
+    trap - INT TERM HUP
+    return 1
+  fi
+
+  if ! tmux new-session -d -s "$session" -n yubikey "$yk_command_line"; then
+    chrome_detached_cleanup
+    trap - INT TERM HUP
+    return 1
+  fi
+  tmux set-option -w -t "$session:yubikey" remain-on-exit failed >/dev/null 2>&1 || true
+
+  if ! chrome_wait_for_yubikey_window "$host" "$session"; then
+    chrome_detached_cleanup
+    rm -f "$yk_log_file"
+    trap - INT TERM HUP
+    return 1
+  fi
+
+  if ! tmux new-window -d -t "$session" -n chrome "$chrome_command_line"; then
+    echo "Could not create the remote Chrome tmux window after YubiKey readiness." >&2
+    chrome_detached_cleanup
+    rm -f "$yk_log_file"
+    trap - INT TERM HUP
+    return 1
+  fi
+
+  trap - INT TERM HUP
+  return 0
+}
+
 yk_rollback_start() {
-  if [ -n "$yk_active_busid" ]; then
+  if [ -n "$yk_active_busid" ] &&
+    [ "$yk_attach_state" != "none" ]; then
     yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1 || true
   fi
   yk_close_tunnel
-  if [ -n "$yk_active_busid" ]; then
+  if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" = "bound" ]; then
+    sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
+  elif [ -n "$yk_active_busid" ] && [ "$yk_bind_state" = "attempting" ] &&
+    [ "$yk_bound_before" = "0" ] &&
+    { [ -e "/sys/bus/usb/drivers/usbip-host/$yk_active_busid" ] ||
+      [ -L "/sys/bus/usb/drivers/usbip-host/$yk_active_busid" ]; }; then
     sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
   fi
   yk_stop_owned_usbipd
   rm -f "$yk_state_file"
+  yk_release_attempt
+  yk_phase="failed"
 }
 
 yk_start_impl() {
   yk_ensure_local_ready || return $?
+  yk_phase="local-ready"
+  yk_write_state || return $?
   yk_ensure_remote_ready || return $?
+  yk_phase="remote-ready"
+  yk_write_state || return $?
 
   local busid
+  local usbip_timeout="${REMOTE_CHROME_USBIP_TIMEOUT:-5}"
+  [[ "$usbip_timeout" =~ ^[0-9]+$ ]] || usbip_timeout=5
+  [ "$usbip_timeout" -gt 0 ] || usbip_timeout=1
   busid="$(yk_first_busid)"
   if [ -z "${busid:-}" ]; then
     echo "No local YubiKey found with USB id $yk_usb_id." >&2
@@ -726,45 +1350,78 @@ yk_start_impl() {
     return 1
   fi
 
-  if ! sudo usbip bind -b "$busid" >/dev/null 2>&1; then
+  yk_active_busid="$busid"
+  yk_bind_state="attempting"
+  yk_bound_before=0
+  if [ -e "/sys/bus/usb/drivers/usbip-host/$busid" ] ||
+    [ -L "/sys/bus/usb/drivers/usbip-host/$busid" ]; then
+    yk_bound_before=1
+  fi
+  yk_phase="bind-starting"
+  yk_write_state || return $?
+  if ! sudo usbip bind -b "$busid"; then
     echo "Could not bind local YubiKey busid $busid to usbip-host." >&2
     return 1
   fi
-  yk_active_busid="$busid"
+  yk_bind_state="bound"
+  yk_phase="bound"
+  yk_write_state || return $?
 
   yk_open_tunnel || return $?
+  yk_phase="tunnel-ready"
+  yk_write_state || return $?
 
-  if ! yk_ssh "usbip list -r 127.0.0.1 | grep -q '$busid:'"; then
+  if ! yk_ssh "timeout $usbip_timeout usbip list -r 127.0.0.1 | grep -q '$busid:'"; then
     echo "Remote host cannot see exported busid $busid through the SSH tunnel." >&2
     return 1
   fi
 
   yk_remote_detach_busid "$busid" >/dev/null 2>&1 || true
-  if ! yk_ssh "sudo -n usbip attach -r 127.0.0.1 -b '$busid'"; then
+  yk_attach_state="attempting"
+  yk_phase="attach-starting"
+  yk_write_state || return $?
+  if ! yk_ssh "timeout $usbip_timeout sudo -n usbip attach -r 127.0.0.1 -b '$busid'"; then
     echo "Could not attach remote YubiKey busid $busid." >&2
     return 1
   fi
+  yk_attach_state="attached"
+  yk_phase="attached"
+  yk_readiness="waiting"
+  yk_write_state || return $?
+
+  if ! yk_wait_remote_ready; then
+    return 1
+  fi
+  yk_phase="ready"
   yk_write_state || return $?
 
   echo "Forwarded local YubiKey $yk_usb_id busid $busid to $yk_remote."
-  yk_ssh "fido2-token -L 2>/dev/null || { echo 'Install libfido2 on the remote to verify with fido2-token.'; command -v lsusb >/dev/null && lsusb | grep -Ei 'Yubi|1050' || true; }" ||
-    echo "Forwarding succeeded, but remote FIDO verification was unavailable." >&2
+  if [ "$yk_readiness" = "verified-fido" ]; then
+    echo "Remote readiness verified with fido2-token (FIDO/hidraw)."
+  else
+    echo "Remote readiness detected via matching USB/udev FIDO metadata only (lower confidence; fido2-token did not confirm the exact device)." >&2
+  fi
 }
 
 yk_start() {
   yk_reset_runtime_state
-
-  if [ -e "$yk_state_file" ]; then
-    echo "YubiKey forwarding already has managed state: $yk_state_file" >&2
-    echo "Stop the existing $PROGRAM session for $yk_remote before starting it again." >&2
-    return 1
-  fi
+  yk_attempt_owned=0
+  yk_attempt_token="${REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN:-}"
+  yk_acquire_attempt || return $?
   if [ -S "$yk_control_socket" ]; then
     if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
       echo "YubiKey forwarding already has an active SSH tunnel: $yk_control_socket" >&2
+      yk_release_attempt
       return 1
     fi
-    unlink "$yk_control_socket"
+    unlink "$yk_control_socket" || true
+  fi
+
+  yk_phase="starting"
+  yk_readiness="none"
+  if ! yk_write_state; then
+    yk_release_attempt
+    return 1
   fi
 
   local code=0
@@ -780,30 +1437,54 @@ yk_stop() {
   yk_load_state || load_code=$?
   if [ "$load_code" -eq 1 ]; then
     echo "No managed YubiKey forwarding state for $yk_remote."
+    if ! yk_release_orphan_attempt; then
+      echo "Could not remove the provisional YubiKey attempt lock: $yk_attempt_lock" >&2
+      return 1
+    fi
+    if [ "$yk_attempt_owned" = "1" ]; then
+      yk_release_attempt
+    fi
     return 0
   fi
   [ "$load_code" -eq 0 ] || return "$load_code"
 
-  yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1 ||
-    echo "Could not detach remote USB/IP busid $yk_active_busid; continuing local cleanup." >&2
+  if [ -n "$yk_active_busid" ] && [ "$yk_attach_state" != "none" ]; then
+    yk_remote_detach_busid "$yk_active_busid" >/dev/null ||
+      echo "Could not detach remote USB/IP busid $yk_active_busid; continuing local cleanup." >&2
+  fi
   yk_close_tunnel
 
-  sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
+  if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" = "bound" ]; then
+    sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
+  fi
   yk_stop_owned_usbipd
   rm -f "$yk_state_file"
+  yk_release_attempt
+  rm -f "$yk_log_file"
 
-  echo "Stopped YubiKey USB/IP forwarding for $yk_remote (busid $yk_active_busid)."
+  if [ -n "$yk_active_busid" ]; then
+    echo "Stopped YubiKey USB/IP forwarding for $yk_remote (busid $yk_active_busid)."
+  else
+    echo "Stopped provisional YubiKey USB/IP setup for $yk_remote."
+  fi
 }
 
 yk_cleanup() {
   trap - EXIT INT TERM HUP
   if [ "$yk_cleanup_done" = "0" ]; then
     yk_cleanup_done=1
-    yk_stop
+    if [ "$yk_attempt_owned" = "1" ]; then
+      yk_stop
+    fi
   fi
 }
 
 yk_run() {
+  yk_cleanup_done=0
+  if [ -n "$yk_log_file" ]; then
+    mkdir -p -- "$(dirname -- "$yk_log_file")"
+    exec > >(tee -a "$yk_log_file") 2>&1
+  fi
   trap yk_cleanup EXIT
   trap 'yk_cleanup; exit 130' INT
   trap 'yk_cleanup; exit 143' TERM
@@ -857,6 +1538,6 @@ main() {
   esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
   main "$@"
 fi

@@ -49,18 +49,21 @@ installation would add churn and surprising behavior.
 
 Local host requirements:
 
-- `usbip`
-- `ss` from `iproute2`
-- a local YubiKey visible in `usbip list -l`
+- `usbip` (only when a configured key is detected or forwarding is forced)
+- `ss` from `iproute2` (only when forwarding)
+- `timeout` from `coreutils` (only when forwarding)
+- a local YubiKey with the configured vendor/product (default `1050:0407`)
 - `sudo` access for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and
   starting/stopping `usbipd`
 
 Remote host requirements:
 
 - `usbip`
-- passwordless remote `sudo` for `modprobe vhci-hcd`, `usbip attach`, and
-  `usbip detach`
-- `libfido2` for optional `fido2-token` verification
+- `timeout` from `coreutils` for bounded USB/IP list/attach/detach operations
+- passwordless remote `sudo` for `modprobe vhci-hcd`, `usbip attach`,
+  `usbip port`, and `usbip detach`
+- `libfido2` for preferred `fido2-token` verification (a lower-confidence
+  hidraw/udev check is used when it is unavailable)
 
 Passwordless remote `sudo` is a hard requirement for YubiKey forwarding. The
 remote commands run over noninteractive SSH and cannot complete a sudo prompt.
@@ -70,7 +73,7 @@ remote commands run over noninteractive SSH and cannot complete a sudo prompt.
 On an Arch-family remote host, install the remote-side packages:
 
 ```bash
-ssh remote-host 'sudo pacman -S --needed waypipe usbip libfido2'
+ssh remote-host 'sudo pacman -S --needed waypipe usbip coreutils libfido2'
 ```
 
 Install Google Chrome on the remote host through the appropriate channel for
@@ -81,7 +84,7 @@ that machine.
 On an Arch-family local host, install the runtime dependencies:
 
 ```bash
-sudo pacman -S --needed waypipe tmux usbip iproute2
+sudo pacman -S --needed waypipe tmux usbip iproute2 coreutils
 ```
 
 Clone the repository:
@@ -117,11 +120,10 @@ Verify the local setup:
 ```bash
 command -v remote-chrome
 remote-chrome --help
-usbip list -l
 ```
 
-The final command should list a connected YubiKey when YubiKey forwarding will
-be used. Chrome-only sessions do not require a YubiKey or the `usbip` tools.
+When forwarding is expected, check the configured key with `usbip list -l`.
+Chrome-only sessions do not require a YubiKey or the `usbip` tools.
 
 ## Launch Chrome
 
@@ -196,24 +198,36 @@ existing browser, after saving anything important in it.
 
 ## Forward A YubiKey
 
-YubiKey forwarding is opt-in and always runs as part of a Chrome launch. Start
-it with `--with-yubikey`; it opens a second tmux window named `yubikey` in the
-same session:
+Launches use a tri-state YubiKey mode. By default, the launcher checks local
+sysfs for the configured USB vendor/product and automatically forwards a
+detected key. A detected key makes forwarding an expected prerequisite; module,
+sudo, SSH, or readiness failures abort the launch with diagnostics. If no key is
+detected, Chrome starts without the USB/IP prerequisites.
+
+Force forwarding (and fail if the key or prerequisites are unavailable) with:
 
 ```bash
 remote-chrome remote-host --with-yubikey
 ```
 
-For a foreground session, forwarding starts before Chrome and cleans up when
-Chrome exits:
+Explicitly skip detection and forwarding, even when a key is connected, with:
+
+```bash
+remote-chrome remote-host --no-yubikey
+```
+
+For a foreground session, forwarding starts before Chrome, waits until the
+remote key enumerates as FIDO/hidraw, and cleans up when Chrome exits:
 
 ```bash
 remote-chrome launch remote-host --foreground --with-yubikey
 ```
 
 While forwarding is active, the YubiKey is attached to the remote host, so local
-apps may not be able to use it. Forwarding is opt-in because the remote host
-gets access to the USB device.
+apps may not be able to use it. Detached mode starts the `yubikey` tmux window,
+waits for readiness (up to 15 seconds by default), and only then creates the
+`chrome` window. A timeout or child failure removes the session and rolls back
+the exact resources it acquired.
 
 Closing the remote Chrome browser only exits the `chrome` tmux window. The
 `yubikey` window and forwarding keep running until you stop the whole session.
@@ -226,10 +240,12 @@ remote-chrome stop HOST
 That sends the forwarding process a signal, and it detaches/unbinds the YubiKey
 during cleanup.
 
-The tool records the exact local bus ID and any `usbipd` process it started in a
-state file beside the SSH control socket. Cleanup only detaches that recorded
-device. A pre-existing system `usbipd` is never stopped, and a tool-started
-daemon remains running while other USB/IP exports still exist.
+The tool records provisional lifecycle state, the exact local bus ID, and any
+`usbipd` process it started in a state file beside the SSH control socket.
+Cleanup handles interrupted setup, only detaches/unbinds that recorded device,
+never stops a pre-existing `usbipd`, and leaves a tool-started daemon running
+while other USB/IP exports still exist. `status HOST` reports tmux windows and
+the managed YubiKey phase/readiness without changing anything.
 
 ## Configuration
 
@@ -247,13 +263,28 @@ REMOTE_CHROME_YUBIKEY_USB_ID=1050:0407
 REMOTE_CHROME_USBIP_PORT=3240
 REMOTE_CHROME_YUBIKEY_SOCKET=${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-remote-host.sock
 REMOTE_CHROME_STOP_USBIPD=1
+REMOTE_CHROME_YUBIKEY_TIMEOUT=15
+REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT=30
+REMOTE_CHROME_YUBIKEY_READY_GRACE=5
 ```
 
 Set `REMOTE_CHROME_STOP_USBIPD=0` to leave a tool-started daemon running after
 cleanup.
 
-If `modprobe usbip-host` fails locally after a kernel upgrade, reboot so the
-running kernel matches `/lib/modules`.
+The readiness timeout starts after remote USB/IP attach; detached mode also has
+a separate bounded bootstrap timeout for module loading, daemon startup,
+binding, tunnel setup, and attach. The parent launcher allows a small additional
+readiness grace period (5 seconds by default) after the child timeout so a final
+state write or in-flight SSH probe can be observed. Exact remote detach may use
+`sudo usbip port` because some hosts restrict USB/IP port visibility to root.
+
+Before tmux or Chrome starts, the launcher checks the running local and remote
+kernels, their `/lib/modules/<kernel>` trees, `usbip-host`/`vhci-hcd`, command
+prerequisites, and required sudo paths. Module mismatch diagnostics include the
+running kernel and available module directories and recommend rebooting after a
+kernel upgrade. The launcher never installs packages, copies modules, or
+reboots automatically. `fido2-token -L` is preferred for readiness; when only
+the hidraw/udev fallback succeeds, output is labeled USB-only.
 
 ## Security Notes
 
