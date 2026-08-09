@@ -10,7 +10,8 @@ Usage:
   $PROGRAM HOST [-- CHROME_ARGS...]
   $PROGRAM launch HOST [-- CHROME_ARGS...]
   $PROGRAM stop [HOST]
-  $PROGRAM status HOST
+  $PROGRAM status [HOST]
+  $PROGRAM attach HOST
 
 Chrome options:
       --session NAME       tmux session name
@@ -24,6 +25,7 @@ Chrome options:
       --yes                do not prompt before killing remote Chrome
 
 General options:
+      -h, --help           print help and exit
       -V, --version        print version and exit
 
 Environment:
@@ -66,6 +68,15 @@ script_path() {
 
 quote_command() {
   printf '%q ' "$@"
+}
+
+print_command_hint() {
+  local label="$1"
+  shift
+
+  printf '%s' "$label"
+  printf ' %q' "$@"
+  printf '\n'
 }
 
 chrome_default_session() {
@@ -142,6 +153,10 @@ chrome_launch() {
       --yes|-y)
         assume_yes=1
         shift
+        ;;
+      -h|--help)
+        usage
+        return 0
         ;;
       --)
         shift
@@ -241,6 +256,9 @@ chrome_launch() {
   if [ "$forwarding_expected" = "1" ]; then
     echo "YubiKey forwarding is ready in tmux window ${session}:yubikey."
   fi
+  print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
+  print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
+  print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
 }
 
 confirm() {
@@ -365,6 +383,10 @@ chrome_stop() {
         session="${1#*=}"
         shift
         ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
       -*)
         die "Unknown stop option: $1"
         ;;
@@ -438,6 +460,94 @@ chrome_stop_all() {
   return "$code"
 }
 
+chrome_attach() {
+  local host=""
+  local session=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session)
+        [ "$#" -ge 2 ] || die "$1 requires a session name."
+        session="$2"
+        shift 2
+        ;;
+      --session=*)
+        session="${1#*=}"
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -*)
+        die "Unknown attach option: $1"
+        ;;
+      *)
+        [ -z "$host" ] || die "Unexpected argument: $1"
+        host="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$session" ] || {
+    [ -n "$host" ] || die "Host or --session is required."
+    session="$(chrome_default_session "$host")"
+  }
+
+  need tmux
+  tmux has-session -t "$session" 2>/dev/null ||
+    die "tmux session not found: $session"
+
+  if [ -n "${TMUX:-}" ]; then
+    tmux switch-client -t "$session"
+  else
+    tmux attach-session -t "$session"
+  fi
+}
+
+chrome_status_all() {
+  local session state_file lock_file state_output
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local found_sessions=0
+  local found_forwarding=0
+  local code=0
+
+  need tmux
+  echo "Managed tmux sessions:"
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    found_sessions=1
+    printf '  %s\n' "$session"
+    if ! tmux list-windows -t "$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null; then
+      echo "    windows unavailable (session may have exited)" >&2
+      code=1
+    fi
+  done < <(chrome_managed_sessions)
+  [ "$found_sessions" = "1" ] || echo "  none"
+
+  echo "Managed YubiKey forwarding:"
+  while IFS= read -r state_file; do
+    [ -n "$state_file" ] || continue
+    found_forwarding=1
+    if state_output="$(yk_status_state_file "$state_file")"; then
+      printf '  %s\n' "$state_output"
+    else
+      code=1
+    fi
+  done < <(yk_standard_state_files)
+
+  for lock_file in "$runtime_dir"/remote-chrome-yubikey-*.sock.state.lock; do
+    [ -d "$lock_file" ] || continue
+    [ -e "${lock_file%.lock}" ] && continue
+    found_forwarding=1
+    printf '  provisional setup lock: %s\n' "$lock_file"
+  done
+  [ "$found_forwarding" = "1" ] || echo "  none"
+
+  return "$code"
+}
+
 chrome_status() {
   local host=""
   local session=""
@@ -453,6 +563,10 @@ chrome_status() {
         session="${1#*=}"
         shift
         ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
       -*)
         die "Unknown status option: $1"
         ;;
@@ -463,6 +577,11 @@ chrome_status() {
         ;;
     esac
   done
+
+  if [ -z "$host" ] && [ -z "$session" ]; then
+    chrome_status_all
+    return
+  fi
 
   [ -n "$session" ] || {
     [ -n "$host" ] || die "Host or --session is required."
@@ -479,21 +598,7 @@ chrome_status() {
 
   if [ -n "$host" ]; then
     yk_prepare_for_launch "$host"
-    local state_code=0
-    yk_load_state || state_code=$?
-    case "$state_code" in
-      0)
-        printf 'yubikey: phase=%s readiness=%s' "${yk_phase:-unknown}" "${yk_readiness:-unknown}"
-        [ -n "$yk_active_busid" ] && printf ' busid=%s' "$yk_active_busid"
-        printf '\n'
-        ;;
-      1)
-        echo "yubikey: no managed state"
-        ;;
-      *)
-        echo "yubikey: invalid managed state ($yk_state_file)" >&2
-        ;;
-    esac
+    yk_print_status_line "yubikey:"
   fi
 }
 
@@ -585,6 +690,46 @@ yk_standard_state_files() {
     printf '%s\n' "$state_file"
   done
 }
+
+yk_print_status_line() {
+  local label="$1"
+  local state_code=0
+
+  yk_load_state || state_code=$?
+  case "$state_code" in
+    0)
+      printf '%s phase=%s readiness=%s' "$label" "${yk_phase:-unknown}" "${yk_readiness:-unknown}"
+      [ -n "$yk_active_busid" ] && printf ' busid=%s' "$yk_active_busid"
+      printf '\n'
+      ;;
+    1)
+      if [ -d "$yk_attempt_lock" ]; then
+        printf '%s phase=starting readiness=unknown provisional-lock=%s\n' "$label" "$yk_attempt_lock"
+      else
+        printf '%s no managed state\n' "$label"
+      fi
+      ;;
+    *)
+      echo "$label invalid managed state ($yk_state_file)" >&2
+      return 1
+      ;;
+  esac
+}
+
+yk_status_state_file() (
+  local state_file="$1"
+  local host
+
+  host="$(awk -F '\t' '$1 == "remote" {print $2; exit}' "$state_file" 2>/dev/null || true)"
+  if [ -z "$host" ]; then
+    echo "Managed YubiKey state is missing its remote host: $state_file" >&2
+    return 1
+  fi
+
+  yk_control_socket="${state_file%.state}"
+  yk_prepare_for_launch "$host"
+  yk_print_status_line "$host:"
+)
 
 yk_stop_state_file() {
   local state_file="$1"
@@ -1635,6 +1780,10 @@ main() {
     status)
       shift
       chrome_status "$@"
+      ;;
+    attach)
+      shift
+      chrome_attach "$@"
       ;;
     _yubikey-run)
       shift

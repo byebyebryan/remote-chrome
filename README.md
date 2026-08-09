@@ -143,10 +143,11 @@ The default tmux session name is `remote-chrome-HOST`, with characters that are
 awkward for tmux targets replaced by underscores. For example, `remote.example`
 becomes `remote-chrome-remote_example`.
 
-Check or stop the session:
+Check, attach to, or stop the session:
 
 ```bash
 remote-chrome status remote-host
+remote-chrome attach remote-host
 remote-chrome stop remote-host
 ```
 
@@ -166,9 +167,13 @@ Detached tmux mode is the default because it keeps Chrome and Waypipe alive if
 the launching terminal exits, and it gives you a stable place to inspect logs:
 
 ```bash
-tmux attach -t remote-chrome-remote-host
+remote-chrome attach remote-host
 tmux capture-pane -pt remote-chrome-remote-host:chrome
 ```
+
+When run from inside tmux, `attach` switches the current client instead of
+trying to create a nested tmux client. A successful detached launch prints the
+exact attach, status, and stop commands, including a custom session name.
 
 A user systemd service would also work, but tmux keeps this tool dependency-light
 and easy to inspect.
@@ -247,6 +252,14 @@ default runtime state path on the local machine, omit the host:
 remote-chrome stop
 ```
 
+Use the matching read-only overview before teardown to list default managed
+tmux sessions, their windows, recorded YubiKey forwarding, and provisional
+setup locks:
+
+```bash
+remote-chrome status
+```
+
 This only kills tmux sessions named with the configured
 `REMOTE_CHROME_SESSION_PREFIX` followed by `-` (by default,
 `remote-chrome-*`), so it leaves an exact-name `remote-chrome` session and
@@ -260,7 +273,8 @@ The tool records provisional lifecycle state, the exact local bus ID, and any
 Cleanup handles interrupted setup, only detaches/unbinds that recorded device,
 never stops a pre-existing `usbipd`, and leaves a tool-started daemon running
 while other USB/IP exports still exist. `status HOST` reports tmux windows and
-the managed YubiKey phase/readiness without changing anything.
+the managed YubiKey phase/readiness without changing anything; it also exposes
+a provisional setup lock that exists before the first state write.
 
 ## Configuration
 

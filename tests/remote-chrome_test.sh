@@ -779,6 +779,104 @@ test_status_reports_yubikey_phase_without_cleanup() (
   [ -f "$yk_state_file" ] || fail "status removed managed state"
 )
 
+test_status_reports_provisional_setup_lock() (
+  local test_dir output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket=""
+  yk_usbip_port=3240
+  yk_prepare_for_launch "test-host"
+  mkdir -- "$yk_attempt_lock"
+
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  output="$(chrome_status test-host)"
+  assert_contains "$output" "yubikey: phase=starting readiness=unknown"
+  assert_contains "$output" "provisional-lock=$yk_attempt_lock"
+  [ -d "$yk_attempt_lock" ] || fail "status removed provisional setup lock"
+)
+
+test_status_without_host_reports_managed_overview() (
+  local test_dir output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket=""
+  yk_usbip_port=3240
+  yk_prepare_for_launch "host-one"
+  yk_phase="ready"
+  yk_readiness="verified-fido"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="attached"
+  yk_write_state
+  mkdir -- "$test_dir/remote-chrome-yubikey-orphan.sock.state.lock"
+
+  need() { :; }
+  tmux() {
+    case "$1" in
+      list-sessions)
+        printf '%s\n' remote-chrome-host-one unrelated-session
+        ;;
+      list-windows)
+        printf '%s\n' "    window: chrome (0)"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+
+  output="$(chrome_status)"
+  assert_contains "$output" "Managed tmux sessions:"
+  assert_contains "$output" "remote-chrome-host-one"
+  [[ "$output" != *unrelated-session* ]] || fail "status included an unrelated tmux session"
+  assert_contains "$output" "host-one: phase=ready readiness=verified-fido busid=5-1.2.2"
+  assert_contains "$output" "provisional setup lock: $test_dir/remote-chrome-yubikey-orphan.sock.state.lock"
+  [ -f "$yk_state_file" ] || fail "overview status removed managed state"
+)
+
+test_attach_uses_tmux_context_appropriate_action() (
+  local events=""
+
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      attach-session) events+="attach:$3 ";;
+      switch-client) events+="switch:$3 ";;
+      *) return 1 ;;
+    esac
+  }
+
+  unset TMUX
+  chrome_attach test-host
+  assert_contains "$events" "attach:remote-chrome-test-host"
+
+  events=""
+  TMUX="/tmp/tmux-test/default,1,0"
+  chrome_attach test-host
+  assert_contains "$events" "switch:remote-chrome-test-host"
+)
+
+test_subcommands_accept_help() (
+  local output
+
+  output="$(main launch --help)"
+  assert_contains "$output" "Usage:"
+  output="$(main stop --help)"
+  assert_contains "$output" "Usage:"
+  output="$(main status --help)"
+  assert_contains "$output" "Usage:"
+  output="$(main attach --help)"
+  assert_contains "$output" "Usage:"
+)
+
 test_status_reports_legacy_state_truthfully() (
   local test_dir output
   test_dir="$(mktemp -d)"
@@ -939,9 +1037,14 @@ test_launch_mode_auto_and_opt_out() (
       *) return 0 ;;
     esac
   }
-  chrome_launch test-host >/dev/null
+  local output
+  chrome_launch test-host >"$test_dir/launch-output"
+  output="$(command cat "$test_dir/launch-output")"
   [[ "$events" == *preflight* ]] || fail "auto mode did not expect forwarding"
   [[ "$events" == *"preflight existing"* ]] || fail "existing Chrome handling ran before YubiKey preflight"
+  assert_contains "$output" "Attach: $PROGRAM attach test-host --session remote-chrome-test-host"
+  assert_contains "$output" "Status: $PROGRAM status test-host --session remote-chrome-test-host"
+  assert_contains "$output" "Stop: $PROGRAM stop test-host --session remote-chrome-test-host"
 
   events=""
   chrome_launch test-host --no-yubikey >/dev/null
@@ -1055,6 +1158,10 @@ tests=(
   test_usbipd_state_write_failure_stops_before_daemon
   test_usbipd_state_write_records_pid_before_started_phase
   test_status_reports_yubikey_phase_without_cleanup
+  test_status_reports_provisional_setup_lock
+  test_status_without_host_reports_managed_overview
+  test_attach_uses_tmux_context_appropriate_action
+  test_subcommands_accept_help
   test_status_reports_legacy_state_truthfully
   test_stop_cleans_legacy_state_without_lock_or_token
   test_second_start_preserves_live_legacy_state

@@ -6,6 +6,18 @@ Typical browser session:
 remote-chrome remote-host
 ```
 
+Successful detached launches print the exact commands for attaching, checking
+status, and stopping the resulting session. They can also be run directly:
+
+```bash
+remote-chrome attach remote-host
+remote-chrome status remote-host
+remote-chrome stop remote-host
+```
+
+`attach` attaches normally outside tmux and switches the current client when
+it is already running inside tmux.
+
 `launch` is an explicit alias for the same behavior. If remote Chrome is already
 running, you are asked before it is killed. Confirm to kill it, or use
 `--allow-existing` to launch anyway:
@@ -68,7 +80,10 @@ Detached mode gives the parent an additional 5-second readiness grace period
 for the final state write and an in-flight SSH probe before declaring failure.
 
 `status remote-host` reports session windows plus managed YubiKey phase and
-readiness, if state exists. Status is read-only.
+readiness, if state exists. It also reports a provisional setup lock before the
+first state write. Run `remote-chrome status` without a host for a read-only
+overview of all default managed tmux sessions, forwarding state files, and
+orphaned provisional locks.
 
 For one-off sessions without tmux:
 
