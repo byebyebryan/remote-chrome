@@ -11,6 +11,8 @@ Usage:
   $PROGRAM launch HOST [-- CHROME_ARGS...]
   $PROGRAM stop [HOST]
   $PROGRAM status [HOST]
+  $PROGRAM status --live HOST
+  $PROGRAM doctor HOST
   $PROGRAM attach HOST
 
 Chrome options:
@@ -545,12 +547,16 @@ chrome_status_all() {
   done
   [ "$found_forwarding" = "1" ] || echo "  none"
 
+  echo "Tool-owned orphan usbipd daemons:"
+  yk_status_orphan_usbipd
+
   return "$code"
 }
 
 chrome_status() {
   local host=""
   local session=""
+  local live=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -561,6 +567,10 @@ chrome_status() {
         ;;
       --session=*)
         session="${1#*=}"
+        shift
+        ;;
+      --live)
+        live=1
         shift
         ;;
       -h|--help)
@@ -577,6 +587,12 @@ chrome_status() {
         ;;
     esac
   done
+
+  if [ "$live" = "1" ]; then
+    [ -n "$host" ] || die "status --live requires a host."
+    chrome_status_live "$host" "$session"
+    return
+  fi
 
   if [ -z "$host" ] && [ -z "$session" ]; then
     chrome_status_all
@@ -602,6 +618,97 @@ chrome_status() {
   fi
 }
 
+chrome_status_live() {
+  local host="$1"
+  local session="$2"
+  local code=0
+  local windows
+  local state_code=0
+
+  [ -n "$session" ] || session="$(chrome_default_session "$host")"
+  need tmux
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    echo "live: tmux session running: $session"
+    windows="$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null || true)"
+    if [ -n "$windows" ]; then
+      printf '%s\n' "$windows" | sed 's/^/live: window: /'
+    else
+      echo "live: degraded: tmux session has no readable windows." >&2
+      code=1
+    fi
+    if ! printf '%s\n' "$windows" | grep -qx 'chrome'; then
+      echo "live: degraded: tmux session has no chrome window." >&2
+      code=1
+    fi
+  else
+    echo "live: degraded: tmux session is not running: $session" >&2
+    code=1
+  fi
+
+  yk_prepare_for_launch "$host"
+  if yk_load_state; then
+    echo "live: yubikey phase=$yk_phase readiness=$yk_readiness"
+    if [ "$yk_phase" = "cleanup-failed" ]; then
+      echo "live: degraded: YubiKey cleanup previously failed; retry stop before trusting this state." >&2
+      code=1
+    fi
+
+    if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" != "none" ]; then
+      if yk_local_busid_bound "$yk_active_busid"; then
+        echo "live: local USB/IP bind present: $yk_active_busid"
+      else
+        echo "live: degraded: recorded local USB/IP bind is absent: $yk_active_busid" >&2
+        code=1
+      fi
+    fi
+
+    if [ "$yk_started_usbipd" = "1" ]; then
+      if yk_owned_usbipd_running "$yk_usbipd_pid" &&
+        ss -ltn 2>/dev/null | grep -q ":${yk_usbip_port}\b"; then
+        echo "live: owned usbipd running and listening: pid=$yk_usbipd_pid port=$yk_usbip_port"
+      else
+        echo "live: degraded: owned usbipd is not alive, exact-owned, or listening on port $yk_usbip_port: pid=${yk_usbipd_pid:-unknown}" >&2
+        code=1
+      fi
+    fi
+
+    if [ "$yk_tunnel_open" = "1" ] || [ "$yk_attach_state" != "none" ]; then
+      if [ -S "$yk_control_socket" ] &&
+        ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+        echo "live: SSH USB/IP control socket is alive: $yk_control_socket"
+      else
+        echo "live: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
+        code=1
+      fi
+    fi
+
+    if [ "$yk_attach_state" != "none" ] || [ "$yk_phase" = "ready" ]; then
+      if (yk_remote_probe_readiness); then
+        echo "live: remote YubiKey readiness probe passed."
+      else
+        echo "live: degraded: remote YubiKey readiness probe failed (${yk_readiness:-not-ready})." >&2
+        code=1
+      fi
+    fi
+  else
+    state_code=$?
+    if [ "$state_code" = "1" ]; then
+      echo "live: no managed YubiKey state for $host."
+    else
+      echo "live: degraded: managed YubiKey state is invalid for $host." >&2
+      code=1
+    fi
+  fi
+
+  if [ "$code" = "0" ]; then
+    echo "live: healthy"
+  else
+    echo "live: degraded; inspect the failing checks above and retry after repair." >&2
+  fi
+  return "$code"
+}
+
 yk_remote=""
 yk_usb_id="${REMOTE_CHROME_YUBIKEY_USB_ID:-1050:0407}"
 yk_usbip_port="${REMOTE_CHROME_USBIP_PORT:-3240}"
@@ -624,6 +731,8 @@ yk_bound_before=0
 yk_attach_state="none"
 yk_started_usbipd=0
 yk_usbipd_pid=""
+yk_cleanup_unresolved=0
+yk_cleanup_messages=""
 
 yk_prepare_for_launch() {
   yk_remote="$1"
@@ -679,6 +788,48 @@ yk_set_runtime_paths() {
   yk_log_file="${yk_state_file}.log"
   yk_attempt_lock="${yk_state_file}.lock"
   yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-$(safe_name "$yk_usbip_port").pid"
+}
+
+yk_local_busid_bound() {
+  local busid="$1"
+  [ -e "$yk_usbip_host_sysfs/$busid" ] || [ -L "$yk_usbip_host_sysfs/$busid" ]
+}
+
+yk_is_standard_pid_file() {
+  local pid_file="$1"
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local basename
+
+  basename="${pid_file##*/}"
+  [ "$pid_file" = "$runtime_dir/$basename" ] || return 1
+  [[ "$basename" =~ ^remote-chrome-usbipd-[0-9]+\.pid$ ]]
+}
+
+yk_state_owns_pid_file() {
+  local state_file="$1"
+  local pid_file="$2"
+  local state_pid_file
+  local state_port
+  local state_started
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local basename
+
+  state_pid_file="$(awk -F '\t' '$1 == "usbipd_pid_file" {print $2; exit}' "$state_file" 2>/dev/null || true)"
+  state_started="$(awk -F '\t' '$1 == "started_usbipd" {print $2; exit}' "$state_file" 2>/dev/null || true)"
+  [ "$state_started" = "1" ] || return 1
+  if [ -n "$state_pid_file" ]; then
+    [ "$state_pid_file" = "$pid_file" ]
+    return
+  fi
+
+  # Legacy states did not record a port or pid-file path.  Their only
+  # supported daemon path was the default runtime path, so derive it without
+  # trusting arbitrary state-file content.
+  state_port="$(awk -F '\t' '$1 == "usbip_port" {print $2; exit}' "$state_file" 2>/dev/null || true)"
+  [ -n "$state_port" ] || state_port=3240
+  [[ "$state_port" =~ ^[0-9]+$ ]] || return 1
+  basename="remote-chrome-usbipd-$((10#$state_port)).pid"
+  [ "$pid_file" = "$runtime_dir/$basename" ]
 }
 
 yk_standard_state_files() {
@@ -785,6 +936,7 @@ yk_stop_all() {
   fi
 
   yk_stop_orphan_attempt_locks || code=1
+  yk_stop_orphan_usbipd_files || code=1
   return "$code"
 }
 
@@ -801,10 +953,14 @@ yk_reset_runtime_state() {
 }
 
 yk_release_attempt() {
+  local code=0
   if [ -n "$yk_attempt_lock" ] && [ -d "$yk_attempt_lock" ]; then
-    rmdir -- "$yk_attempt_lock" >/dev/null 2>&1 || true
+    if ! rmdir -- "$yk_attempt_lock" >/dev/null 2>&1; then
+      code=1
+    fi
   fi
-  yk_attempt_owned=0
+  [ "$code" = "0" ] && yk_attempt_owned=0
+  return "$code"
 }
 
 yk_release_orphan_attempt() {
@@ -860,6 +1016,8 @@ yk_write_state() {
     printf 'tunnel_open\t%s\n' "$yk_tunnel_open"
     printf 'started_usbipd\t%s\n' "$yk_started_usbipd"
     printf 'usbipd_pid\t%s\n' "$yk_usbipd_pid"
+    printf 'usbip_port\t%s\n' "$yk_usbip_port"
+    printf 'usbipd_pid_file\t%s\n' "$yk_usbipd_pid_file"
   } >"$state_tmp"; then
     umask "$old_umask"
     rm -f "$state_tmp"
@@ -880,6 +1038,9 @@ yk_load_state() {
   local key
   local value
   local state_remote=""
+  local state_usbip_port=""
+  local state_pid_file=""
+  local bind_state_present=0
   local modern_state=0
   yk_reset_runtime_state
 
@@ -890,18 +1051,43 @@ yk_load_state() {
       phase) modern_state=1; yk_phase="$value" ;;
       readiness) modern_state=1; yk_readiness="$value" ;;
       busid) yk_active_busid="$value" ;;
-      bind_state) modern_state=1; yk_bind_state="$value" ;;
+      bind_state) modern_state=1; bind_state_present=1; yk_bind_state="$value" ;;
       bound_before) modern_state=1; yk_bound_before="$value" ;;
       attach_state) modern_state=1; yk_attach_state="$value" ;;
       tunnel_open) modern_state=1; yk_tunnel_open="$value" ;;
       started_usbipd) yk_started_usbipd="$value" ;;
       usbipd_pid) yk_usbipd_pid="$value" ;;
+      usbip_port) state_usbip_port="$value" ;;
+      usbipd_pid_file) state_pid_file="$value" ;;
     esac
   done <"$yk_state_file"
 
   if [ "$state_remote" != "$yk_remote" ]; then
     echo "YubiKey state belongs to $state_remote, not $yk_remote: $yk_state_file" >&2
     return 2
+  fi
+  if [ -n "$state_usbip_port" ]; then
+    if [[ ! "$state_usbip_port" =~ ^[0-9]+$ ]] ||
+      [ "$((10#$state_usbip_port))" -lt 1 ] ||
+      [ "$((10#$state_usbip_port))" -gt 65535 ]; then
+      echo "YubiKey state has an invalid USB/IP port: $yk_state_file" >&2
+      return 2
+    fi
+    yk_usbip_port="$((10#$state_usbip_port))"
+  fi
+  if [ -n "$state_pid_file" ]; then
+    if ! yk_is_standard_pid_file "$state_pid_file"; then
+      echo "YubiKey state has an invalid usbipd pid file: $yk_state_file" >&2
+      return 2
+    fi
+    if [ -n "$state_usbip_port" ] &&
+      [ "$state_pid_file" != "${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-${yk_usbip_port}.pid" ]; then
+      echo "YubiKey state has inconsistent USB/IP port and pid file: $yk_state_file" >&2
+      return 2
+    fi
+    yk_usbipd_pid_file="$state_pid_file"
+  elif [ -n "$state_usbip_port" ]; then
+    yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-${yk_usbip_port}.pid"
   fi
   if [ "$modern_state" = "0" ]; then
     yk_readiness="unknown"
@@ -934,11 +1120,18 @@ yk_load_state() {
       return 2
       ;;
   esac
-  if [ "$yk_bind_state" = "none" ] && [ -n "$yk_active_busid" ]; then
+  if [ "$bind_state_present" = "0" ] && [ -n "$yk_active_busid" ]; then
     # State written by v1.0.0 had no bind phase; a recorded bus ID represented
     # a successful bind and is safe to clean up exactly.
     yk_bind_state="bound"
   fi
+  case "$yk_bind_state" in
+    none|attempting|bound) ;;
+    *)
+      echo "YubiKey state has an invalid local bind phase: $yk_state_file" >&2
+      return 2
+      ;;
+  esac
   if [ -z "$yk_attach_state" ] || {
     [ -n "$yk_active_busid" ] &&
       { [ "$yk_phase" = "idle" ] || [ "$yk_phase" = "attached" ] ||
@@ -1020,8 +1213,111 @@ yk_owned_usbipd_running() {
   local command_line
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   [ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" = "usbipd" ] || return 1
-  command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
-  [[ "$command_line" == *"--pid=$yk_usbipd_pid_file"* ]]
+  command_line="$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  printf '%s\n' "$command_line" | grep -Fxq -- "--pid=$yk_usbipd_pid_file"
+}
+
+yk_standard_pid_files() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local pid_file
+
+  for pid_file in "$runtime_dir"/remote-chrome-usbipd-*.pid; do
+    [ -f "$pid_file" ] || continue
+    yk_is_standard_pid_file "$pid_file" || continue
+    printf '%s\n' "$pid_file"
+  done
+}
+
+yk_pid_file_pid() {
+  local pid_file="$1"
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  # A PID file is a single numeric line.  Do not trim arbitrary content into
+  # a value that could accidentally identify a different process.
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+yk_process_exists() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [ -e "/proc/$pid" ]
+}
+
+yk_wait_usbipd_exit() {
+  local pid="$1"
+  local timeout="${REMOTE_CHROME_USBIP_STOP_TIMEOUT:-3}"
+  local attempt
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=3
+  timeout="$((10#$timeout))"
+
+  for ((attempt = 0; attempt <= timeout; attempt++)); do
+    if ! yk_process_exists "$pid" || ! yk_owned_usbipd_running "$pid"; then
+      return 0
+    fi
+    [ "$attempt" -lt "$timeout" ] || break
+    sleep 1
+  done
+  return 1
+}
+
+yk_validate_usbipd_pid_file() {
+  local expected_pid="$1"
+  local file_pid
+
+  file_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+  if [[ ! "$file_pid" =~ ^[0-9]+$ ]]; then
+    echo "Preserving invalid owned usbipd pid file: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  if [ -n "$expected_pid" ] && [ "$file_pid" != "$expected_pid" ]; then
+    echo "Preserving usbipd pid file with unexpected PID $file_pid (state expects $expected_pid): $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  printf '%s\n' "$file_pid"
+}
+
+yk_orphan_usbipd_state() {
+  local pid_file="$1"
+  local pid
+  local previous_pid_file="$yk_usbipd_pid_file"
+
+  if pid="$(yk_pid_file_pid "$pid_file")"; then
+    yk_usbipd_pid_file="$pid_file"
+    if yk_owned_usbipd_running "$pid"; then
+      printf '  orphan usbipd: %s pid=%s verified-owned\n' "$pid_file" "$pid"
+    elif yk_process_exists "$pid"; then
+      printf '  unverified usbipd pid file: %s pid=%s (preserved)\n' "$pid_file" "$pid"
+    else
+      printf '  stale usbipd pid file: %s pid=%s\n' "$pid_file" "$pid"
+    fi
+  else
+    printf '  invalid usbipd pid file: %s (preserved)\n' "$pid_file"
+  fi
+  yk_usbipd_pid_file="$previous_pid_file"
+}
+
+yk_status_orphan_usbipd() {
+  local pid_file
+  local state_file
+  local found=0
+
+  while IFS= read -r pid_file; do
+    [ -n "$pid_file" ] || continue
+    local owned_by_state=0
+    while IFS= read -r state_file; do
+      [ -n "$state_file" ] || continue
+      if yk_state_owns_pid_file "$state_file" "$pid_file"; then
+        owned_by_state=1
+        break
+      fi
+    done < <(yk_standard_state_files)
+    [ "$owned_by_state" = "0" ] || continue
+    found=1
+    yk_orphan_usbipd_state "$pid_file"
+  done < <(yk_standard_pid_files)
+
+  [ "$found" = "1" ] || echo "  none"
 }
 
 yk_wait_local_usbipd() {
@@ -1119,6 +1415,197 @@ sudo -n modprobe vhci-hcd'
   yk_ssh "$remote_script"
 }
 
+yk_remote_module_check() {
+  local remote_script
+  # Doctor is deliberately read-only: unlike launch preflight this script
+  # never invokes modprobe or any other privileged state change.
+  # shellcheck disable=SC2016
+  remote_script='set -u
+kernel=$(uname -r 2>&1) || exit $?
+command -v usbip >/dev/null 2>&1 || { echo "Remote prerequisite missing: usbip" >&2; exit 127; }
+command -v timeout >/dev/null 2>&1 || { echo "Remote prerequisite missing: timeout" >&2; exit 127; }
+tree="/lib/modules/$kernel"
+if [ ! -d "$tree" ]; then
+  echo "Remote module tree is missing for running kernel $kernel." >&2
+  exit 1
+fi
+module_path=""
+if command -v modinfo >/dev/null 2>&1; then
+  module_path=$(modinfo -n vhci-hcd 2>&1) || { printf "%s\\n" "$module_path" >&2; exit 1; }
+else
+  module_path=$(find "$tree" -type f \( -name "vhci-hcd.ko" -o -name "vhci-hcd.ko.*" \) -print -quit 2>/dev/null || true)
+fi
+if [ -z "$module_path" ] || [ ! -e "$module_path" ] || [ "${module_path#"$tree"/}" = "$module_path" ]; then
+  echo "Remote vhci-hcd module is not available for running kernel $kernel." >&2
+  exit 1
+fi
+printf "Remote USB/IP prerequisites available (kernel %s).\\n" "$kernel"'
+  yk_ssh "$remote_script"
+}
+
+doctor_check() {
+  local label="$1"
+  shift
+  if "$@"; then
+    echo "doctor: ok: $label"
+    return 0
+  fi
+  echo "doctor: FAIL: $label" >&2
+  return 1
+}
+
+doctor_local_display() {
+  [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]
+}
+
+doctor_remote_chrome() {
+  local host="$1"
+  local chrome_command="$2"
+  local quoted_chrome
+  printf -v quoted_chrome '%q' "$chrome_command"
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+    "command -v waypipe >/dev/null && command -v $quoted_chrome >/dev/null"
+}
+
+doctor_chrome_command() {
+  (chrome_process_pattern "$1" >/dev/null)
+}
+
+doctor_local_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+doctor_local_key() {
+  yk_local_candidate_exists
+}
+
+chrome_doctor() {
+  local host=""
+  local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
+  local yubikey_mode="auto"
+  local yk_args=()
+  local code=0
+  local command_name
+  local local_key=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --chrome-command)
+        [ "$#" -ge 2 ] || die "$1 requires a command."
+        chrome_command="$2"
+        shift 2
+        ;;
+      --chrome-command=*)
+        chrome_command="${1#*=}"
+        shift
+        ;;
+      --with-yubikey)
+        yubikey_mode="force"
+        shift
+        ;;
+      --no-yubikey)
+        yubikey_mode="off"
+        shift
+        ;;
+      --yubikey-usb-id)
+        [ "$#" -ge 2 ] || die "$1 requires a USB id."
+        yk_args+=("--usb-id" "$2")
+        shift 2
+        ;;
+      --yubikey-usb-id=*)
+        yk_args+=("--usb-id" "${1#*=}")
+        shift
+        ;;
+      --yubikey-port)
+        [ "$#" -ge 2 ] || die "$1 requires a port."
+        yk_args+=("--port" "$2")
+        shift 2
+        ;;
+      --yubikey-port=*)
+        yk_args+=("--port" "${1#*=}")
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -*)
+        die "Unknown doctor option: $1"
+        ;;
+      *)
+        [ -z "$host" ] || die "Unexpected argument: $1"
+        host="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$host" ] || die "Remote host is required. Example: $PROGRAM doctor HOST"
+  if [ "$yubikey_mode" != "off" ]; then
+    yk_prepare_for_launch "$host" "${yk_args[@]}"
+  else
+    # Chrome-only doctor must not parse or validate YubiKey settings.
+    yk_remote="$host"
+  fi
+
+  if ! doctor_check "local graphical display variables" doctor_local_display; then
+    echo "doctor: set WAYLAND_DISPLAY or DISPLAY from a graphical session before launching." >&2
+    code=1
+  fi
+  for command_name in ssh waypipe tmux; do
+    if ! doctor_check "local command: $command_name" doctor_local_command "$command_name"; then
+      code=1
+    fi
+  done
+  if ! doctor_check "Chrome command is a simple executable name/path" doctor_chrome_command "$chrome_command"; then
+    code=1
+  fi
+  if ! doctor_check "detached SSH reachability and remote waypipe/$chrome_command" \
+    doctor_remote_chrome "$host" "$chrome_command"; then
+    echo "doctor: verify BatchMode SSH and install waypipe plus $chrome_command on $host." >&2
+    code=1
+  fi
+
+  if [ "$yubikey_mode" = "off" ]; then
+    echo "doctor: YubiKey checks skipped by --no-yubikey."
+  else
+    if yk_local_candidate_exists; then
+      local_key=1
+      echo "doctor: ok: local YubiKey with USB id $yk_usb_id is visible"
+    elif [ "$yubikey_mode" = "force" ]; then
+      echo "doctor: FAIL: local YubiKey with USB id $yk_usb_id is visible" >&2
+      echo "doctor: no matching local YubiKey found; --with-yubikey cannot proceed." >&2
+      code=1
+    else
+      echo "doctor: warning: no local YubiKey found; auto mode will launch without forwarding."
+    fi
+
+    if [ "$yubikey_mode" = "force" ] || [ "$local_key" = "1" ]; then
+      for command_name in usbip ss timeout; do
+        if ! doctor_check "local command: $command_name" doctor_local_command "$command_name"; then
+          code=1
+        fi
+      done
+      if ! doctor_check "local usbip-host module is available for the running kernel" yk_local_module_preflight; then
+        code=1
+      fi
+      if ! doctor_check "remote usbip/vhci-hcd prerequisites (read-only)" yk_remote_module_check; then
+        echo "doctor: remote module check never loads modules; repair the remote kernel/module tree before launch." >&2
+        code=1
+      fi
+    else
+      echo "doctor: USB/IP module checks skipped because auto mode found no local key."
+    fi
+  fi
+
+  if [ "$code" = "0" ]; then
+    echo "doctor: healthy"
+  else
+    echo "doctor: degraded; repair the failed checks before launching." >&2
+  fi
+  return "$code"
+}
+
 yk_ensure_local_ready() {
   need ssh
   need usbip
@@ -1136,7 +1623,26 @@ yk_ensure_local_ready() {
   fi
 
   if ! ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
-    sudo rm -f "$yk_usbipd_pid_file" || return $?
+    if [ -f "$yk_usbipd_pid_file" ]; then
+      local existing_pid
+      existing_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+      if [[ ! "$existing_pid" =~ ^[0-9]+$ ]]; then
+        echo "An invalid usbipd pid file is present at $yk_usbipd_pid_file; preserving it." >&2
+        return 1
+      fi
+      if yk_owned_usbipd_running "$existing_pid"; then
+        echo "An owned usbipd process is recorded but not listening on port $yk_usbip_port; refusing to overwrite $yk_usbipd_pid_file." >&2
+        return 1
+      fi
+      if yk_process_exists "$existing_pid"; then
+        echo "An unverified process owns usbipd pid file $yk_usbipd_pid_file; preserving it." >&2
+        return 1
+      fi
+      if ! sudo rm -f "$yk_usbipd_pid_file"; then
+        echo "Could not remove stale usbipd pid file $yk_usbipd_pid_file." >&2
+        return 1
+      fi
+    fi
     yk_started_usbipd=1
     yk_phase="usbipd-starting"
     # Record ownership before invoking the daemon so a signal during startup
@@ -1152,6 +1658,10 @@ yk_ensure_local_ready() {
       echo "usbipd started without recording a valid pid in $yk_usbipd_pid_file." >&2
       return 1
     fi
+    if ! yk_owned_usbipd_running "$yk_usbipd_pid"; then
+      echo "usbipd started with pid $yk_usbipd_pid but exact ownership could not be verified; preserving recovery state." >&2
+      return 1
+    fi
     yk_phase="usbipd-started"
     # Persist the validated daemon PID before subsequent visibility/attach
     # work so an interruption can still stop this daemon through `stop HOST`.
@@ -1159,11 +1669,14 @@ yk_ensure_local_ready() {
     yk_wait_local_usbipd || return $?
   elif [ -f "$yk_usbipd_pid_file" ]; then
     yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
-    if yk_owned_usbipd_running "$yk_usbipd_pid"; then
+    if [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
+      echo "An invalid usbipd pid file is present at $yk_usbipd_pid_file; preserving it." >&2
+      return 1
+    elif yk_owned_usbipd_running "$yk_usbipd_pid"; then
       yk_started_usbipd=1
     else
       yk_usbipd_pid=""
-      sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1 || true
+      echo "Preserving unverified usbipd pid file $yk_usbipd_pid_file." >&2
     fi
   fi
 }
@@ -1203,13 +1716,27 @@ yk_local_candidate_exists() {
 }
 
 yk_close_tunnel() {
+  local code=0
+
   if [ -S "$yk_control_socket" ]; then
+    # -O exit may fail when the peer already died; unlinking the exact
+    # recorded socket still completes cleanup in that case.  If the socket
+    # survives, however, retain state so stop can be retried.
     ssh -S "$yk_control_socket" -O exit "$yk_remote" >/dev/null 2>&1 || true
-    if [ -S "$yk_control_socket" ]; then
-      unlink "$yk_control_socket" || true
+  fi
+  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+    if ! unlink "$yk_control_socket" >/dev/null 2>&1; then
+      echo "Could not remove SSH control socket $yk_control_socket." >&2
+      code=1
     fi
   fi
-  yk_tunnel_open=0
+  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+    echo "SSH control socket remains after cleanup: $yk_control_socket" >&2
+    code=1
+  else
+    yk_tunnel_open=0
+  fi
+  return "$code"
 }
 
 yk_open_tunnel() {
@@ -1304,24 +1831,186 @@ yk_other_exports_exist() {
 yk_stop_owned_usbipd() {
   [ "$yk_started_usbipd" = "1" ] || return 0
 
-  if [ -z "$yk_usbipd_pid" ] && [ -f "$yk_usbipd_pid_file" ]; then
-    yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+  if [ -n "$yk_usbipd_pid" ] && [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
+    echo "Owned usbipd has an invalid recorded PID; preserving recovery state." >&2
+    return 1
   fi
 
-  if [ "$yk_stop_usbipd" != "1" ]; then
-    echo "Leaving tool-started usbipd pid $yk_usbipd_pid running by request."
-    return 0
+  if [ -f "$yk_usbipd_pid_file" ]; then
+    local pid_file_pid
+    if ! pid_file_pid="$(yk_validate_usbipd_pid_file "$yk_usbipd_pid")"; then
+      return 1
+    fi
+    if [ -z "$yk_usbipd_pid" ]; then
+      yk_usbipd_pid="$pid_file_pid"
+    fi
   fi
 
-  if yk_other_exports_exist; then
-    echo "Leaving tool-started usbipd running because other USB/IP exports remain." >&2
-    return 0
+  if [ -z "$yk_usbipd_pid" ]; then
+    echo "Owned usbipd has no recorded PID; preserving recovery state." >&2
+    return 1
   fi
 
+  local owned=0
   if yk_owned_usbipd_running "$yk_usbipd_pid"; then
-    sudo kill "$yk_usbipd_pid" >/dev/null 2>&1 || true
+    owned=1
+  elif yk_process_exists "$yk_usbipd_pid"; then
+    echo "Refusing to stop unverified process at usbipd pid $yk_usbipd_pid; preserving recovery state." >&2
+    return 1
   fi
-  sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1 || true
+
+  if [ "$owned" = "1" ]; then
+    if [ "$yk_stop_usbipd" != "1" ]; then
+      echo "Leaving tool-started usbipd pid $yk_usbipd_pid running by request."
+      return 0
+    fi
+
+    if yk_other_exports_exist; then
+      echo "Leaving tool-started usbipd running because other USB/IP exports remain." >&2
+      return 0
+    fi
+
+    # Re-check exact ownership immediately before the destructive signal.
+    if ! yk_owned_usbipd_running "$yk_usbipd_pid"; then
+      echo "Refusing to stop usbipd pid $yk_usbipd_pid after ownership changed; preserving recovery state." >&2
+      return 1
+    fi
+    if ! sudo kill "$yk_usbipd_pid" >/dev/null 2>&1; then
+      echo "Could not stop owned usbipd pid $yk_usbipd_pid." >&2
+      return 1
+    fi
+    # A mocked or very short-lived process may disappear immediately.  Wait a
+    # bounded interval for a real verified process before retaining the ledger.
+    if ! yk_wait_usbipd_exit "$yk_usbipd_pid"; then
+      echo "Owned usbipd pid $yk_usbipd_pid is still running after kill." >&2
+      return 1
+    fi
+    if yk_process_exists "$yk_usbipd_pid"; then
+      echo "Refusing to remove usbipd pid file after ownership changed for pid $yk_usbipd_pid." >&2
+      return 1
+    fi
+  fi
+
+  if [ -f "$yk_usbipd_pid_file" ] &&
+    ! yk_validate_usbipd_pid_file "$yk_usbipd_pid" >/dev/null; then
+    return 1
+  fi
+  if ! sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1; then
+    echo "Could not remove owned usbipd pid file $yk_usbipd_pid_file." >&2
+    return 1
+  fi
+  yk_started_usbipd=0
+  yk_usbipd_pid=""
+  return 0
+}
+
+yk_stop_orphan_usbipd_files() {
+  local pid_file
+  local state_file
+  local pid
+  local final_pid
+  local previous_pid_file="$yk_usbipd_pid_file"
+  local code=0
+  local found=0
+
+  while IFS= read -r pid_file; do
+    [ -n "$pid_file" ] || continue
+    local owned_by_state=0
+    while IFS= read -r state_file; do
+      [ -n "$state_file" ] || continue
+      if yk_state_owns_pid_file "$state_file" "$pid_file"; then
+        owned_by_state=1
+        break
+      fi
+    done < <(yk_standard_state_files)
+    [ "$owned_by_state" = "0" ] || continue
+    found=1
+    yk_usbipd_pid_file="$pid_file"
+
+    if ! pid="$(yk_pid_file_pid "$pid_file")"; then
+      echo "Preserving invalid tool-shaped usbipd pid file: $pid_file" >&2
+      code=1
+      continue
+    fi
+
+    # Classify the process before applying stop policy.  An unrelated live
+    # process must remain protected even when STOP_USBIPD=0 or other exports
+    # make retention intentional for a positively owned daemon.
+    if ! yk_owned_usbipd_running "$pid"; then
+      if yk_process_exists "$pid"; then
+        echo "Preserving unverified process at usbipd pid $pid ($pid_file)." >&2
+        code=1
+        continue
+      fi
+      echo "Reconciling stale usbipd pid file: $pid_file."
+      if ! sudo rm -f "$pid_file" >/dev/null 2>&1; then
+        echo "Could not remove stale usbipd pid file $pid_file." >&2
+        code=1
+      fi
+      continue
+    fi
+
+    if [ "$yk_stop_usbipd" != "1" ]; then
+      echo "Leaving verified orphan usbipd pid $pid running by request ($pid_file)."
+      continue
+    fi
+    if yk_other_exports_exist; then
+      echo "Leaving verified orphan usbipd pid $pid because other USB/IP exports remain ($pid_file)." >&2
+      continue
+    fi
+
+    # Re-read immediately before kill/rm so a PID-file replacement race
+    # cannot turn a previously verified path into authority over another PID.
+    if [ "$(yk_pid_file_pid "$pid_file" 2>/dev/null || true)" != "$pid" ]; then
+      echo "Preserving changed usbipd pid file during reconciliation: $pid_file" >&2
+      code=1
+      continue
+    fi
+    if ! yk_owned_usbipd_running "$pid"; then
+      echo "Preserving usbipd pid file after ownership changed for pid $pid: $pid_file" >&2
+      code=1
+      continue
+    fi
+
+    if ! sudo kill "$pid" >/dev/null 2>&1; then
+      echo "Could not stop verified orphan usbipd pid $pid ($pid_file)." >&2
+      code=1
+      continue
+    fi
+    if ! yk_wait_usbipd_exit "$pid"; then
+      echo "Verified orphan usbipd pid $pid is still running ($pid_file)." >&2
+      code=1
+      continue
+    fi
+    if yk_process_exists "$pid"; then
+      echo "Preserving unverified process at usbipd pid $pid ($pid_file)." >&2
+      code=1
+      continue
+    fi
+
+    # The daemon is gone, so an absent pid file is already reconciled.  If a
+    # replacement remains, require the original verified PID before unlinking
+    # it; invalid or changed evidence must be preserved for inspection.
+    if [ -e "$pid_file" ] || [ -L "$pid_file" ]; then
+      final_pid="$(yk_pid_file_pid "$pid_file" 2>/dev/null || true)"
+      if [ "$final_pid" != "$pid" ]; then
+        echo "Preserving replaced or invalid usbipd pid file after stop: $pid_file" >&2
+        code=1
+        continue
+      fi
+    fi
+
+    if ! sudo rm -f "$pid_file" >/dev/null 2>&1; then
+      echo "Could not remove reconciled usbipd pid file $pid_file." >&2
+      code=1
+    else
+      echo "Reconciled orphan usbipd pid file: $pid_file."
+    fi
+  done < <(yk_standard_pid_files)
+
+  yk_usbipd_pid_file="$previous_pid_file"
+  [ "$found" = "1" ] || return 0
+  return "$code"
 }
 
 yk_remote_probe_readiness() {
@@ -1439,7 +2128,9 @@ chrome_detached_cleanup() {
     tmux kill-session -t "$chrome_detached_session" >/dev/null 2>&1 || true
   fi
   if [ "$chrome_detached_yk_owned" = "1" ]; then
-    yk_stop >/dev/null 2>&1 || true
+    if ! yk_stop; then
+      echo "YubiKey cleanup remains incomplete; retry with $PROGRAM stop $yk_remote." >&2
+    fi
   fi
 }
 
@@ -1552,7 +2243,6 @@ chrome_launch_detached_with_yubikey() {
 
   if ! chrome_wait_for_yubikey_window "$host" "$session"; then
     chrome_detached_cleanup
-    rm -f "$yk_log_file"
     trap - INT TERM HUP
     return 1
   fi
@@ -1560,7 +2250,6 @@ chrome_launch_detached_with_yubikey() {
   if ! tmux new-window -d -t "$session" -n chrome "$chrome_command_line"; then
     echo "Could not create the remote Chrome tmux window after YubiKey readiness." >&2
     chrome_detached_cleanup
-    rm -f "$yk_log_file"
     trap - INT TERM HUP
     return 1
   fi
@@ -1570,23 +2259,12 @@ chrome_launch_detached_with_yubikey() {
 }
 
 yk_rollback_start() {
-  if [ -n "$yk_active_busid" ] &&
-    [ "$yk_attach_state" != "none" ]; then
-    yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1 || true
+  if yk_cleanup_resources 0; then
+    yk_phase="failed"
+    return 0
   fi
-  yk_close_tunnel
-  if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" = "bound" ]; then
-    sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
-  elif [ -n "$yk_active_busid" ] && [ "$yk_bind_state" = "attempting" ] &&
-    [ "$yk_bound_before" = "0" ] &&
-    { [ -e "/sys/bus/usb/drivers/usbip-host/$yk_active_busid" ] ||
-      [ -L "/sys/bus/usb/drivers/usbip-host/$yk_active_busid" ]; }; then
-    sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
-  fi
-  yk_stop_owned_usbipd
-  rm -f "$yk_state_file"
-  yk_release_attempt
-  yk_phase="failed"
+  # Keep the cleanup-failed phase and ledger for a later stop HOST retry.
+  return 1
 }
 
 yk_start_impl() {
@@ -1612,8 +2290,7 @@ yk_start_impl() {
   yk_active_busid="$busid"
   yk_bind_state="attempting"
   yk_bound_before=0
-  if [ -e "/sys/bus/usb/drivers/usbip-host/$busid" ] ||
-    [ -L "/sys/bus/usb/drivers/usbip-host/$busid" ]; then
+  if yk_local_busid_bound "$busid"; then
     yk_bound_before=1
   fi
   yk_phase="bind-starting"
@@ -1635,7 +2312,6 @@ yk_start_impl() {
     return 1
   fi
 
-  yk_remote_detach_busid "$busid" >/dev/null 2>&1 || true
   yk_attach_state="attempting"
   yk_phase="attach-starting"
   yk_write_state || return $?
@@ -1660,6 +2336,160 @@ yk_start_impl() {
   else
     echo "Remote readiness detected via matching USB/udev FIDO metadata only (lower confidence; fido2-token did not confirm the exact device)." >&2
   fi
+}
+
+yk_cleanup_mark_failure() {
+  local message="$1"
+  yk_cleanup_unresolved=1
+  yk_cleanup_messages+="$message"$'\n'
+}
+
+yk_cleanup_persist_state() {
+  yk_phase="cleanup"
+  if ! yk_write_state; then
+    yk_cleanup_mark_failure "Could not persist YubiKey cleanup ledger: $yk_state_file"
+    return 1
+  fi
+  return 0
+}
+
+yk_unbind_owned_busid() {
+  local busid_bound=0
+  [ -n "$yk_active_busid" ] || return 0
+  case "$yk_bind_state" in
+    none)
+      return 0
+      ;;
+    attempting)
+      if [ "$yk_bound_before" = "1" ]; then
+        # The device was already bound before this attempt; never detach it.
+        yk_bind_state="none"
+        return 0
+      fi
+      if ! yk_local_busid_bound "$yk_active_busid"; then
+        yk_bind_state="none"
+        return 0
+      fi
+      ;;
+    bound)
+      [ "$yk_bound_before" = "1" ] && {
+        yk_bind_state="none"
+        return 0
+      }
+      ;;
+    *)
+      echo "Unknown local bind ownership state '$yk_bind_state' for busid $yk_active_busid." >&2
+      return 1
+      ;;
+  esac
+
+  if yk_local_busid_bound "$yk_active_busid"; then
+    busid_bound=1
+  else
+    yk_bind_state="none"
+    return 0
+  fi
+
+  if ! sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1; then
+    echo "Could not unbind local USB/IP busid $yk_active_busid." >&2
+    return 1
+  fi
+  if [ "$busid_bound" = "1" ] && yk_local_busid_bound "$yk_active_busid"; then
+    echo "Local USB/IP busid $yk_active_busid remains bound after unbind." >&2
+    return 1
+  fi
+  yk_bind_state="none"
+  return 0
+}
+
+yk_cleanup_resources() {
+  local emit_success="${1:-0}"
+  local active_busid="$yk_active_busid"
+  local cleanup_message
+
+  yk_cleanup_unresolved=0
+  yk_cleanup_messages=""
+
+  if [ -n "$yk_active_busid" ] && [ "$yk_attach_state" != "none" ]; then
+    if yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1; then
+      yk_attach_state="none"
+      yk_cleanup_persist_state || true
+    else
+      yk_cleanup_mark_failure "Could not detach remote USB/IP busid $yk_active_busid."
+    fi
+  fi
+
+  if yk_close_tunnel; then
+    yk_cleanup_persist_state || true
+  else
+    yk_cleanup_mark_failure "Could not close SSH USB/IP tunnel $yk_control_socket."
+  fi
+
+  if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" != "none" ]; then
+    if yk_unbind_owned_busid; then
+      yk_cleanup_persist_state || true
+    else
+      yk_cleanup_mark_failure "Could not release local USB/IP busid $yk_active_busid."
+    fi
+  fi
+
+  if [ "$yk_started_usbipd" = "1" ]; then
+    if yk_stop_owned_usbipd; then
+      # A daemon retained by explicit policy or other exports is no longer
+      # part of this session's cleanup obligation; hostless reconciliation
+      # can discover its standard PID file later.
+      yk_started_usbipd=0
+      yk_usbipd_pid=""
+      yk_cleanup_persist_state || true
+    else
+      yk_cleanup_mark_failure "Could not stop owned usbipd pid ${yk_usbipd_pid:-unknown}."
+    fi
+  fi
+
+  if [ "$yk_cleanup_unresolved" = "1" ]; then
+    yk_phase="cleanup-failed"
+    yk_write_state >/dev/null 2>&1 || true
+    while IFS= read -r cleanup_message; do
+      [ -n "$cleanup_message" ] || continue
+      echo "$cleanup_message" >&2
+    done <<<"$yk_cleanup_messages"
+    echo "YubiKey cleanup is incomplete; state retained for retry: $yk_state_file" >&2
+    return 1
+  fi
+
+  # Do not discard the recovery ledger until every owned resource has been
+  # released (or intentionally retained).  This ordering also keeps the log
+  # available if state removal itself fails.
+  if [ -n "$yk_log_file" ] && [ -e "$yk_log_file" ]; then
+    if ! rm -f "$yk_log_file"; then
+      yk_cleanup_mark_failure "Could not remove YubiKey cleanup log $yk_log_file."
+    fi
+  fi
+  if [ "$yk_cleanup_unresolved" = "0" ] && [ -n "$yk_attempt_lock" ] && [ -d "$yk_attempt_lock" ]; then
+    if ! yk_release_attempt; then
+      yk_cleanup_mark_failure "Could not release YubiKey attempt lock $yk_attempt_lock."
+    fi
+  fi
+  if [ "$yk_cleanup_unresolved" = "0" ]; then
+    if ! rm -f "$yk_state_file"; then
+      yk_cleanup_mark_failure "Could not remove YubiKey recovery state $yk_state_file."
+    fi
+  fi
+  if [ "$yk_cleanup_unresolved" = "1" ]; then
+    yk_phase="cleanup-failed"
+    yk_write_state >/dev/null 2>&1 || true
+    echo "YubiKey cleanup is incomplete; state retained for retry: $yk_state_file" >&2
+    return 1
+  fi
+
+  if [ "$emit_success" = "1" ]; then
+    if [ -n "$active_busid" ]; then
+      echo "Stopped YubiKey USB/IP forwarding for $yk_remote (busid $active_busid)."
+    else
+      echo "Stopped provisional YubiKey USB/IP setup for $yk_remote."
+    fi
+  fi
+  return 0
 }
 
 yk_start() {
@@ -1707,25 +2537,7 @@ yk_stop() {
   fi
   [ "$load_code" -eq 0 ] || return "$load_code"
 
-  if [ -n "$yk_active_busid" ] && [ "$yk_attach_state" != "none" ]; then
-    yk_remote_detach_busid "$yk_active_busid" >/dev/null ||
-      echo "Could not detach remote USB/IP busid $yk_active_busid; continuing local cleanup." >&2
-  fi
-  yk_close_tunnel
-
-  if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" = "bound" ]; then
-    sudo usbip unbind -b "$yk_active_busid" >/dev/null 2>&1 || true
-  fi
-  yk_stop_owned_usbipd
-  rm -f "$yk_state_file"
-  yk_release_attempt
-  rm -f "$yk_log_file"
-
-  if [ -n "$yk_active_busid" ]; then
-    echo "Stopped YubiKey USB/IP forwarding for $yk_remote (busid $yk_active_busid)."
-  else
-    echo "Stopped provisional YubiKey USB/IP setup for $yk_remote."
-  fi
+  yk_cleanup_resources 1
 }
 
 yk_cleanup() {
@@ -1780,6 +2592,10 @@ main() {
     status)
       shift
       chrome_status "$@"
+      ;;
+    doctor)
+      shift
+      chrome_doctor "$@"
       ;;
     attach)
       shift

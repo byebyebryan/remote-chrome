@@ -147,9 +147,18 @@ Check, attach to, or stop the session:
 
 ```bash
 remote-chrome status remote-host
+remote-chrome status --live remote-host
+remote-chrome doctor remote-host
 remote-chrome attach remote-host
 remote-chrome stop remote-host
 ```
+
+`status --live HOST` performs read-only health checks for the current tmux
+windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, and remote
+YubiKey readiness. It returns nonzero and identifies the failing check when a
+resource is stale or unreachable. `doctor HOST` is a preflight-only diagnostic
+for local display/commands, detached SSH, remote Waypipe/Chrome, and USB/IP
+module prerequisites; it never loads modules or changes USB/IP state.
 
 Pass extra Chrome arguments after `--`:
 
@@ -253,8 +262,8 @@ remote-chrome stop
 ```
 
 Use the matching read-only overview before teardown to list default managed
-tmux sessions, their windows, recorded YubiKey forwarding, and provisional
-setup locks:
+tmux sessions, their windows, recorded YubiKey forwarding, provisional setup
+locks, and standard-runtime orphan `usbipd` PID files:
 
 ```bash
 remote-chrome status
@@ -271,10 +280,14 @@ prefix, or when using a custom YubiKey control socket.
 The tool records provisional lifecycle state, the exact local bus ID, and any
 `usbipd` process it started in a state file beside the SSH control socket.
 Cleanup handles interrupted setup, only detaches/unbinds that recorded device,
-never stops a pre-existing `usbipd`, and leaves a tool-started daemon running
-while other USB/IP exports still exist. `status HOST` reports tmux windows and
-the managed YubiKey phase/readiness without changing anything; it also exposes
-a provisional setup lock that exists before the first state write.
+never stops a pre-existing or unverified `usbipd`, and leaves a tool-started
+daemon running while other USB/IP exports still exist. If any owned cleanup
+step fails, stop reports the failure, keeps the state/log for a later retry,
+and returns nonzero. `status HOST` reports tmux windows and the managed YubiKey
+phase/readiness without changing anything; it also exposes a provisional setup
+lock that exists before the first state write. Hostless stop may reconcile only
+a daemon whose standard PID file, `/proc` command name, and exact `--pid` path
+all verify as tool-owned, with no remaining USB/IP exports.
 
 ## Configuration
 

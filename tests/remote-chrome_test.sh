@@ -31,7 +31,7 @@ test_start_rolls_back_partial_setup() (
   yk_control_socket="$test_dir/control.sock"
   yk_usbip_port=3240
   yk_set_runtime_paths
-  local events=""
+  local events="" bind_present=0
 
   yk_ensure_local_ready() {
     yk_started_usbipd=1
@@ -39,6 +39,7 @@ test_start_rolls_back_partial_setup() (
   }
   yk_ensure_remote_ready() { return 0; }
   yk_first_busid() { printf '%s\n' "5-1.2.2"; }
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
   yk_open_tunnel() {
     events+="open-tunnel "
     return 0
@@ -55,6 +56,10 @@ test_start_rolls_back_partial_setup() (
   yk_stop_owned_usbipd() { events+="stop-daemon "; }
   sudo() {
     events+="sudo:$* "
+    case "$*" in
+      *"usbip bind"*) bind_present=1 ;;
+      *"usbip unbind"*) bind_present=0 ;;
+    esac
     return 0
   }
 
@@ -207,10 +212,13 @@ test_stop_cleans_only_recorded_busid() (
   yk_usbip_port=3240
   yk_set_runtime_paths
   yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
   yk_started_usbipd=1
   yk_usbipd_pid=4242
   yk_write_state
-  local events=""
+  local events="" bind_present=1
+
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
 
   yk_remote_detach_busid() {
     events+="detach:$1 "
@@ -220,6 +228,7 @@ test_stop_cleans_only_recorded_busid() (
   yk_stop_owned_usbipd() { events+="stop-daemon "; }
   sudo() {
     events+="sudo:$* "
+    [[ "$*" == *"usbip unbind"* ]] && bind_present=0
     return 0
   }
 
@@ -241,10 +250,13 @@ test_stop_cleans_yubikey_without_yubikey_window() (
   yk_usbip_port=3240
   yk_prepare_for_launch "test-host"
   yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
   yk_started_usbipd=1
   yk_usbipd_pid=4242
   yk_write_state
-  local events=""
+  local events="" bind_present=1
+
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
 
   need() { :; }
   tmux() { events+="kill-session:$* "; return 0; }
@@ -256,6 +268,7 @@ test_stop_cleans_yubikey_without_yubikey_window() (
   yk_stop_owned_usbipd() { events+="stop-daemon "; }
   sudo() {
     events+="sudo:$* "
+    [[ "$*" == *"usbip unbind"* ]] && bind_present=0
     return 0
   }
 
@@ -393,6 +406,7 @@ test_usbipd_state_write_failure_stops_before_daemon() (
   local test_dir events=""
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
 
   yk_remote="test-host"
   yk_control_socket="$test_dir/control.sock"
@@ -721,6 +735,7 @@ test_stop_loads_earliest_usbipd_provisional_phase() (
   local test_dir
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
 
   yk_remote="test-host"
   yk_control_socket="$test_dir/control.sock"
@@ -911,7 +926,7 @@ test_status_reports_legacy_state_truthfully() (
 )
 
 test_stop_cleans_legacy_state_without_lock_or_token() (
-  local test_dir events=""
+  local test_dir events="" bind_present=1
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
 
@@ -924,10 +939,15 @@ test_stop_cleans_legacy_state_without_lock_or_token() (
     $'busid\t5-1.2.2' \
     $'started_usbipd\t0' \
     $'usbipd_pid\t' >"$yk_state_file"
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
   yk_remote_detach_busid() { events+="detach:$1 "; }
   yk_close_tunnel() { events+="close "; }
   yk_stop_owned_usbipd() { events+="daemon "; }
-  sudo() { events+="sudo:$* "; return 0; }
+  sudo() {
+    events+="sudo:$* "
+    [[ "$*" == *"usbip unbind"* ]] && bind_present=0
+    return 0
+  }
 
   yk_stop
 
@@ -1124,6 +1144,764 @@ test_version_flag_reports_version() (
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
 
+test_stop_partial_cleanup_retains_ledger_and_attempts_all_resources() (
+  local test_dir output code=0 events="" bind_present=1
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="ready"
+  yk_readiness="verified-fido"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="attached"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
+
+  yk_remote_detach_busid() { events+="detach "; return 1; }
+  yk_close_tunnel() { events+="close "; return 0; }
+  yk_stop_owned_usbipd() { events+="daemon "; return 0; }
+  sudo() {
+    events+="sudo:$* "
+    [[ "$*" == *"usbip unbind"* ]] && bind_present=0
+    return 0
+  }
+
+  if yk_stop >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(command cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "partial cleanup unexpectedly succeeded"
+  assert_contains "$events" "detach"
+  assert_contains "$events" "close"
+  assert_contains "$events" "usbip unbind -b 5-1.2.2"
+  assert_contains "$events" "daemon"
+  assert_contains "$output" "state retained for retry"
+  [ -f "$yk_state_file" ] || fail "partial cleanup removed recovery state"
+  assert_contains "$(cat "$yk_state_file")" $'phase	cleanup-failed'
+  [[ "$output" != *"Stopped YubiKey"* ]] || fail "partial cleanup printed full success"
+)
+
+test_stop_tunnel_failure_still_attempts_unbind_and_daemon() (
+  local test_dir events="" bind_present=1
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="none"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
+  yk_close_tunnel() { events+="close "; return 1; }
+  yk_stop_owned_usbipd() { events+="daemon "; return 1; }
+  sudo() { events+="sudo:$* "; return 1; }
+
+  yk_stop >/dev/null 2>&1 || true
+  assert_contains "$events" "close"
+  assert_contains "$events" "usbip unbind -b 5-1.2.2"
+  assert_contains "$events" "daemon"
+  [ -f "$yk_state_file" ] || fail "tunnel/daemon failures removed recovery state"
+)
+
+test_rollback_failure_retains_state_for_retry() (
+  local test_dir events="" code=0 bind_present=1
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_attempt_owned=1
+  mkdir -- "$yk_attempt_lock"
+  yk_phase="attached"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="attached"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
+  yk_remote_detach_busid() { events+="detach "; return 1; }
+  yk_close_tunnel() { events+="close "; return 0; }
+  yk_stop_owned_usbipd() { events+="daemon "; return 1; }
+  sudo() { events+="sudo:$* "; return 1; }
+
+  yk_rollback_start || code=$?
+  [ "$code" -ne 0 ] || fail "rollback unexpectedly succeeded"
+  assert_contains "$events" "detach"
+  assert_contains "$events" "close"
+  assert_contains "$events" "usbip unbind"
+  assert_contains "$events" "daemon"
+  [ -f "$yk_state_file" ] || fail "rollback removed state after cleanup failure"
+  [ -d "$yk_attempt_lock" ] || fail "rollback removed attempt lock after cleanup failure"
+)
+
+test_orphan_usbipd_status_and_reconciliation_require_exact_ownership() (
+  local test_dir output events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  : >"$test_dir/remote-chrome-usbipd-3240.pid"
+  printf '%s\n' 4242 >"$test_dir/remote-chrome-usbipd-3240.pid"
+  printf '%s\n' 4343 >"$test_dir/remote-chrome-usbipd-3241.pid"
+
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  mkdir -p "$yk_usbip_host_sysfs"
+  yk_usbipd_pid_file=""
+  yk_owned_usbipd_running() {
+    [ "$1" = "4242" ] && [ "$yk_usbipd_pid_file" = "$test_dir/remote-chrome-usbipd-3240.pid" ]
+  }
+  yk_process_exists() { [ "$1" = "4343" ]; }
+  output="$(yk_status_orphan_usbipd)"
+  assert_contains "$output" "orphan usbipd: $test_dir/remote-chrome-usbipd-3240.pid pid=4242 verified-owned"
+  assert_contains "$output" "unverified usbipd pid file: $test_dir/remote-chrome-usbipd-3241.pid"
+
+  sudo() {
+    events+="sudo:$* "
+    case "${1:-}" in
+      rm) command rm -f "$3" ;;
+    esac
+    return 0
+  }
+  yk_stop_orphan_usbipd_files || code=$?
+  [ "$code" -ne 0 ] || fail "reconciliation did not report preserved unverified daemon"
+  assert_contains "$events" "kill 4242"
+  assert_contains "$events" "rm -f $test_dir/remote-chrome-usbipd-3240.pid"
+  [[ "$events" != *"kill 4343"* ]] || fail "reconciliation killed an unverified daemon"
+  [ ! -e "$test_dir/remote-chrome-usbipd-3240.pid" ] || fail "verified orphan pid file remained"
+  [ -e "$test_dir/remote-chrome-usbipd-3241.pid" ] || fail "unverified pid file was removed"
+)
+
+test_orphan_usbipd_retention_preserves_exports_and_stop_policy() (
+  local test_dir events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  printf '%s\n' 4242 >"$test_dir/remote-chrome-usbipd-3240.pid"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  mkdir -p "$yk_usbip_host_sysfs"
+  ln -s /dev/null "$yk_usbip_host_sysfs/1-2.3"
+  yk_owned_usbipd_running() { return 0; }
+  yk_process_exists() { return 1; }
+  sudo() { events+="sudo "; return 0; }
+
+  yk_stop_orphan_usbipd_files
+  [ -z "$events" ] || fail "orphan reconciliation killed daemon while another export remained"
+  [ -f "$test_dir/remote-chrome-usbipd-3240.pid" ] || fail "export-preserving reconciliation removed pid file"
+
+  rm -f "$yk_usbip_host_sysfs/1-2.3"
+  yk_stop_usbipd=0
+  yk_stop_orphan_usbipd_files
+  [ -z "$events" ] || fail "STOP_USBIPD=0 killed retained daemon"
+  [ -f "$test_dir/remote-chrome-usbipd-3240.pid" ] || fail "STOP_USBIPD=0 removed pid file"
+)
+
+test_status_live_reports_stale_state_without_mutation() (
+  local test_dir output before code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket=""
+  yk_usbip_port=3240
+  yk_prepare_for_launch "test-host"
+  yk_phase="ready"
+  yk_readiness="verified-fido"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="attached"
+  yk_tunnel_open=1
+  yk_write_state
+  before="$(cat "$yk_state_file")"
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-windows) printf '%s\n' chrome ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_owned_usbipd_running() { return 1; }
+  yk_remote_probe_readiness() { return 1; }
+  ssh() { return 1; }
+
+  output="$(chrome_status --live test-host 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "stale live status unexpectedly succeeded"
+  assert_contains "$output" "live: degraded"
+  assert_contains "$output" "local USB/IP bind is absent"
+  assert_contains "$output" "control socket is unavailable"
+  [ "$(cat "$yk_state_file")" = "$before" ] || fail "live status mutated managed state"
+)
+
+test_doctor_is_read_only_and_reports_degraded_checks() (
+  local output code=0 events="" test_dir
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  yk_remote_module_check() { events+="remote-module "; return 1; }
+  yk_local_module_preflight() { events+="local-module "; return 0; }
+  yk_local_candidate_exists() { events+="candidate "; return 1; }
+  ssh() { events+="ssh:$* "; return 0; }
+  sudo() { events+="sudo "; return 1; }
+  usbip() { events+="usbip "; return 1; }
+
+  if chrome_doctor test-host --with-yubikey >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(command cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "doctor unexpectedly passed a failed remote module check"
+  assert_contains "$output" "doctor: FAIL: remote usbip/vhci-hcd prerequisites"
+  assert_contains "$events" "remote-module"
+  [[ "$events" != *"sudo"* ]] || fail "doctor invoked sudo"
+  [[ "$events" != *"bind"* ]] || fail "doctor attempted a USB/IP bind"
+  [[ "$events" != *"attach"* ]] || fail "doctor attempted a USB/IP attach"
+  [[ "$events" != *"detach"* ]] || fail "doctor attempted a USB/IP detach"
+  [[ "$events" != *"kill"* ]] || fail "doctor attempted a process kill"
+)
+
+test_stop_retry_does_not_unbind_released_busid() (
+  local test_dir events="" bind_present=1 code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="attached"
+  yk_write_state
+  yk_local_busid_bound() { [ "$bind_present" = "1" ]; }
+  yk_remote_detach_busid() { events+="detach "; return 1; }
+  yk_close_tunnel() { return 0; }
+  sudo() {
+    events+="sudo:$* "
+    [[ "$*" == *"usbip unbind"* ]] && bind_present=0
+    return 0
+  }
+
+  yk_stop >/dev/null 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "first cleanup unexpectedly succeeded"
+  assert_contains "$(cat "$yk_state_file")" $'bind_state\tnone'
+  events=""
+  yk_stop >/dev/null 2>&1 || true
+  [[ "$events" != *"usbip unbind"* ]] || fail "retry repeated an already-released local unbind"
+)
+
+test_unbind_success_but_sysfs_remains_retains_state() (
+  local test_dir code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_write_state
+  yk_local_busid_bound() { return 0; }
+  yk_close_tunnel() { return 0; }
+  sudo() { return 0; }
+
+  yk_stop >/dev/null 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "cleanup claimed success while sysfs bind remained"
+  assert_contains "$(cat "$yk_state_file")" $'bind_state\tbound'
+)
+
+test_orphan_unverified_process_is_preserved_under_retention_policy() (
+  local test_dir events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  printf '%s\n' 4242 >"$test_dir/remote-chrome-usbipd-3240.pid"
+  yk_owned_usbipd_running() { return 1; }
+  yk_process_exists() { return 0; }
+  sudo() { events+="sudo:$* "; return 0; }
+
+  yk_stop_usbipd=0
+  yk_stop_orphan_usbipd_files || code=$?
+  [ "$code" -ne 0 ] || fail "unverified orphan was reported as intentional retention"
+  [ -z "$events" ] || fail "unverified orphan was changed under STOP_USBIPD=0"
+  [ -f "$test_dir/remote-chrome-usbipd-3240.pid" ] || fail "unverified orphan pid file was removed"
+
+  mkdir -p "$test_dir/usbip-host"
+  ln -s /dev/null "$test_dir/usbip-host/1-2.3"
+  yk_stop_usbipd=1
+  yk_stop_orphan_usbipd_files || code=$?
+  [ -z "$events" ] || fail "unverified orphan was changed while other exports remained"
+)
+
+test_doctor_auto_without_key_skips_yubikey_prerequisites() (
+  local test_dir output events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  yk_local_candidate_exists() { return 1; }
+  yk_remote_module_check() { events+="remote-module "; return 1; }
+  ssh() { return 0; }
+
+  if chrome_doctor test-host >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -eq 0 ] || fail "auto/no-key doctor degraded a Chrome-only launch"
+  assert_contains "$output" "auto mode will launch without forwarding"
+  [[ "$events" != *remote-module* ]] || fail "auto/no-key doctor ran remote USB/IP module check"
+)
+
+test_doctor_no_yubikey_ignores_invalid_settings() (
+  local test_dir output code=0 events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  yk_usb_id="not-a-usb-id"
+  yk_prepare_for_launch() { events+="prepare "; return 1; }
+  ssh() { return 0; }
+
+  if chrome_doctor test-host --no-yubikey >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -eq 0 ] || fail "--no-yubikey doctor parsed invalid YubiKey settings"
+  [[ "$events" != *prepare* ]] || fail "--no-yubikey doctor prepared YubiKey settings"
+  assert_contains "$output" "YubiKey checks skipped"
+)
+
+test_status_live_uses_configured_bind_sysfs_and_listen_port() (
+  local test_dir output code=0 ss_log
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  ss_log="$test_dir/ss-events"
+  XDG_RUNTIME_DIR="$test_dir"
+  mkdir -p "$test_dir/bind"
+  : >"$test_dir/bind/5-1.2.2"
+  yk_usbip_host_sysfs="$test_dir/bind"
+  yk_control_socket=""
+  yk_usbip_port=3240
+  yk_prepare_for_launch "test-host"
+  yk_phase="bound"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="none"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-windows) printf '%s\n' chrome ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_owned_usbipd_running() { [ "$1" = "4242" ]; }
+  ss() {
+    printf '%s\n' "$*" >>"$ss_log"
+    printf '%s\n' 'LISTEN 0 128 127.0.0.1:3240 0.0.0.0:*'
+  }
+  yk_remote_probe_readiness() { return 0; }
+
+  if chrome_status --live test-host >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -eq 0 ] || fail "live status rejected configured bind/listening state"
+  assert_contains "$output" "live: healthy"
+  assert_contains "$output" "listening: pid=4242 port=3240"
+  assert_contains "$(cat "$ss_log")" "-ltn"
+)
+
+test_orphan_reconcile_rechecks_exact_ownership_before_kill() (
+  local test_dir events="" code=0 ownership_checks=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  printf '%s\n' 4242 >"$test_dir/remote-chrome-usbipd-3240.pid"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  mkdir -p "$yk_usbip_host_sysfs"
+  yk_process_exists() { return 1; }
+  yk_owned_usbipd_running() {
+    ownership_checks=$((ownership_checks + 1))
+    [ "$ownership_checks" -eq 1 ]
+  }
+  sudo() { events+="sudo:$* "; return 0; }
+
+  yk_stop_orphan_usbipd_files || code=$?
+  [ "$code" -ne 0 ] || fail "orphan ownership race unexpectedly succeeded"
+  [[ "$events" != *"kill 4242"* ]] || fail "orphan ownership race killed after exact ownership changed"
+  [ -f "$test_dir/remote-chrome-usbipd-3240.pid" ] || fail "orphan ownership race removed recovery evidence"
+)
+
+test_state_usbipd_rechecks_exact_ownership_before_kill() (
+  local test_dir events="" code=0 ownership_checks=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="usbipd-started"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  yk_close_tunnel() { :; }
+  yk_other_exports_exist() { return 1; }
+  yk_process_exists() { return 1; }
+  yk_owned_usbipd_running() {
+    ownership_checks=$((ownership_checks + 1))
+    [ "$ownership_checks" -eq 1 ]
+  }
+  sudo() { events+="sudo:$* "; return 0; }
+
+  yk_stop >/dev/null 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "state-owned ownership race unexpectedly succeeded"
+  [[ "$events" != *"kill 4242"* ]] || fail "state-owned race killed after exact ownership changed"
+  [ -f "$yk_state_file" ] || fail "state-owned race removed recovery state"
+)
+
+test_state_unverified_pid_preserves_evidence_under_retention_policy() (
+  local test_dir output events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="usbipd-started"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  yk_close_tunnel() { :; }
+  yk_owned_usbipd_running() { return 1; }
+  yk_process_exists() { return 0; }
+  sudo() { events+="sudo:$* "; return 0; }
+  yk_stop_usbipd=0
+
+  if yk_stop >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "state-owned unverified PID was reported as retained successfully"
+  [[ "$output" != *"Leaving tool-started usbipd"* ]] || fail "state-owned unverified PID used intentional-retention message"
+  [ -f "$yk_state_file" ] || fail "state-owned unverified PID removed recovery state"
+  [ -z "$events" ] || fail "state-owned unverified PID was changed under retention policy"
+)
+
+test_startup_invalid_pid_file_is_preserved() (
+  local test_dir events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  printf '%s\n' not-a-pid >"$yk_usbipd_pid_file"
+  need() { :; }
+  yk_local_module_preflight() { :; }
+  ss() { :; }
+  sudo() {
+    events+="sudo:$* "
+    case "${1:-}" in
+      cat) command cat "$2" ;;
+      -v|modprobe) return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  yk_ensure_local_ready || code=$?
+  [ "$code" -ne 0 ] || fail "startup accepted an invalid usbipd pid file"
+  [[ "$events" != *"rm -f"* ]] || fail "startup removed an invalid usbipd pid file"
+  [ "$(cat "$yk_usbipd_pid_file")" = "not-a-pid" ] || fail "startup changed an invalid usbipd pid file"
+)
+
+test_doctor_invalid_chrome_command_is_aggregated() (
+  local test_dir output events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  ssh() { events+="ssh "; return 0; }
+
+  if chrome_doctor test-host --chrome-command "google chrome" >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "doctor accepted invalid Chrome command"
+  assert_contains "$output" "doctor: FAIL: Chrome command is a simple executable name/path"
+  assert_contains "$output" "doctor: degraded"
+  [[ "$events" == *ssh* ]] || fail "doctor stopped before aggregating later checks"
+)
+
+test_load_rejects_invalid_bind_state() (
+  local test_dir code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_set_runtime_paths
+  printf '%s\n' \
+    $'remote\ttest-host' \
+    $'bind_state\tunexpected' >"$yk_state_file"
+
+  yk_load_state || code=$?
+  [ "$code" -eq 2 ] || fail "invalid bind state was accepted"
+)
+
+test_live_status_degrades_cleanup_failed_phase() (
+  local test_dir output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  mkdir -p "$yk_usbip_host_sysfs"
+  : >"$yk_usbip_host_sysfs/5-1.2.2"
+  yk_prepare_for_launch "test-host"
+  yk_phase="cleanup-failed"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="none"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-windows) printf '%s\n' chrome ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_owned_usbipd_running() { [ "$1" = "4242" ]; }
+  ss() { printf '%s\n' 'LISTEN 0 128 127.0.0.1:3240 0.0.0.0:*'; }
+
+  if chrome_status --live test-host >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "cleanup-failed live status reported healthy"
+  assert_contains "$output" "cleanup previously failed"
+  assert_contains "$output" "owned usbipd running and listening"
+)
+
+test_stop_provisional_invalid_pid_file_preserves_evidence() (
+  local test_dir events="" output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="usbipd-starting"
+  yk_started_usbipd=1
+  yk_usbipd_pid=""
+  yk_write_state
+  printf '%s\n' not-a-pid >"$yk_usbipd_pid_file"
+  yk_close_tunnel() { :; }
+  sudo() {
+    case "${1:-}" in
+      cat) command cat "$2" ;;
+      *) events+="sudo:$* " ;;
+    esac
+    return 0
+  }
+
+  if yk_stop >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "provisional invalid pid file cleanup unexpectedly succeeded"
+  assert_contains "$output" "invalid owned usbipd pid file"
+  [ -f "$yk_state_file" ] || fail "provisional invalid pid file removed recovery state"
+  [ "$(cat "$yk_usbipd_pid_file")" = "not-a-pid" ] || fail "provisional invalid pid file changed"
+  [[ "$events" != *"rm -f"* ]] || fail "provisional invalid pid file was removed"
+)
+
+test_stop_state_pid_file_mismatch_preserves_evidence() (
+  local test_dir events="" output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="usbipd-started"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  printf '%s\n' 4343 >"$yk_usbipd_pid_file"
+  yk_close_tunnel() { :; }
+  yk_owned_usbipd_running() { return 0; }
+  sudo() {
+    case "${1:-}" in
+      cat) command cat "$2" ;;
+      *) events+="sudo:$* " ;;
+    esac
+    return 0
+  }
+
+  if yk_stop >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "mismatched state/pid-file cleanup unexpectedly succeeded"
+  assert_contains "$output" "unexpected PID 4343"
+  [ -f "$yk_state_file" ] || fail "mismatched state/pid-file removed recovery state"
+  [ "$(cat "$yk_usbipd_pid_file")" = "4343" ] || fail "mismatched pid file changed"
+  [[ "$events" != *"kill"* ]] || fail "mismatched state/pid-file attempted a kill"
+  [[ "$events" != *"rm -f"* ]] || fail "mismatched state/pid-file was removed"
+)
+
+test_stop_pid_file_replacement_before_rm_preserves_evidence() (
+  local test_dir events="" output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="usbipd-started"
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  printf '%s\n' 4242 >"$yk_usbipd_pid_file"
+  yk_close_tunnel() { :; }
+  yk_other_exports_exist() { return 1; }
+  yk_owned_usbipd_running() { return 1; }
+  yk_process_exists() {
+    printf '%s\n' 4343 >"$yk_usbipd_pid_file"
+    return 1
+  }
+  sudo() {
+    case "${1:-}" in
+      cat) command cat "$2" ;;
+      *) events+="sudo:$* " ;;
+    esac
+    return 0
+  }
+
+  if yk_stop >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "replacement pid-file cleanup unexpectedly succeeded"
+  assert_contains "$output" "unexpected PID 4343"
+  [ "$(cat "$yk_usbipd_pid_file")" = "4343" ] || fail "replacement pid file changed"
+  [[ "$events" != *"rm -f"* ]] || fail "replacement pid file was removed"
+  [ -f "$yk_state_file" ] || fail "replacement pid file removed recovery state"
+)
+
+test_start_rejects_unverified_usbipd_pid() (
+  local test_dir events="" output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_started_usbipd=0
+  yk_usbipd_pid=""
+  need() { :; }
+  yk_local_module_preflight() { :; }
+  ss() { :; }
+  yk_owned_usbipd_running() { return 1; }
+  sudo() {
+    events+="sudo:$* "
+    case "${1:-}" in
+      -v|modprobe) return 0 ;;
+      usbipd)
+        printf '%s\n' 4242 >"$yk_usbipd_pid_file"
+        return 0
+        ;;
+      cat) command cat "$2" ;;
+      *) return 0 ;;
+    esac
+  }
+
+  if yk_ensure_local_ready >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "startup accepted an unverified usbipd PID"
+  assert_contains "$output" "exact ownership could not be verified"
+  assert_contains "$(cat "$yk_state_file")" $'phase\tusbipd-starting'
+  [[ "$(cat "$yk_state_file")" != *$'phase\tusbipd-started'* ]] || fail "startup recorded unverified usbipd-started phase"
+  [ "$(cat "$yk_usbipd_pid_file")" = "4242" ] || fail "startup removed unverified pid-file evidence"
+)
+
+test_orphan_pid_file_replacement_before_rm_preserves_evidence() (
+  local test_dir events="" output code=0 process_checks=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  printf '%s\n' 4242 >"$test_dir/remote-chrome-usbipd-3240.pid"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  mkdir -p "$yk_usbip_host_sysfs"
+  yk_owned_usbipd_running() { return 0; }
+  yk_process_exists() {
+    process_checks=$((process_checks + 1))
+    if [ "$process_checks" -eq 2 ]; then
+      printf '%s\n' 4343 >"$test_dir/remote-chrome-usbipd-3240.pid"
+    fi
+    return 1
+  }
+  sudo() {
+    events+="sudo:$* "
+    return 0
+  }
+
+  if yk_stop_orphan_usbipd_files >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "orphan replacement-before-rm unexpectedly succeeded"
+  assert_contains "$output" "replaced or invalid usbipd pid file"
+  [ "$(cat "$test_dir/remote-chrome-usbipd-3240.pid")" = "4343" ] || fail "orphan replacement pid file changed"
+  [[ "$events" != *"rm -f"* ]] || fail "orphan replacement pid file was removed"
+)
+
 tests=(
   test_start_rolls_back_partial_setup
   test_second_start_cannot_clean_existing_attempt
@@ -1173,6 +1951,31 @@ tests=(
   test_detached_duplicate_checks_tmux_before_existing_chrome
   test_foreground_duplicate_checks_yubikey_state_before_existing_chrome
   test_version_flag_reports_version
+  test_stop_partial_cleanup_retains_ledger_and_attempts_all_resources
+  test_stop_tunnel_failure_still_attempts_unbind_and_daemon
+  test_rollback_failure_retains_state_for_retry
+  test_orphan_usbipd_status_and_reconciliation_require_exact_ownership
+  test_orphan_usbipd_retention_preserves_exports_and_stop_policy
+  test_status_live_reports_stale_state_without_mutation
+  test_doctor_is_read_only_and_reports_degraded_checks
+  test_stop_retry_does_not_unbind_released_busid
+  test_unbind_success_but_sysfs_remains_retains_state
+  test_orphan_unverified_process_is_preserved_under_retention_policy
+  test_doctor_auto_without_key_skips_yubikey_prerequisites
+  test_doctor_no_yubikey_ignores_invalid_settings
+  test_status_live_uses_configured_bind_sysfs_and_listen_port
+  test_orphan_reconcile_rechecks_exact_ownership_before_kill
+  test_state_usbipd_rechecks_exact_ownership_before_kill
+  test_state_unverified_pid_preserves_evidence_under_retention_policy
+  test_startup_invalid_pid_file_is_preserved
+  test_doctor_invalid_chrome_command_is_aggregated
+  test_load_rejects_invalid_bind_state
+  test_live_status_degrades_cleanup_failed_phase
+  test_stop_provisional_invalid_pid_file_preserves_evidence
+  test_stop_state_pid_file_mismatch_preserves_evidence
+  test_stop_pid_file_replacement_before_rm_preserves_evidence
+  test_start_rejects_unverified_usbipd_pid
+  test_orphan_pid_file_replacement_before_rm_preserves_evidence
 )
 
 for test_name in "${tests[@]}"; do

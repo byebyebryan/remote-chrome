@@ -12,6 +12,8 @@ status, and stopping the resulting session. They can also be run directly:
 ```bash
 remote-chrome attach remote-host
 remote-chrome status remote-host
+remote-chrome status --live remote-host
+remote-chrome doctor remote-host
 remote-chrome stop remote-host
 ```
 
@@ -82,8 +84,22 @@ for the final state write and an in-flight SSH probe before declaring failure.
 `status remote-host` reports session windows plus managed YubiKey phase and
 readiness, if state exists. It also reports a provisional setup lock before the
 first state write. Run `remote-chrome status` without a host for a read-only
-overview of all default managed tmux sessions, forwarding state files, and
-orphaned provisional locks.
+overview of all default managed tmux sessions, forwarding state files,
+provisional locks, and standard-runtime orphan `usbipd` PID files.
+
+`status --live remote-host` adds read-only checks for current tmux windows,
+recorded USB/IP ownership, the owned `usbipd` process, SSH control socket, and
+remote YubiKey readiness. It returns nonzero with actionable output when the
+session is stale or degraded. `doctor remote-host` checks local display and
+commands, detached SSH plus remote Waypipe/Chrome, and USB/IP module
+prerequisites without loading modules or changing USB/IP state.
+
+Cleanup attempts every applicable resource in order. If remote detach, tunnel
+close, local unbind, or owned-daemon cleanup remains unresolved, `stop` returns
+nonzero and keeps the recovery state/log so a later `stop HOST` can retry. A
+daemon retained by `REMOTE_CHROME_STOP_USBIPD=0` or other USB/IP exports is
+reported and left for safe hostless reconciliation; pre-existing or
+unverified daemons are never stopped.
 
 For one-off sessions without tmux:
 
