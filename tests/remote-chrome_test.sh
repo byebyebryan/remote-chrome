@@ -268,6 +268,60 @@ test_stop_cleans_yubikey_without_yubikey_window() (
   assert_file_missing "$yk_state_file"
 )
 
+test_stop_without_host_stops_only_managed_tmux_sessions() (
+  local events=""
+
+  need() { :; }
+  tmux() {
+    case "$1" in
+      list-sessions)
+        printf '%s\n' remote-chrome-host-one remote-chrome remote-chrome-host-two unrelated-session
+        ;;
+      kill-session)
+        events+="kill:$3 "
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_stop_all() { events+="yubikey-all "; }
+
+  chrome_stop
+
+  assert_contains "$events" "kill:remote-chrome-host-one"
+  assert_contains "$events" "kill:remote-chrome-host-two"
+  assert_contains "$events" "yubikey-all"
+  [[ "$events" != *"kill:remote-chrome "* ]] ||
+    fail "global stop killed the exact-prefix non-managed tmux session"
+  [[ "$events" != *"kill:unrelated-session"* ]] ||
+    fail "global stop killed an unrelated tmux session"
+)
+
+test_stop_without_host_cleans_all_recorded_yubikey_states() (
+  local test_dir events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket=""
+  : >"$test_dir/remote-chrome-yubikey-first.sock.state"
+  : >"$test_dir/remote-chrome-yubikey-second.sock.state"
+
+  need() { :; }
+  tmux() {
+    case "$1" in
+      list-sessions) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_stop_state_file() { events+="state:$1 "; }
+  yk_stop_orphan_attempt_locks() { events+="locks "; }
+
+  chrome_stop
+
+  assert_contains "$events" "state:$test_dir/remote-chrome-yubikey-first.sock.state"
+  assert_contains "$events" "state:$test_dir/remote-chrome-yubikey-second.sock.state"
+  assert_contains "$events" "locks"
+)
+
 test_remote_preflight_uses_scoped_sudo_command() (
   yk_remote="test-host"
   local remote_command=""
@@ -976,6 +1030,8 @@ tests=(
   test_successful_start_records_exact_state
   test_stop_cleans_only_recorded_busid
   test_stop_cleans_yubikey_without_yubikey_window
+  test_stop_without_host_stops_only_managed_tmux_sessions
+  test_stop_without_host_cleans_all_recorded_yubikey_states
   test_remote_preflight_uses_scoped_sudo_command
   test_remote_detach_failure_is_reported
   test_custom_chrome_command_is_in_process_pattern

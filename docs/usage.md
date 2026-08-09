@@ -52,6 +52,11 @@ remote-chrome stop remote-host
 
 `stop` is the explicit teardown that kills the session and tears down forwarding
 together. It also cleans provisional state left by an interrupted setup.
+Run `remote-chrome stop` with no host to stop every default managed tmux session
+(`remote-chrome-*` by default) and every YubiKey forwarding using the default
+runtime state path. It leaves an exact-name `remote-chrome` session and
+unrelated tmux sessions untouched; use `stop HOST` for a custom `--session`
+name or YubiKey control socket.
 Remote forwarding requires passwordless scoped sudo for `modprobe vhci-hcd`,
 `usbip attach`, `usbip port`, and `usbip detach`; some hosts expose USB/IP port
 records only to root. The local and remote `timeout` command (from coreutils)

@@ -9,7 +9,7 @@ usage() {
 Usage:
   $PROGRAM HOST [-- CHROME_ARGS...]
   $PROGRAM launch HOST [-- CHROME_ARGS...]
-  $PROGRAM stop HOST
+  $PROGRAM stop [HOST]
   $PROGRAM status HOST
 
 Chrome options:
@@ -376,6 +376,11 @@ chrome_stop() {
     esac
   done
 
+  if [ -z "$host" ] && [ -z "$session" ]; then
+    chrome_stop_all
+    return
+  fi
+
   [ -n "$session" ] || {
     [ -n "$host" ] || die "Host or --session is required."
     session="$(chrome_default_session "$host")"
@@ -393,6 +398,44 @@ chrome_stop() {
     yk_prepare_for_launch "$host"
     yk_stop || echo "YubiKey cleanup reported an error; inspect $yk_state_file." >&2
   fi
+}
+
+chrome_managed_sessions() {
+  local session
+  local prefix="${REMOTE_CHROME_SESSION_PREFIX:-remote-chrome}"
+
+  while IFS= read -r session; do
+    case "$session" in
+      "$prefix"-*) printf '%s\n' "$session" ;;
+    esac
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+}
+
+chrome_stop_all() {
+  local session
+  local stopped_sessions=0
+  local code=0
+
+  need tmux
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    if tmux kill-session -t "$session"; then
+      echo "Stopped tmux session $session."
+      stopped_sessions=$((stopped_sessions + 1))
+    else
+      echo "Could not stop tmux session $session." >&2
+      code=1
+    fi
+  done < <(chrome_managed_sessions)
+
+  if [ "$stopped_sessions" = "0" ]; then
+    echo "No managed remote-chrome tmux sessions found."
+  fi
+
+  if ! yk_stop_all; then
+    code=1
+  fi
+  return "$code"
 }
 
 chrome_status() {
@@ -531,6 +574,73 @@ yk_set_runtime_paths() {
   yk_log_file="${yk_state_file}.log"
   yk_attempt_lock="${yk_state_file}.lock"
   yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-$(safe_name "$yk_usbip_port").pid"
+}
+
+yk_standard_state_files() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local state_file
+
+  for state_file in "$runtime_dir"/remote-chrome-yubikey-*.sock.state; do
+    [ -f "$state_file" ] || continue
+    printf '%s\n' "$state_file"
+  done
+}
+
+yk_stop_state_file() {
+  local state_file="$1"
+  local host
+
+  host="$(awk -F '\t' '$1 == "remote" {print $2; exit}' "$state_file" 2>/dev/null || true)"
+  if [ -z "$host" ]; then
+    echo "Managed YubiKey state is missing its remote host: $state_file" >&2
+    return 1
+  fi
+
+  yk_control_socket="${state_file%.state}"
+  yk_prepare_for_launch "$host"
+  yk_stop
+}
+
+yk_stop_orphan_attempt_locks() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local lock_file
+  local state_file
+  local code=0
+
+  for lock_file in "$runtime_dir"/remote-chrome-yubikey-*.sock.state.lock; do
+    [ -d "$lock_file" ] || continue
+    state_file="${lock_file%.lock}"
+    [ -e "$state_file" ] && continue
+    if rmdir -- "$lock_file"; then
+      echo "Removed orphaned YubiKey setup lock $lock_file."
+    else
+      echo "Could not remove orphaned YubiKey setup lock $lock_file." >&2
+      code=1
+    fi
+  done
+  return "$code"
+}
+
+yk_stop_all() {
+  local state_file
+  local found_state=0
+  local code=0
+
+  while IFS= read -r state_file; do
+    [ -n "$state_file" ] || continue
+    found_state=1
+    if ! yk_stop_state_file "$state_file"; then
+      echo "YubiKey cleanup reported an error; inspect $state_file." >&2
+      code=1
+    fi
+  done < <(yk_standard_state_files)
+
+  if [ "$found_state" = "0" ]; then
+    echo "No managed YubiKey forwarding states found."
+  fi
+
+  yk_stop_orphan_attempt_locks || code=1
+  return "$code"
 }
 
 yk_reset_runtime_state() {

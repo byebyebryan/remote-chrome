@@ -240,6 +240,21 @@ remote-chrome stop HOST
 That sends the forwarding process a signal, and it detaches/unbinds the YubiKey
 during cleanup.
 
+To stop every default managed session and every YubiKey forwarding using the
+default runtime state path on the local machine, omit the host:
+
+```bash
+remote-chrome stop
+```
+
+This only kills tmux sessions named with the configured
+`REMOTE_CHROME_SESSION_PREFIX` followed by `-` (by default,
+`remote-chrome-*`), so it leaves an exact-name `remote-chrome` session and
+unrelated tmux sessions alone. YubiKey state files are cleaned independently,
+which also tears down forwarding whose tmux session has already disappeared.
+Use `stop HOST` for a custom `--session` name that does not use the default
+prefix, or when using a custom YubiKey control socket.
+
 The tool records provisional lifecycle state, the exact local bus ID, and any
 `usbipd` process it started in a state file beside the SSH control socket.
 Cleanup handles interrupted setup, only detaches/unbinds that recorded device,
