@@ -786,9 +786,10 @@ yk_wait_local_usbipd() {
 }
 
 yk_print_local_module_diagnostic() {
-  local kernel="$(uname -r 2>/dev/null || echo unknown)"
+  local kernel
   local modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
   local dirs=""
+  kernel="$(uname -r 2>/dev/null || echo unknown)"
   if [ -d "$modules_root" ]; then
     dirs="$(find "$modules_root" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null || true)"
   fi
@@ -800,9 +801,10 @@ yk_print_local_module_diagnostic() {
 }
 
 yk_local_module_preflight() {
-  local kernel="$(uname -r)"
+  local kernel
   local module_path=""
   local modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
+  kernel="$(uname -r)"
   local module_tree="$modules_root/$kernel"
 
   if [ ! -d "$module_tree" ]; then
@@ -830,6 +832,8 @@ yk_local_module_preflight() {
 
 yk_remote_module_preflight() {
   local remote_script
+  # The variables in this script must expand on the remote host.
+  # shellcheck disable=SC2016
   remote_script='set -u
 kernel=$(uname -r 2>&1) || exit $?
 printf "Remote USB/IP diagnostics (kernel): %s\\n" "$kernel" >&2

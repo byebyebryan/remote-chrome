@@ -295,6 +295,8 @@ test_remote_detach_failure_is_reported() (
     '#!/usr/bin/env bash' \
     'shift' \
     'exec "$@"' >"$fake_bin/timeout"
+  # These variables intentionally expand when the generated fake sudo runs.
+  # shellcheck disable=SC2016
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     '[ "${1:-}" = "-n" ] && shift' \
@@ -372,8 +374,9 @@ test_usbipd_state_write_records_pid_before_started_phase() (
   local pid_line phase_line
   pid_line="$(printf '%s\n' "$definition" | awk '/yk_usbipd_pid=.*sudo cat/{print NR; exit}')"
   phase_line="$(printf '%s\n' "$definition" | awk '/yk_phase="usbipd-started"/{print NR; exit}')"
-  [ -n "$pid_line" ] && [ -n "$phase_line" ] && [ "$pid_line" -lt "$phase_line" ] ||
+  if [ -z "$pid_line" ] || [ -z "$phase_line" ] || [ "$pid_line" -ge "$phase_line" ]; then
     fail "validated usbipd PID was not read before usbipd-started state"
+  fi
 )
 
 test_custom_chrome_command_is_in_process_pattern() (
