@@ -890,6 +890,8 @@ test_subcommands_accept_help() (
   assert_contains "$output" "Usage:"
   output="$(main attach --help)"
   assert_contains "$output" "Usage:"
+  output="$(main reconnect --help)"
+  assert_contains "$output" "Usage:"
 )
 
 test_status_reports_legacy_state_truthfully() (
@@ -1902,6 +1904,564 @@ test_orphan_pid_file_replacement_before_rm_preserves_evidence() (
   [[ "$events" != *"rm -f"* ]] || fail "orphan replacement pid file was removed"
 )
 
+test_cleanup_lock_serializes_concurrent_stop_callers() (
+  local test_dir child_output child_pid
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="cleanup-failed"
+  yk_write_state
+  REMOTE_CHROME_YUBIKEY_CLEANUP_LOCK_TIMEOUT=4
+
+  yk_cleanup_lock_acquire
+  child_output="$test_dir/child-output"
+  (
+    source "$repo_root/bin/remote-chrome"
+    XDG_RUNTIME_DIR="$test_dir"
+    yk_remote="test-host"
+    yk_control_socket="$test_dir/control.sock"
+    yk_usbip_port=3240
+    yk_set_runtime_paths
+    yk_stop >"$child_output" 2>&1
+  ) &
+  child_pid=$!
+  sleep 1
+  kill -0 "$child_pid" 2>/dev/null || fail "concurrent stop caller exited before cleanup lock handoff"
+  [ -f "$yk_state_file" ] || fail "concurrent stop caller removed state while another cleanup held the lock"
+  yk_cleanup_lock_release
+  wait "$child_pid"
+  assert_file_missing "$yk_state_file"
+)
+
+test_cleanup_lock_releases_on_signal() (
+  local test_dir child_pid
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+
+  (
+    source "$repo_root/bin/remote-chrome"
+    XDG_RUNTIME_DIR="$test_dir"
+    yk_remote="test-host"
+    yk_control_socket="$test_dir/control.sock"
+    yk_usbip_port=3240
+    yk_set_runtime_paths
+    yk_cleanup_lock_acquire
+    trap 'yk_cleanup_lock_release_on_exit' EXIT
+    trap - INT TERM HUP
+    kill -TERM "$BASHPID"
+  ) &
+  child_pid=$!
+  wait "$child_pid" || true
+  assert_file_missing "$yk_cleanup_lock"
+)
+
+test_cleanup_failed_launch_reconciles_absent_resources() (
+  local test_dir output events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { events+="existing "; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 0; }
+  yk_preflight_for_forwarding() { events+="preflight "; }
+  chrome_launch_detached_with_yubikey() { events+="launch "; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  yk_prepare_for_launch test-host
+  yk_phase="cleanup-failed"
+  yk_attach_state="none"
+  yk_bind_state="none"
+  yk_started_usbipd=0
+  yk_write_state
+
+  chrome_launch test-host >"$test_dir/output" 2>&1
+  output="$(cat "$test_dir/output")"
+  assert_contains "$output" "Reconciled stale YubiKey cleanup state"
+  [[ "$events" == *"launch"* ]] || fail "launch did not continue after absent-resource reconciliation"
+  assert_file_missing "$yk_state_file"
+)
+
+test_cleanup_failed_launch_reconciles_absent_remote_attachment() (
+  local test_dir output events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 0; }
+  yk_preflight_for_forwarding() { :; }
+  chrome_launch_detached_with_yubikey() { events+="launch "; }
+  yk_remote_probe_attachment() { return 1; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  yk_prepare_for_launch test-host
+  yk_phase="cleanup-failed"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="none"
+  yk_attach_state="attached"
+  yk_started_usbipd=0
+  yk_write_state
+
+  chrome_launch test-host >"$test_dir/output" 2>&1
+  output="$(cat "$test_dir/output")"
+  assert_contains "$output" "Reconciled stale YubiKey cleanup state"
+  [[ "$events" == *"launch"* ]] || fail "launch did not continue after absent remote attachment reconciliation"
+  assert_file_missing "$yk_state_file"
+)
+
+test_cleanup_failed_launch_does_not_auto_clean_ready_state() (
+  local test_dir before output code=0 events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { events+="existing "; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 0; }
+  yk_preflight_for_forwarding() { events+="preflight "; }
+  chrome_launch_detached_with_yubikey() { events+="launch "; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  yk_prepare_for_launch test-host
+  yk_phase="ready"
+  yk_readiness="verified-fido"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="bound"
+  yk_attach_state="attached"
+  yk_write_state
+  before="$(cat "$yk_state_file")"
+
+  if (chrome_launch test-host >"$test_dir/output" 2>&1); then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -eq 1 ] || fail "launch unexpectedly accepted an active YubiKey state"
+  assert_contains "$output" "active or incomplete attempt"
+  [ "$(cat "$yk_state_file")" = "$before" ] || fail "active ready state changed during launch duplicate check"
+  [ -z "$events" ] || fail "launch ran preflight or cleanup before rejecting active state: $events"
+)
+
+test_cleanup_failed_launch_retains_unreachable_state() (
+  local test_dir output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 0; }
+  yk_preflight_for_forwarding() { fail "preflight ran before reconciliation failure"; }
+  chrome_handle_existing() { fail "existing Chrome check ran before reconciliation failure"; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  yk_remote_probe_attachment() {
+    echo "SSH transport unavailable while probing $1" >&2
+    return 2
+  }
+
+  yk_prepare_for_launch test-host
+  yk_phase="cleanup-failed"
+  yk_active_busid="5-1.2.2"
+  yk_bind_state="none"
+  yk_attach_state="attached"
+  yk_started_usbipd=0
+  yk_write_state
+
+  if (trap - EXIT; chrome_launch test-host >"$test_dir/output" 2>&1); then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -eq 1 ] || fail "launch unexpectedly accepted unreachable cleanup state"
+  assert_contains "$output" "could not be reconciled safely"
+  assert_contains "$output" "inspect $yk_state_file"
+  [ -f "$yk_state_file" ] || fail "unreachable cleanup state was removed"
+  assert_contains "$(cat "$yk_state_file")" $'phase\tcleanup-failed'
+)
+
+test_reconnect_help_and_requires_target() (
+  local test_dir output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  output="$(main reconnect --help)"
+  assert_contains "$output" "reconnect HOST"
+  if (trap - EXIT; main reconnect) >"$test_dir/no-target" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  [ "$code" -eq 1 ] || fail "hostless reconnect unexpectedly succeeded"
+  assert_contains "$(cat "$test_dir/no-target")" "hostless reconnect is not supported"
+)
+
+test_reconnect_confirmation_and_yes_scope() (
+  local test_dir output events="" command_line="waypipe --no-gpu ssh test-host google-chrome-stable --new-window"
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  yk_stop() { events+="yk-stop "; return 0; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) events+="kill-session "; return 0 ;;
+      new-session) events+="new-session:$* "; return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  need() { :; }
+  chrome_reconnect_find_local_ssh() {
+    chrome_reconnect_remote_socket="/tmp/waypipe-server-test.sock"
+    return 0
+  }
+  chrome_reconnect_remote_probe() {
+    chrome_reconnect_remote_pid=700
+    chrome_reconnect_remote_pgid=701
+    [[ "$events" == *"remote-stop"* ]] && return 1
+    return 0
+  }
+  chrome_reconnect_remote_stop() { events+="remote-stop:$3 "; return 0; }
+  confirm() { events+="confirm "; return 1; }
+
+  if chrome_reconnect test-host >"$test_dir/cancel" 2>&1; then
+    fail "reconnect without confirmation unexpectedly succeeded"
+  fi
+  output="$(cat "$test_dir/cancel")"
+  assert_contains "$output" "session is unchanged"
+  [[ "$events" != *kill-session* ]] || fail "canceled reconnect killed the local tmux session"
+  [[ "$events" != *remote-stop* ]] || fail "canceled reconnect terminated the remote group"
+
+  events=""
+  chrome_reconnect test-host --yes >"$test_dir/yes" 2>&1
+  output="$(cat "$test_dir/yes")"
+  [[ "$events" == *"remote-stop:701"* ]] || fail "--yes reconnect did not terminate the verified PGID"
+  [[ "$events" == *kill-session* ]] || fail "--yes reconnect did not remove the old tmux session"
+  assert_contains "$events" "new-session:"
+  assert_contains "$events" "$command_line"
+  [[ "$events" != *confirm* ]] || fail "--yes reconnect still prompted"
+)
+
+test_reconnect_extracts_exact_socket_and_refuses_ambiguous_local_children() (
+  local test_dir ps_fixture code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  ps_fixture="$test_dir/ps"
+  printf '%s\n' \
+    $'4242 1 4242 1000 /bin/bash' \
+    $'5000 4242 5000 1000 ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo' \
+    $'5001 4242 5001 1000 ssh -R /tmp/waypipe-server-two.sock:/tmp/waypipe-client-two.sock test-host -- waypipe --socket /tmp/waypipe-server-two.sock server --foo' >"$ps_fixture"
+  ps() { command cat "$ps_fixture"; }
+  chrome_reconnect_find_local_ssh 4242 test-host || code=$?
+  [ "$code" -eq 1 ] || fail "ambiguous local waypipe children unexpectedly passed"
+
+  printf '%s\n' \
+    $'4242 1 4242 1000 /bin/bash' \
+    $'5000 4242 5000 1000 ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo' >"$ps_fixture"
+  chrome_reconnect_find_local_ssh 4242 test-host
+  [ "$chrome_reconnect_remote_socket" = "/tmp/waypipe-server-one.sock" ] ||
+    fail "reconnect extracted the wrong exact reverse socket"
+)
+
+test_reconnect_remote_stop_targets_only_verified_pgid() (
+  local test_dir script_file fake_bin
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  script_file="$test_dir/remote-script"
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\\n" 100 1 701 "waypipe --socket /tmp/waypipe-server-one.sock server"' >"$fake_bin/ps"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" 1000' >"$fake_bin/id"
+  chmod +x "$fake_bin/ps" "$fake_bin/id"
+  ssh() {
+    command cat >"$script_file"
+    PATH="$fake_bin:$PATH" bash -s -- \
+      /tmp/waypipe-server-one.sock 999999 1 <"$script_file"
+  }
+
+  chrome_reconnect_remote_stop test-host /tmp/waypipe-server-one.sock 999999 >/dev/null 2>&1 || true
+  assert_contains "$(cat "$script_file")" 'kill -TERM -- "-$wanted_pgid"'
+  [[ "$(cat "$script_file")" != *pkill* ]] || fail "reconnect remote stop emitted broad pkill"
+)
+
+test_reconnect_remote_probes_detect_main_chrome_executable() (
+  local test_dir script_file fake_bin output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  script_file="$test_dir/remote-script"
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\\n" "100 1 100 /opt/google/chrome/chrome --user-data-dir=/tmp/profile"' \
+    'printf "%s\\n" "101 100 100 /opt/google/chrome/chrome --type=renderer --user-data-dir=/tmp/profile"' >"$fake_bin/ps"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" 1000' >"$fake_bin/id"
+  chmod +x "$fake_bin/ps" "$fake_bin/id"
+  ssh() {
+    command cat >"$script_file"
+    PATH="$fake_bin:$PATH" bash -s -- \
+      /tmp/waypipe-server-one.sock 701 1 <"$script_file"
+  }
+
+  if chrome_reconnect_remote_probe test-host /tmp/waypipe-server-one.sock >"$test_dir/probe" 2>&1; then
+    fail "remote probe treated an unrelated main Chrome executable as absent"
+  else
+    code=$?
+  fi
+  [ "$code" -eq 2 ] || fail "remote probe returned unexpected code for unrelated Chrome: $code"
+  output="$(cat "$test_dir/probe")"
+  assert_contains "$output" "Remote Chrome process(es) remain"
+
+  if chrome_reconnect_remote_stop test-host /tmp/waypipe-server-one.sock 701 >"$test_dir/stop" 2>&1; then
+    fail "remote stop treated an unrelated main Chrome executable as absent"
+  else
+    code=$?
+  fi
+  [ "$code" -ne 0 ] || fail "remote stop unexpectedly succeeded with unrelated Chrome"
+  output="$(cat "$test_dir/stop")"
+  assert_contains "$output" "remains or returned an invalid result"
+)
+
+test_reconnect_post_stop_probe_preserves_tmux_on_unrelated_chrome() (
+  local test_dir output events="" probe_calls=0 code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) events+="kill-session " ; return 0 ;;
+      new-session) events+="new-session " ; return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  chrome_reconnect_find_local_ssh() {
+    chrome_reconnect_remote_socket="/tmp/waypipe-server-test.sock"
+    return 0
+  }
+  chrome_reconnect_remote_probe() {
+    probe_calls=$((probe_calls + 1))
+    if [ "$probe_calls" -eq 1 ]; then
+      chrome_reconnect_remote_pid=700
+      chrome_reconnect_remote_pgid=701
+      return 0
+    fi
+    echo "Remote Chrome process(es) remain while the exact waypipe server is absent" >&2
+    return 2
+  }
+  chrome_reconnect_remote_stop() { events+="remote-stop " ; return 0 ; }
+
+  if chrome_reconnect test-host --yes >"$test_dir/output" 2>&1; then
+    fail "reconnect proceeded after a non-clean post-stop probe"
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -ne 0 ] || fail "reconnect unexpectedly succeeded after post-stop identity failure"
+  [ "$probe_calls" -eq 2 ] || fail "reconnect did not perform the required post-stop probe"
+  assert_contains "$output" "preserving the existing tmux session"
+  [[ "$events" == *remote-stop* ]] || fail "reconnect did not stop the verified remote group"
+  [[ "$events" != *kill-session* ]] || fail "post-stop probe failure killed the local tmux session"
+  [[ "$events" != *new-session* ]] || fail "post-stop probe failure recreated the local tmux session"
+)
+
+test_reconnect_recreates_when_session_exits_after_remote_stop() (
+  local test_dir command_line="waypipe --no-gpu ssh test-host google-chrome-stable --new-window"
+  local events="" session_alive=1
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session)
+        [ "$session_alive" -eq 1 ]
+        ;;
+      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) events+="kill-session " ; return 0 ;;
+      new-session) events+="new-session:$* " ; return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  chrome_reconnect_find_local_ssh() {
+    chrome_reconnect_remote_socket="/tmp/waypipe-server-test.sock"
+    return 0
+  }
+  chrome_reconnect_remote_probe() {
+    if [[ "$events" == *remote-stop* ]]; then
+      return 1
+    fi
+    chrome_reconnect_remote_pid=700
+    chrome_reconnect_remote_pgid=701
+    return 0
+  }
+  chrome_reconnect_remote_stop() {
+    events+="remote-stop "
+    session_alive=0
+    return 0
+  }
+
+  chrome_reconnect test-host --yes >"$test_dir/output" 2>&1
+  assert_contains "$events" "remote-stop"
+  assert_contains "$events" "new-session:"
+  assert_contains "$events" "$command_line"
+  [[ "$events" != *kill-session* ]] || fail "reconnect killed a session that had already exited"
+)
+
+test_reconnect_remote_failure_keeps_tmux_and_absent_group_recreates_command() (
+  local test_dir command_line="waypipe --no-gpu ssh test-host google-chrome-stable --new-window" output events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) events+="kill "; return 0 ;;
+      new-session) events+="new:$* "; return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  chrome_reconnect_find_local_ssh() { chrome_reconnect_remote_socket="/tmp/waypipe-server-test.sock"; return 0; }
+  chrome_reconnect_remote_probe() { return 2; }
+  if chrome_reconnect test-host --yes >"$test_dir/fail" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  [ "$code" -ne 0 ] || fail "remote identity failure unexpectedly succeeded"
+  [[ "$events" != *kill* ]] || fail "remote identity failure killed local tmux"
+
+  events=""
+  chrome_reconnect_remote_probe() { return 1; }
+  confirm() { return 0; }
+  chrome_reconnect test-host >"$test_dir/absent" 2>&1
+  assert_contains "$events" "kill"
+  assert_contains "$events" "$command_line"
+  assert_contains "$events" "new:"
+)
+
+test_reconnect_yubikey_and_chrome_only_recreation_sequence() (
+  local test_dir events="" command_line="waypipe --no-gpu ssh test-host google-chrome-stable --new-window"
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-windows) printf '%s\n' chrome yubikey ;;
+      kill-session) events+="kill "; return 0 ;;
+      new-session) events+="new:$* "; return 0 ;;
+      *) return 0 ;;
+    esac
+  }
+  chrome_reconnect_find_local_ssh() { chrome_reconnect_remote_socket="/tmp/waypipe-server-test.sock"; return 0; }
+  chrome_reconnect_remote_probe() {
+    chrome_reconnect_remote_pgid=701
+    [[ "$events" == *remote* ]] && return 1
+    return 0
+  }
+  chrome_reconnect_remote_stop() { events+="remote "; return 0; }
+  yk_stop() { events+="yk-stop "; return 0; }
+  yk_preflight_for_forwarding() { events+="yk-preflight "; return 0; }
+  chrome_launch_detached_with_yubikey() { events+="yk-launch:$3 "; return 0; }
+  chrome_reconnect test-host --yes >/dev/null 2>&1
+  assert_contains "$events" "remote"
+  assert_contains "$events" "kill"
+  assert_contains "$events" "yk-stop"
+  assert_contains "$events" "yk-preflight"
+  assert_contains "$events" "yk-launch:$command_line"
+  [[ "$events" != *"new-session"* ]] || fail "YubiKey reconnect recreated Chrome without readiness-gated helper"
+)
+
 tests=(
   test_start_rolls_back_partial_setup
   test_second_start_cannot_clean_existing_attempt
@@ -1976,6 +2536,21 @@ tests=(
   test_stop_pid_file_replacement_before_rm_preserves_evidence
   test_start_rejects_unverified_usbipd_pid
   test_orphan_pid_file_replacement_before_rm_preserves_evidence
+  test_cleanup_lock_serializes_concurrent_stop_callers
+  test_cleanup_lock_releases_on_signal
+  test_cleanup_failed_launch_reconciles_absent_resources
+  test_cleanup_failed_launch_reconciles_absent_remote_attachment
+  test_cleanup_failed_launch_does_not_auto_clean_ready_state
+  test_cleanup_failed_launch_retains_unreachable_state
+  test_reconnect_help_and_requires_target
+  test_reconnect_confirmation_and_yes_scope
+  test_reconnect_extracts_exact_socket_and_refuses_ambiguous_local_children
+  test_reconnect_remote_stop_targets_only_verified_pgid
+  test_reconnect_remote_probes_detect_main_chrome_executable
+  test_reconnect_post_stop_probe_preserves_tmux_on_unrelated_chrome
+  test_reconnect_recreates_when_session_exits_after_remote_stop
+  test_reconnect_remote_failure_keeps_tmux_and_absent_group_recreates_command
+  test_reconnect_yubikey_and_chrome_only_recreation_sequence
 )
 
 for test_name in "${tests[@]}"; do

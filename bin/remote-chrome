@@ -14,6 +14,7 @@ Usage:
   $PROGRAM status --live HOST
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
+  $PROGRAM reconnect HOST [--session NAME] [--yes]
 
 Chrome options:
       --session NAME       tmux session name
@@ -25,6 +26,10 @@ Chrome options:
       --yubikey-port PORT  USB/IP TCP port, default: 3240
       --allow-existing     launch even if remote Chrome is already running
       --yes                do not prompt before killing remote Chrome
+
+Reconnect options:
+      --yes                skip reconnect restart/absent-group confirmations;
+                           identity checks and safety refusals still apply
 
 General options:
       -h, --help           print help and exit
@@ -40,6 +45,7 @@ Environment:
   REMOTE_CHROME_YUBIKEY_TIMEOUT
   REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT
   REMOTE_CHROME_YUBIKEY_READY_GRACE
+  REMOTE_CHROME_RECONNECT_TIMEOUT
 USAGE
 }
 
@@ -215,6 +221,19 @@ chrome_launch() {
     if tmux has-session -t "$session" 2>/dev/null; then
       die "tmux session already exists: $session"
     fi
+  fi
+  if [ "$forwarding_expected" = "1" ] && [ -e "$yk_state_file" ]; then
+    local reconcile_code=0
+    yk_reconcile_cleanup_failed || reconcile_code=$?
+    case "$reconcile_code" in
+      0) ;;
+      1)
+        die "YubiKey forwarding still has an active or incomplete attempt for $yk_remote; retry stop before launching."
+        ;;
+      *)
+        die "YubiKey cleanup state for $yk_remote could not be reconciled safely; retry stop and inspect $yk_state_file."
+        ;;
+    esac
   fi
   if [ "$forwarding_expected" = "1" ] &&
     { [ -e "$yk_state_file" ] || [ -e "$yk_attempt_lock" ]; }; then
@@ -508,6 +527,595 @@ chrome_attach() {
   fi
 }
 
+chrome_reconnect_pane_id=""
+chrome_reconnect_pane_pid=""
+chrome_reconnect_pane_command=""
+chrome_reconnect_host=""
+chrome_reconnect_remote_socket=""
+chrome_reconnect_remote_pgid=""
+chrome_reconnect_remote_pid=""
+
+chrome_reconnect_read_pane() {
+  local session="$1"
+  local pane_output=""
+  local line_count=0
+  local pane_line
+
+  if ! pane_output="$(tmux list-panes -t "$session:chrome" \
+    -F '#{pane_id}\t#{pane_pid}\t#{pane_start_command}' 2>&1)"; then
+    [ -n "$pane_output" ] && printf '%s\n' "$pane_output" >&2
+    echo "Could not inspect the exact chrome pane in tmux session $session." >&2
+    return 1
+  fi
+  while IFS= read -r pane_line; do
+    [ -n "$pane_line" ] || continue
+    line_count=$((line_count + 1))
+    [ "$line_count" -eq 1 ] || break
+    IFS=$'\t' read -r chrome_reconnect_pane_id chrome_reconnect_pane_pid \
+      chrome_reconnect_pane_command <<<"$pane_line"
+  done <<<"$pane_output"
+  if [ "$line_count" -ne 1 ] ||
+    [ -z "$chrome_reconnect_pane_id" ] ||
+    [[ ! "$chrome_reconnect_pane_pid" =~ ^[0-9]+$ ]] ||
+    [ -z "$chrome_reconnect_pane_command" ]; then
+    echo "The $session:chrome window must contain exactly one readable pane with a start command." >&2
+    return 1
+  fi
+  return 0
+}
+
+chrome_reconnect_parse_pane_host() {
+  local command_line="$1"
+
+  if [[ ! "$command_line" =~ ^waypipe[[:space:]]+--no-gpu[[:space:]]+ssh[[:space:]]+([^[:space:]]+)([[:space:]]|$) ]]; then
+    echo "The chrome pane is not a managed waypipe SSH command; refusing reconnect." >&2
+    return 1
+  fi
+  chrome_reconnect_host="${BASH_REMATCH[1]}"
+  [ -n "$chrome_reconnect_host" ] || {
+    echo "The managed waypipe command is missing its SSH host; refusing reconnect." >&2
+    return 1
+  }
+}
+
+chrome_reconnect_find_local_ssh() {
+  local pane_pid="$1"
+  local host="$2"
+  local ps_output=""
+  local current_uid
+  local pid ppid uid args
+  local current depth descendant
+  local reverse_spec=""
+  local remote_socket=""
+  local token
+  local token_index
+  local server_seen
+  local socket_seen
+  local candidate_count=0
+  local -a argv=()
+  local -A ppid_by_pid=()
+
+  current_uid="$(id -u)"
+  if ! ps_output="$(ps -eo pid=,ppid=,pgid=,uid=,args= 2>&1)"; then
+    [ -n "$ps_output" ] && printf '%s\n' "$ps_output" >&2
+    echo "Could not inspect local processes for the managed waypipe SSH child." >&2
+    return 1
+  fi
+
+  while read -r pid ppid _; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    ppid_by_pid["$pid"]="$ppid"
+  done <<<"$ps_output"
+
+  while read -r pid ppid _ uid args; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [ "$uid" = "$current_uid" ] || continue
+    [ "$pid" = "$pane_pid" ] && continue
+
+    # The SSH child must descend from the selected pane, not merely happen to
+    # contain the same host/socket text elsewhere on the local machine.
+    descendant=0
+    current="$pid"
+    for ((depth = 0; depth < 64; depth++)); do
+      if [ "$current" = "$pane_pid" ]; then
+        descendant=1
+        break
+      fi
+      current="${ppid_by_pid[$current]:-}"
+      [ -n "$current" ] || break
+      [ "$current" != "$pid" ] || break
+    done
+    [ "$descendant" = "1" ] || continue
+
+    # Reconstruct only the small argv shape needed for identity checks.  The
+    # local waypipe/SSH child has no shell quoting left in `ps` output.
+    read -r -a argv <<<"$args"
+    [ "${#argv[@]}" -gt 0 ] || continue
+    server_seen=0
+    socket_seen=0
+    reverse_spec=""
+    remote_socket=""
+    for token_index in "${!argv[@]}"; do
+      token="${argv[$token_index]}"
+      case "$token" in
+        ssh|*/ssh)
+          ;;
+        -R)
+          if [ $((token_index + 1)) -lt "${#argv[@]}" ]; then
+            reverse_spec="${argv[$((token_index + 1))]}"
+          fi
+          ;;
+        -R*)
+          reverse_spec="${token#-R}"
+          ;;
+        --)
+          if [ $((token_index + 2)) -lt "${#argv[@]}" ] && {
+            [ "${argv[$((token_index + 1))]}" = "waypipe" ] ||
+            [[ "${argv[$((token_index + 1))]}" = */waypipe ]];
+          }; then
+            server_seen=1
+          fi
+          ;;
+        --socket)
+          if [ $((token_index + 1)) -lt "${#argv[@]}" ]; then
+            remote_socket="${argv[$((token_index + 1))]}"
+            socket_seen=1
+          fi
+          ;;
+        --socket=*)
+          remote_socket="${token#--socket=}"
+          socket_seen=1
+          ;;
+      esac
+    done
+    case "$args" in
+      *" $host -- waypipe "*) ;;
+      *) continue ;;
+    esac
+    [ "$server_seen" = "1" ] || continue
+    [ "$socket_seen" = "1" ] || continue
+    case "$reverse_spec" in
+      /tmp/waypipe-server-*:/tmp/waypipe-client-*) ;;
+      *) continue ;;
+    esac
+    local expected_socket="${reverse_spec%%:*}"
+    [ "$remote_socket" = "$expected_socket" ] || continue
+
+    candidate_count=$((candidate_count + 1))
+    chrome_reconnect_remote_socket="$expected_socket"
+  done <<<"$ps_output"
+
+  if [ "$candidate_count" -eq 0 ]; then
+    echo "Could not verify a managed waypipe SSH child for $host under pane pid $pane_pid." >&2
+    return 1
+  fi
+  if [ "$candidate_count" -ne 1 ]; then
+    echo "Multiple managed waypipe SSH children match $host; refusing ambiguous reconnect." >&2
+    return 1
+  fi
+  return 0
+}
+
+chrome_reconnect_remote_probe() {
+  local host="$1"
+  local socket_path="$2"
+  local output=""
+  local result_line
+
+  if ! output="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+    "$host" bash -s -- "$socket_path" 2>&1 <<'REMOTE_SCRIPT'
+set -u
+wanted_socket="$1"
+uid="$(id -u)" || exit 2
+processes="$(ps -u "$uid" -o pid=,ppid=,pgid=,args= 2>&1)" || {
+  printf '%s\n' "$processes" >&2
+  exit 2
+}
+
+matches="$(printf '%s\n' "$processes" |
+  awk -v wanted="$wanted_socket" '
+    {
+      pid = $1
+      ppid = $2
+      pgid = $3
+      $1 = ""
+      $2 = ""
+      $3 = ""
+      sub(/^ +/, "")
+      command = $0
+      count = split(command, argv, /[[:space:]]+/)
+      base = argv[1]
+      sub(/^.*\//, "", base)
+      if (base != "waypipe") {
+        next
+      }
+      socket_ok = 0
+      server_ok = 0
+      for (i = 1; i <= count; i++) {
+        if (argv[i] == "--socket" && argv[i + 1] == wanted) {
+          socket_ok = 1
+        }
+        if (index(argv[i], "--socket=") == 1 && substr(argv[i], 10) == wanted) {
+          socket_ok = 1
+        }
+        if (argv[i] == "server") {
+          server_ok = 1
+        }
+      }
+      if (socket_ok && server_ok && pid ~ /^[0-9]+$/ && pgid ~ /^[0-9]+$/) {
+        print pid "\t" pgid
+      }
+    }
+  ')"
+
+if [ -z "$matches" ]; then
+  chrome_count="$(printf '%s\n' "$processes" |
+    awk '
+      {
+        # ps emits pid, ppid, pgid before the command.  Remove those numeric
+        # columns before inspecting the executable, otherwise a browser whose
+        # path is not in the first column is mistaken for an absent browser.
+        $1 = ""
+        $2 = ""
+        $3 = ""
+        sub(/^ +/, "")
+        command = $0
+        count = split(command, argv, /[[:space:]]+/)
+        base = argv[1]
+        sub(/^.*\//, "", base)
+        if (base ~ /^(google-chrome|google-chrome-stable|chrome|chromium|chromium-browser)$/) {
+          child = 0
+          for (i = 2; i <= count; i++) {
+            if (argv[i] ~ /^--type=/) {
+              child = 1
+              break
+            }
+          }
+          if (!child) {
+            browser_count++
+          }
+        }
+      }
+      END { print browser_count + 0 }
+    ')"
+  if [ "$chrome_count" -gt 0 ]; then
+    printf 'UNRELATED\t%s\n' "$chrome_count"
+  else
+    printf '%s\n' ABSENT
+  fi
+  exit 0
+fi
+
+groups="$(printf '%s\n' "$matches" | cut -f2 | sort -u)"
+group_count="$(printf '%s\n' "$groups" | awk 'NF {count++} END {print count + 0}')"
+if [ "$group_count" -ne 1 ]; then
+  printf 'AMBIGUOUS\t%s\n' "$group_count"
+  exit 0
+fi
+pgid="$(printf '%s\n' "$groups" | sed -n '1p')"
+pid="$(printf '%s\n' "$matches" | awk -F '\t' -v wanted="$pgid" '$2 == wanted {print $1; exit}')"
+printf 'MATCH\t%s\t%s\n' "$pid" "$pgid"
+REMOTE_SCRIPT
+)"; then
+    [ -n "$output" ] && printf '%s\n' "$output" >&2
+    echo "Could not inspect the exact remote waypipe server for socket $socket_path; refusing reconnect." >&2
+    return 2
+  fi
+
+  result_line="$(printf '%s\n' "$output" | sed -n '1p')"
+  case "$result_line" in
+    MATCH$'\t'*)
+      IFS=$'\t' read -r _ chrome_reconnect_remote_pid chrome_reconnect_remote_pgid <<<"$result_line"
+      if [[ ! "$chrome_reconnect_remote_pid" =~ ^[0-9]+$ ]] ||
+        [[ ! "$chrome_reconnect_remote_pgid" =~ ^[0-9]+$ ]]; then
+        echo "Remote waypipe probe returned invalid process identity; refusing reconnect." >&2
+        return 2
+      fi
+      return 0
+      ;;
+    ABSENT)
+      chrome_reconnect_remote_pid=""
+      chrome_reconnect_remote_pgid=""
+      return 1
+      ;;
+    UNRELATED$'\t'*)
+      echo "Remote Chrome process(es) remain while the exact waypipe server is absent; refusing to delegate reconnect." >&2
+      return 2
+      ;;
+    AMBIGUOUS$'\t'*)
+      echo "Multiple remote waypipe process groups match socket $socket_path; refusing ambiguous reconnect." >&2
+      return 2
+      ;;
+    *)
+      [ -n "$output" ] && printf '%s\n' "$output" >&2
+      echo "Remote waypipe probe returned an invalid result; refusing reconnect." >&2
+      return 2
+      ;;
+  esac
+}
+
+chrome_reconnect_remote_stop() {
+  local host="$1"
+  local socket_path="$2"
+  local expected_pgid="$3"
+  local timeout="${REMOTE_CHROME_RECONNECT_TIMEOUT:-5}"
+  local output=""
+  [[ "$expected_pgid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5
+  [ "$timeout" -gt 0 ] || timeout=1
+  timeout="$((10#$timeout))"
+
+  if ! output="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+    "$host" bash -s -- "$socket_path" "$expected_pgid" "$timeout" 2>&1 <<'REMOTE_SCRIPT'
+set -u
+wanted_socket="$1"
+wanted_pgid="$2"
+timeout_seconds="$3"
+uid="$(id -u)" || exit 2
+processes="$(ps -u "$uid" -o pid=,ppid=,pgid=,args= 2>&1)" || {
+  printf '%s\n' "$processes" >&2
+  exit 2
+}
+matches="$(printf '%s\n' "$processes" |
+  awk -v wanted="$wanted_socket" '
+    {
+      pid = $1
+      ppid = $2
+      pgid = $3
+      $1 = ""
+      $2 = ""
+      $3 = ""
+      sub(/^ +/, "")
+      command = $0
+      count = split(command, argv, /[[:space:]]+/)
+      base = argv[1]
+      sub(/^.*\//, "", base)
+      if (base != "waypipe") next
+      socket_ok = 0
+      server_ok = 0
+      for (i = 1; i <= count; i++) {
+        if (argv[i] == "--socket" && argv[i + 1] == wanted) socket_ok = 1
+        if (index(argv[i], "--socket=") == 1 && substr(argv[i], 10) == wanted) socket_ok = 1
+        if (argv[i] == "server") server_ok = 1
+      }
+      if (socket_ok && server_ok && pid ~ /^[0-9]+$/ && pgid ~ /^[0-9]+$/) print pid "\t" pgid
+    }
+  ')"
+groups="$(printf '%s\n' "$matches" | cut -f2 | sort -u | awk 'NF {print}')"
+group_count="$(printf '%s\n' "$groups" | awk 'NF {count++} END {print count + 0}')"
+if [ "$group_count" -eq 0 ]; then
+  chrome_count="$(printf '%s\n' "$processes" |
+    awk '
+      {
+        # ps emits pid, ppid, pgid before the command.  Remove those numeric
+        # columns before inspecting the executable, otherwise a browser whose
+        # path is not in the first column is mistaken for an absent browser.
+        $1 = ""
+        $2 = ""
+        $3 = ""
+        sub(/^ +/, "")
+        command = $0
+        count = split(command, argv, /[[:space:]]+/)
+        base = argv[1]
+        sub(/^.*\//, "", base)
+        if (base ~ /^(google-chrome|google-chrome-stable|chrome|chromium|chromium-browser)$/) {
+          child = 0
+          for (i = 2; i <= count; i++) {
+            if (argv[i] ~ /^--type=/) {
+              child = 1
+              break
+            }
+          }
+          if (!child) {
+            browser_count++
+          }
+        }
+      }
+      END { print browser_count + 0 }
+    ')"
+  if [ "$chrome_count" -gt 0 ]; then
+    printf '%s\n' UNRELATED
+  else
+    printf '%s\n' ABSENT
+  fi
+  exit 0
+fi
+if [ "$group_count" -ne 1 ] || [ "$(printf '%s\n' "$groups" | sed -n '1p')" != "$wanted_pgid" ]; then
+  printf '%s\n' CHANGED
+  exit 0
+fi
+
+if ! kill -TERM -- "-$wanted_pgid" 2>&1; then
+  echo "Could not send TERM to exact remote waypipe process group $wanted_pgid." >&2
+  exit 1
+fi
+for ((attempt = 0; attempt <= timeout_seconds; attempt++)); do
+  if ! kill -0 -- "-$wanted_pgid" 2>/dev/null; then
+    printf '%s\n' STOPPED
+    exit 0
+  fi
+  [ "$attempt" -lt "$timeout_seconds" ] || break
+  sleep 1
+done
+printf '%s\n' REMAINS
+exit 1
+REMOTE_SCRIPT
+)"; then
+    [ -n "$output" ] && printf '%s\n' "$output" >&2
+    echo "Remote waypipe process group $expected_pgid did not terminate safely." >&2
+    return 1
+  fi
+  case "$(printf '%s\n' "$output" | sed -n '1p')" in
+    STOPPED|ABSENT) return 0 ;;
+    CHANGED)
+      echo "Remote waypipe process identity changed before termination; refusing reconnect." >&2
+      return 1
+      ;;
+    *)
+      [ -n "$output" ] && printf '%s\n' "$output" >&2
+      echo "Remote waypipe process group $expected_pgid remains or returned an invalid result." >&2
+      return 1
+      ;;
+  esac
+}
+
+chrome_reconnect() {
+  local host=""
+  local session=""
+  local assume_yes=0
+  local yk_state_present=0
+  local yk_window_present=0
+  local yk_needed=0
+  local remote_probe_code=0
+  local post_stop_probe_code=0
+  local session_probe_code=0
+  local session_probe_output=""
+  local pane_host
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session)
+        [ "$#" -ge 2 ] || die "$1 requires a session name."
+        session="$2"
+        shift 2
+        ;;
+      --session=*)
+        session="${1#*=}"
+        shift
+        ;;
+      --yes|-y)
+        assume_yes=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      -*)
+        die "Unknown reconnect option: $1"
+        ;;
+      *)
+        [ -z "$host" ] || die "Unexpected argument: $1"
+        host="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$host" ] || [ -n "$session" ] ||
+    die "Reconnect requires HOST or --session NAME; hostless reconnect is not supported."
+  [ -n "$session" ] || session="$(chrome_default_session "$host")"
+
+  need tmux
+  need ssh
+  need ps
+  tmux has-session -t "$session" 2>/dev/null ||
+    die "tmux session not found: $session"
+  chrome_reconnect_read_pane "$session" || return 1
+  chrome_reconnect_parse_pane_host "$chrome_reconnect_pane_command" || return 1
+  pane_host="$chrome_reconnect_host"
+  if [ -n "$host" ] && [ "$host" != "$pane_host" ]; then
+    die "The selected chrome pane targets $pane_host, not requested host $host; refusing reconnect."
+  fi
+  host="$pane_host"
+  chrome_reconnect_find_local_ssh "$chrome_reconnect_pane_pid" "$host" || return 1
+
+  yk_prepare_for_launch "$host"
+  [ -e "$yk_state_file" ] && yk_state_present=1
+  if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null |
+    grep -qx yubikey; then
+    yk_window_present=1
+  fi
+
+  chrome_reconnect_remote_probe "$host" "$chrome_reconnect_remote_socket" || remote_probe_code=$?
+  case "$remote_probe_code" in
+    0)
+      echo "Remote waypipe server matched socket $chrome_reconnect_remote_socket (pid=$chrome_reconnect_remote_pid pgid=$chrome_reconnect_remote_pgid)." >&2
+      if [ "$assume_yes" != "1" ] &&
+        ! confirm "Reconnect will restart remote Chrome/Waypipe and may lose unsaved in-page state. Continue?"; then
+        echo "Reconnect canceled; the existing tmux session is unchanged." >&2
+        return 1
+      fi
+      chrome_reconnect_remote_stop "$host" "$chrome_reconnect_remote_socket" \
+        "$chrome_reconnect_remote_pgid" || return 1
+      # A successful TERM only proves that the exact group accepted the
+      # request.  Re-probe before touching the local tmux session so a browser
+      # that escaped the group, or an unrelated browser that was already
+      # present, cannot be hidden by a reconnect restart.
+      chrome_reconnect_remote_probe "$host" "$chrome_reconnect_remote_socket" ||
+        post_stop_probe_code=$?
+      if [ "$post_stop_probe_code" -ne 1 ]; then
+        echo "Remote Waypipe teardown did not leave a cleanly absent server; preserving the existing tmux session." >&2
+        return 1
+      fi
+      ;;
+    1)
+      echo "The exact remote waypipe server is already absent for socket $chrome_reconnect_remote_socket." >&2
+      if [ "$assume_yes" != "1" ] &&
+        ! confirm "No matching remote waypipe server or Chrome was found; recreate this frozen session?"; then
+        echo "Reconnect canceled; the existing tmux session is unchanged." >&2
+        return 1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if session_probe_output="$(tmux has-session -t "$session" 2>&1)"; then
+    session_probe_code=0
+  else
+    session_probe_code=$?
+  fi
+  case "$session_probe_code" in
+    0)
+      if tmux kill-session -t "$session" 2>/dev/null; then
+        echo "Removed frozen tmux session $session after remote Waypipe teardown." >&2
+      else
+        echo "Remote Waypipe teardown succeeded, but could not remove tmux session $session." >&2
+        return 1
+      fi
+      ;;
+    1)
+      if [ -n "$session_probe_output" ] &&
+        [[ "$session_probe_output" != *"can't find session"* ]] &&
+        [[ "$session_probe_output" != *"session not found"* ]]; then
+        echo "Remote Waypipe teardown succeeded, but could not confirm tmux session $session absence: $session_probe_output" >&2
+        return 1
+      fi
+      echo "Frozen tmux session $session already exited after remote Waypipe teardown; continuing with recreation." >&2
+      ;;
+    *)
+      echo "Remote Waypipe teardown succeeded, but could not verify tmux session $session absence." >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$yk_state_present" = "1" ] || [ "$yk_window_present" = "1" ]; then
+    yk_stop || {
+      echo "YubiKey cleanup remains incomplete; retry $PROGRAM stop $host before reconnecting." >&2
+      return 1
+    }
+    yk_needed=1
+  elif yk_local_candidate_exists; then
+    yk_needed=1
+  fi
+
+  if [ "$yk_needed" = "1" ]; then
+    yk_preflight_for_forwarding 1
+    chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reconnect_pane_command"
+  else
+    if ! tmux new-session -d -s "$session" -n chrome "$chrome_reconnect_pane_command"; then
+      echo "Could not recreate chrome pane in tmux session $session." >&2
+      return 1
+    fi
+  fi
+  echo "Reconnected $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
+  print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
+  print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
+  print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
+}
+
 chrome_status_all() {
   local session state_file lock_file state_output
   local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
@@ -722,6 +1330,10 @@ yk_log_file=""
 yk_attempt_lock=""
 yk_attempt_owned=0
 yk_attempt_token="${REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN:-}"
+yk_cleanup_lock=""
+yk_cleanup_lock_owned=0
+yk_cleanup_lock_token=""
+yk_cleanup_reload_state=0
 yk_phase="idle"
 yk_readiness="none"
 yk_tunnel_open=0
@@ -787,6 +1399,7 @@ yk_set_runtime_paths() {
   yk_state_file="${yk_control_socket}.state"
   yk_log_file="${yk_state_file}.log"
   yk_attempt_lock="${yk_state_file}.lock"
+  yk_cleanup_lock="${yk_state_file}.cleanup.lock"
   yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-$(safe_name "$yk_usbip_port").pid"
 }
 
@@ -950,6 +1563,105 @@ yk_reset_runtime_state() {
   yk_attach_state="none"
   yk_started_usbipd=0
   yk_usbipd_pid=""
+}
+
+yk_cleanup_lock_release() {
+  local owner_pid=""
+  local owner_token=""
+  local lock_pid="${BASHPID:-$$}"
+
+  [ "$yk_cleanup_lock_owned" = "1" ] || return 0
+  if [ -f "$yk_cleanup_lock" ]; then
+    IFS=$'\t' read -r owner_pid owner_token <"$yk_cleanup_lock" || true
+    if [ "$owner_pid" != "$lock_pid" ] ||
+      [ "$owner_token" != "$yk_cleanup_lock_token" ]; then
+      echo "YubiKey cleanup lock ownership changed; preserving $yk_cleanup_lock." >&2
+      return 1
+    fi
+    if ! rm -f -- "$yk_cleanup_lock"; then
+      echo "Could not release YubiKey cleanup lock $yk_cleanup_lock." >&2
+      return 1
+    fi
+  fi
+  yk_cleanup_lock_owned=0
+  yk_cleanup_lock_token=""
+  return 0
+}
+
+yk_cleanup_lock_release_on_exit() {
+  yk_cleanup_lock_release >/dev/null 2>&1 || true
+}
+
+yk_cleanup_lock_acquire() {
+  local timeout="${REMOTE_CHROME_YUBIKEY_CLEANUP_LOCK_TIMEOUT:-30}"
+  local attempt=0
+  local lock_pid
+  local lock_token
+  local owner_tmp
+  local owner_pid=""
+  local owner_token=""
+  local current_owner
+  local process_alive
+
+  if [ -z "$yk_cleanup_lock" ] && [ -n "$yk_state_file" ]; then
+    yk_cleanup_lock="${yk_state_file}.cleanup.lock"
+  fi
+  [ -n "$yk_cleanup_lock" ] || {
+    echo "YubiKey cleanup lock path is not configured." >&2
+    return 1
+  }
+  if [ "$yk_cleanup_lock_owned" = "1" ]; then
+    return 0
+  fi
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=30
+  timeout="$((10#$timeout))"
+  lock_pid="${BASHPID:-$$}"
+
+  while true; do
+    lock_token="${lock_pid}.${RANDOM}.${SECONDS}.${attempt}"
+    owner_tmp="${yk_cleanup_lock}.owner.${lock_token}"
+    if printf '%s\t%s\n' "$lock_pid" "$lock_token" >"$owner_tmp" 2>/dev/null &&
+      ln -- "$owner_tmp" "$yk_cleanup_lock" 2>/dev/null; then
+      rm -f -- "$owner_tmp"
+      yk_cleanup_lock_owned=1
+      yk_cleanup_lock_token="$lock_token"
+      return 0
+    fi
+    rm -f -- "$owner_tmp" 2>/dev/null || true
+
+    if [ -f "$yk_cleanup_lock" ]; then
+      owner_pid=""
+      owner_token=""
+      IFS=$'\t' read -r owner_pid owner_token <"$yk_cleanup_lock" || true
+      process_alive=0
+      if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+        process_alive=1
+      fi
+      if [ "$process_alive" = "0" ] &&
+        [[ "$owner_pid" =~ ^[0-9]+$ ]] && [ -n "$owner_token" ]; then
+        # Confirm the owner record did not change while its process was being
+        # checked.  Never remove a lock that may have been handed to a live
+        # cleanup operation in the meantime.
+        current_owner="$(cat "$yk_cleanup_lock" 2>/dev/null || true)"
+        if [ "$current_owner" = "$owner_pid	$owner_token" ]; then
+          rm -f -- "$yk_cleanup_lock" 2>/dev/null || true
+          continue
+        fi
+      fi
+    fi
+
+    if [ "$attempt" -ge "$timeout" ]; then
+      if [ -n "$owner_pid" ] && [ -n "$owner_token" ]; then
+        echo "YubiKey cleanup is already in progress (lock: $yk_cleanup_lock; owner pid=$owner_pid)." >&2
+      else
+        echo "YubiKey cleanup lock is busy or unreadable: $yk_cleanup_lock." >&2
+      fi
+      echo "Wait for the current cleanup to finish, then retry stop or launch." >&2
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
 }
 
 yk_release_attempt() {
@@ -1815,6 +2527,269 @@ exit "$detach_failed"
 REMOTE_SCRIPT
 }
 
+yk_remote_probe_attachment() {
+  local busid="$1"
+  local output=""
+
+  if ! output="$(yk_ssh 'bash -s' -- "$busid" 2>&1 <<'REMOTE_SCRIPT'
+busid="$1"
+
+if ! port_output="$(timeout 5 sudo -n usbip port 2>&1)"; then
+  echo "Could not inspect remote USB/IP ports while reconciling busid $busid:" >&2
+  printf '%s\n' "$port_output" >&2
+  exit 2
+fi
+
+ports="$(printf '%s\n' "$port_output" |
+  awk -v wanted="$busid" '
+    /^Port [0-9]+:/ {
+      port = $2
+      sub(":", "", port)
+    }
+    {
+      marker = "/" wanted
+      position = index($0, marker)
+      if (position > 0) {
+        following = substr($0, position + length(marker), 1)
+      } else {
+        following = ""
+      }
+      if (position > 0 && (following == "" || following ~ /[[:space:]]/) && port != "") {
+        print port
+      }
+    }
+  ')"
+
+if [ -n "$ports" ]; then
+  printf '%s\n' attached
+else
+  printf '%s\n' absent
+fi
+REMOTE_SCRIPT
+)"; then
+    [ -n "$output" ] && printf '%s\n' "$output" >&2
+    echo "Could not determine whether remote USB/IP busid $busid is attached; preserving recovery state." >&2
+    return 2
+  fi
+
+  case "$output" in
+    *attached*) return 0 ;;
+    *absent*) return 1 ;;
+    *)
+      [ -n "$output" ] && printf '%s\n' "$output" >&2
+      echo "Remote USB/IP attachment probe returned an invalid result for busid $busid; preserving recovery state." >&2
+      return 2
+      ;;
+  esac
+}
+
+yk_reconcile_local_bind() {
+  local bind_code=0
+
+  [ -n "$yk_active_busid" ] || return 0
+  case "$yk_bind_state" in
+    none)
+      return 0
+      ;;
+    attempting|bound)
+      if yk_local_busid_bound "$yk_active_busid"; then
+        echo "Recorded local USB/IP busid $yk_active_busid is still bound; retry stop before launching." >&2
+        return 1
+      else
+        bind_code=$?
+      fi
+      if [ "$bind_code" -ne 1 ]; then
+        echo "Could not determine whether local USB/IP busid $yk_active_busid is bound; preserving recovery state." >&2
+        return 2
+      fi
+      return 0
+      ;;
+    *)
+      echo "Cannot reconcile unknown local bind ownership state '$yk_bind_state' for busid $yk_active_busid." >&2
+      return 2
+      ;;
+  esac
+}
+
+yk_reconcile_tunnel() {
+  local socket_output=""
+
+  if [ "$yk_tunnel_open" != "1" ] &&
+    [ ! -e "$yk_control_socket" ] && [ ! -L "$yk_control_socket" ]; then
+    return 0
+  fi
+
+  if [ -S "$yk_control_socket" ] &&
+    socket_output="$(ssh -S "$yk_control_socket" -O check "$yk_remote" 2>&1)"; then
+    echo "Recorded SSH USB/IP tunnel is still alive ($yk_control_socket); retry stop before launching." >&2
+    return 1
+  fi
+
+  # A failed control-master check means the exact recorded socket no longer
+  # has a live SSH peer.  Remove only that path; a live socket was handled
+  # above and is never auto-cleaned during launch reconciliation.
+  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+    if ! unlink -- "$yk_control_socket"; then
+      [ -n "$socket_output" ] && printf '%s\n' "$socket_output" >&2
+      echo "Could not remove stale SSH USB/IP control socket $yk_control_socket; preserving recovery state." >&2
+      return 2
+    fi
+  fi
+  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+    echo "SSH USB/IP control socket remains after reconciliation: $yk_control_socket" >&2
+    return 1
+  fi
+  return 0
+}
+
+yk_reconcile_usbipd() {
+  local pid_file_pid=""
+
+  [ "$yk_started_usbipd" = "1" ] || return 0
+  if [ -n "$yk_usbipd_pid" ] && [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
+    echo "Owned usbipd has an invalid recorded PID; preserving recovery state." >&2
+    return 2
+  fi
+  if [ -f "$yk_usbipd_pid_file" ]; then
+    if ! pid_file_pid="$(yk_validate_usbipd_pid_file "$yk_usbipd_pid")"; then
+      return 2
+    fi
+    if [ -n "$yk_usbipd_pid" ] && [ "$pid_file_pid" != "$yk_usbipd_pid" ]; then
+      echo "Owned usbipd pid file changed from $yk_usbipd_pid to $pid_file_pid; preserving recovery state." >&2
+      return 2
+    fi
+    [ -n "$yk_usbipd_pid" ] || yk_usbipd_pid="$pid_file_pid"
+  fi
+
+  if [ -z "$yk_usbipd_pid" ]; then
+    echo "Owned usbipd has no recorded PID; cannot prove that the daemon is gone." >&2
+    return 2
+  fi
+  if yk_owned_usbipd_running "$yk_usbipd_pid"; then
+    if [ "$yk_stop_usbipd" != "1" ]; then
+      echo "Leaving verified owned usbipd pid $yk_usbipd_pid running by request; launch reconciliation can proceed." >&2
+      return 0
+    fi
+    if yk_other_exports_exist; then
+      echo "Leaving verified owned usbipd pid $yk_usbipd_pid because other USB/IP exports remain; launch reconciliation can proceed." >&2
+      return 0
+    fi
+    echo "Verified owned usbipd pid $yk_usbipd_pid is still running; retry stop before launching." >&2
+    return 1
+  fi
+  if yk_process_exists "$yk_usbipd_pid"; then
+    echo "Cannot verify ownership of live usbipd pid $yk_usbipd_pid; preserving recovery state." >&2
+    return 2
+  fi
+
+  # A dead, exactly recorded daemon may leave only its PID file behind.  Use
+  # the existing exact ownership validator to remove that stale evidence.
+  if ! yk_stop_owned_usbipd; then
+    echo "Could not reconcile the recorded usbipd pid $yk_usbipd_pid; preserving recovery state." >&2
+    return 2
+  fi
+  return 0
+}
+
+yk_reconcile_cleanup_failed_unlocked() {
+  local probe_code=0
+
+  if [ "$yk_phase" != "cleanup-failed" ]; then
+    return 1
+  fi
+  if [ -n "$yk_active_busid" ] && [ "$yk_attach_state" != "none" ]; then
+    if [ -z "$yk_remote" ]; then
+      echo "Cleanup-failed state has a remote attachment but no remote host; preserving recovery state." >&2
+      return 2
+    fi
+    yk_remote_probe_attachment "$yk_active_busid" || probe_code=$?
+    case "$probe_code" in
+      0)
+        echo "Remote USB/IP busid $yk_active_busid is still attached; retry stop before launching." >&2
+        return 1
+        ;;
+      1)
+        # An absent remote port is the expected success result for this
+        # reconciliation probe; do not carry its false-status code into the
+        # remaining local/tunnel/daemon checks.
+        probe_code=0
+        ;;
+      *) return 2 ;;
+    esac
+  fi
+
+  yk_reconcile_local_bind || probe_code=$?
+  [ "$probe_code" = "0" ] || return "$probe_code"
+
+  yk_reconcile_tunnel || probe_code=$?
+  [ "$probe_code" = "0" ] || return "$probe_code"
+
+  yk_reconcile_usbipd || probe_code=$?
+  [ "$probe_code" = "0" ] || return "$probe_code"
+
+  return 0
+}
+
+yk_reconcile_cleanup_failed() {
+  local initial_code=0
+  local load_code=0
+  local reconcile_code=0
+  local previous_exit_trap
+
+  yk_load_state || load_code=$?
+  if [ "$load_code" -eq 1 ]; then
+    return 0
+  fi
+  [ "$load_code" -eq 0 ] || return 2
+  [ "$yk_phase" = "cleanup-failed" ] || return 1
+
+  if ! yk_cleanup_lock_acquire; then
+    return 2
+  fi
+  previous_exit_trap="$(trap -p EXIT || true)"
+  trap 'yk_cleanup_lock_release_on_exit' EXIT
+
+  # Reload after taking the cleanup lock.  A concurrent stop may have
+  # completed or advanced the ledger while the launch was waiting.
+  yk_load_state || initial_code=$?
+  if [ "$initial_code" -eq 0 ] && [ "$yk_phase" = "cleanup-failed" ]; then
+    yk_reconcile_cleanup_failed_unlocked || reconcile_code=$?
+    if [ "$reconcile_code" -eq 0 ]; then
+      if [ -n "$yk_log_file" ] && [ -e "$yk_log_file" ] &&
+        ! rm -f -- "$yk_log_file"; then
+        echo "Could not remove reconciled YubiKey cleanup log $yk_log_file; preserving recovery state." >&2
+        reconcile_code=2
+      fi
+      if [ "$reconcile_code" -eq 0 ] && [ -d "$yk_attempt_lock" ] &&
+        ! rmdir -- "$yk_attempt_lock"; then
+        echo "Could not remove reconciled YubiKey attempt lock $yk_attempt_lock; preserving recovery state." >&2
+        reconcile_code=2
+      fi
+      if [ "$reconcile_code" -eq 0 ] && ! rm -f -- "$yk_state_file"; then
+        echo "Could not remove reconciled YubiKey recovery state $yk_state_file; preserving recovery state." >&2
+        reconcile_code=2
+      fi
+      if [ "$reconcile_code" -eq 0 ]; then
+        echo "Reconciled stale YubiKey cleanup state for $yk_remote; continuing launch."
+      fi
+    fi
+  elif [ "$initial_code" -eq 1 ]; then
+    reconcile_code=0
+  else
+    reconcile_code=2
+  fi
+
+  if ! yk_cleanup_lock_release; then
+    reconcile_code=2
+  fi
+  if [ -n "$previous_exit_trap" ]; then
+    eval "$previous_exit_trap"
+  else
+    trap - EXIT
+  fi
+  return "$reconcile_code"
+}
+
 yk_other_exports_exist() {
   local candidate name
   for candidate in "$yk_usbip_host_sysfs"/*; do
@@ -2402,7 +3377,7 @@ yk_unbind_owned_busid() {
   return 0
 }
 
-yk_cleanup_resources() {
+yk_cleanup_resources_unlocked() {
   local emit_success="${1:-0}"
   local active_busid="$yk_active_busid"
   local cleanup_message
@@ -2411,7 +3386,7 @@ yk_cleanup_resources() {
   yk_cleanup_messages=""
 
   if [ -n "$yk_active_busid" ] && [ "$yk_attach_state" != "none" ]; then
-    if yk_remote_detach_busid "$yk_active_busid" >/dev/null 2>&1; then
+    if yk_remote_detach_busid "$yk_active_busid"; then
       yk_attach_state="none"
       yk_cleanup_persist_state || true
     else
@@ -2492,6 +3467,55 @@ yk_cleanup_resources() {
   return 0
 }
 
+yk_cleanup_resources() {
+  local cleanup_code=0
+  local reload_code=0
+  local previous_exit_trap
+
+  if ! yk_cleanup_lock_acquire; then
+    return 1
+  fi
+
+  # A detached child can be interrupted while cleanup is in progress.  Keep
+  # the per-state lock recoverable even when the shell exits unexpectedly;
+  # yk_cleanup_resources_unlocked always leaves the last durable ledger phase
+  # behind for a later retry.
+  previous_exit_trap="$(trap -p EXIT || true)"
+  trap 'yk_cleanup_lock_release_on_exit' EXIT
+
+  if [ "$yk_cleanup_reload_state" = "1" ]; then
+    yk_load_state || reload_code=$?
+    yk_cleanup_reload_state=0
+    if [ "$reload_code" -eq 1 ]; then
+      # Another caller completed cleanup while this stop waited for the
+      # per-state lock.  stop is idempotent once the ledger is gone.
+      yk_cleanup_lock_release || cleanup_code=1
+      if [ -n "$previous_exit_trap" ]; then
+        eval "$previous_exit_trap"
+      else
+        trap - EXIT
+      fi
+      return "$cleanup_code"
+    fi
+    if [ "$reload_code" -ne 0 ]; then
+      cleanup_code=1
+    fi
+  fi
+  if [ "$cleanup_code" -eq 0 ]; then
+    yk_cleanup_resources_unlocked "$@" || cleanup_code=$?
+  fi
+  if ! yk_cleanup_lock_release; then
+    cleanup_code=1
+  fi
+
+  if [ -n "$previous_exit_trap" ]; then
+    eval "$previous_exit_trap"
+  else
+    trap - EXIT
+  fi
+  return "$cleanup_code"
+}
+
 yk_start() {
   yk_reset_runtime_state
   yk_attempt_owned=0
@@ -2523,6 +3547,7 @@ yk_start() {
 
 yk_stop() {
   local load_code=0
+  local cleanup_code=0
   yk_load_state || load_code=$?
   if [ "$load_code" -eq 1 ]; then
     echo "No managed YubiKey forwarding state for $yk_remote."
@@ -2537,7 +3562,10 @@ yk_stop() {
   fi
   [ "$load_code" -eq 0 ] || return "$load_code"
 
-  yk_cleanup_resources 1
+  yk_cleanup_reload_state=1
+  yk_cleanup_resources 1 || cleanup_code=$?
+  yk_cleanup_reload_state=0
+  return "$cleanup_code"
 }
 
 yk_cleanup() {
@@ -2600,6 +3628,10 @@ main() {
     attach)
       shift
       chrome_attach "$@"
+      ;;
+    reconnect)
+      shift
+      chrome_reconnect "$@"
       ;;
     _yubikey-run)
       shift

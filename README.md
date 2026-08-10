@@ -150,6 +150,7 @@ remote-chrome status remote-host
 remote-chrome status --live remote-host
 remote-chrome doctor remote-host
 remote-chrome attach remote-host
+remote-chrome reconnect remote-host
 remote-chrome stop remote-host
 ```
 
@@ -179,6 +180,22 @@ the launching terminal exits, and it gives you a stable place to inspect logs:
 remote-chrome attach remote-host
 tmux capture-pane -pt remote-chrome-remote-host:chrome
 ```
+
+If a detached session is frozen after suspend or network loss, reconnect it
+explicitly:
+
+```bash
+remote-chrome reconnect remote-host
+```
+
+`reconnect` is a managed restart, not transparent Waypipe stream resumption. It
+verifies the exact Waypipe SSH reverse socket and remote process group from the
+selected `chrome` pane, warns that unsaved in-page state may be lost, then
+recreates the same pane command in the same tmux session. It refuses ambiguous
+or unreachable identities and never broad-kills remote Chrome; use `--yes` only
+to skip the restart or narrowly-confirmed-absence warning (identity checks and
+safety refusals still apply). A custom session can be selected with
+`--session NAME`; hostless reconnect is not supported.
 
 When run from inside tmux, `attach` switches the current client instead of
 trying to create a nested tmux client. A successful detached launch prints the
@@ -285,9 +302,17 @@ daemon running while other USB/IP exports still exist. If any owned cleanup
 step fails, stop reports the failure, keeps the state/log for a later retry,
 and returns nonzero. `status HOST` reports tmux windows and the managed YubiKey
 phase/readiness without changing anything; it also exposes a provisional setup
-lock that exists before the first state write. Hostless stop may reconcile only
-a daemon whose standard PID file, `/proc` command name, and exact `--pid` path
-all verify as tool-owned, with no remaining USB/IP exports.
+lock that exists before the first state write. Cleanup callers for one state
+serialize, so a parent stop waits for a detached forwarding child to finish
+before taking over. Hostless stop may reconcile only a daemon whose standard
+PID file, `/proc` command name, and exact `--pid` path all verify as tool-owned,
+with no remaining USB/IP exports. If a prior cleanup leaves a
+`phase=cleanup-failed` ledger, a later launch performs bounded reconciliation
+probes (and removes only exact stale evidence) and clears it only when the
+recorded remote attachment, local bind, tunnel, and owned daemon are
+demonstrably gone (or intentionally retained by policy).
+Active/ready forwarding state remains a launch duplicate and must be stopped
+explicitly; unreachable or ambiguous probes keep the ledger for a retry.
 
 ## Configuration
 
