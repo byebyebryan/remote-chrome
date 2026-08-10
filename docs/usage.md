@@ -12,7 +12,6 @@ status, and stopping the resulting session. They can also be run directly:
 ```bash
 remote-chrome attach remote-host
 remote-chrome status remote-host
-remote-chrome status --live remote-host
 remote-chrome doctor remote-host
 remote-chrome stop remote-host
 ```
@@ -20,13 +19,22 @@ remote-chrome stop remote-host
 `attach` attaches normally outside tmux and switches the current client when
 it is already running inside tmux.
 
-`launch` is an explicit alias for the same behavior. If remote Chrome is already
-running, you are asked before it is killed. Confirm to kill it, or use
+Repeating the bare `remote-chrome HOST` command resets the existing managed
+session for that host. It does not attempt to judge whether an old Waypipe
+stream is healthy after suspend; the repeated command is the deliberate request
+to recreate it. `launch` is the fresh-session form and refuses an existing tmux
+session. If remote Chrome is already running, you are asked before it is killed.
+Confirm to kill it, or use
 `--allow-existing` to launch anyway:
 
 ```bash
 remote-chrome launch remote-host --allow-existing
 ```
+
+Use `reset HOST` to force the same managed restart explicitly. `reset` without
+a host selects the sole default managed session and refuses when several exist.
+It preserves the original pane command and, when present, restores managed
+YubiKey forwarding; it does not transparently resume an old Waypipe stream.
 
 By default, the launcher detects a local YubiKey matching the configured USB
 vendor/product (default `1050:0407`). If one is present, forwarding is expected;
@@ -87,10 +95,11 @@ first state write. Run `remote-chrome status` without a host for a read-only
 overview of all default managed tmux sessions, forwarding state files,
 provisional locks, and standard-runtime orphan `usbipd` PID files.
 
-`status --live remote-host` adds read-only checks for current tmux windows,
+`status remote-host` performs read-only checks for current tmux windows,
 recorded USB/IP ownership, the owned `usbipd` process, SSH control socket, and
 remote YubiKey readiness. It returns nonzero with actionable output when the
-session is stale or degraded. `doctor remote-host` checks local display and
+session is stale or degraded. `status` without a host remains the managed-state
+overview. `doctor remote-host` checks local display and
 commands, detached SSH plus remote Waypipe/Chrome, and USB/IP module
 prerequisites without loading modules or changing USB/IP state.
 

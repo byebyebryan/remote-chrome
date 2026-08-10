@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 usage() {
   cat <<USAGE
@@ -11,10 +11,9 @@ Usage:
   $PROGRAM launch HOST [-- CHROME_ARGS...]
   $PROGRAM stop [HOST]
   $PROGRAM status [HOST]
-  $PROGRAM status --live HOST
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
-  $PROGRAM reconnect HOST [--session NAME] [--yes]
+  $PROGRAM reset [HOST] [--session NAME] [--yes]
 
 Chrome options:
       --session NAME       tmux session name
@@ -27,8 +26,8 @@ Chrome options:
       --allow-existing     launch even if remote Chrome is already running
       --yes                do not prompt before killing remote Chrome
 
-Reconnect options:
-      --yes                skip reconnect restart/absent-group confirmations;
+Reset options:
+      --yes                skip reset restart/absent-group confirmations;
                            identity checks and safety refusals still apply
 
 General options:
@@ -45,7 +44,7 @@ Environment:
   REMOTE_CHROME_YUBIKEY_TIMEOUT
   REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT
   REMOTE_CHROME_YUBIKEY_READY_GRACE
-  REMOTE_CHROME_RECONNECT_TIMEOUT
+  REMOTE_CHROME_RESET_TIMEOUT
 USAGE
 }
 
@@ -89,6 +88,84 @@ print_command_hint() {
 
 chrome_default_session() {
   printf '%s-%s\n' "${REMOTE_CHROME_SESSION_PREFIX:-remote-chrome}" "$(safe_name "$1")"
+}
+
+# Parse only the options that determine a detached launch's tmux target.  The
+# full launch parser remains the source of truth for validation and launch
+# behavior; a parse miss deliberately falls back to it unchanged.
+chrome_launch_target() {
+  chrome_launch_target_host=""
+  chrome_launch_target_session=""
+  chrome_launch_target_foreground=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session|--chrome-command|--yubikey-usb-id|--yubikey-port)
+        [ "$#" -ge 2 ] || return 1
+        if [ "$1" = "--session" ]; then
+          chrome_launch_target_session="$2"
+        fi
+        shift 2
+        ;;
+      --session=*)
+        chrome_launch_target_session="${1#*=}"
+        shift
+        ;;
+      --chrome-command=*|--yubikey-usb-id=*|--yubikey-port=*)
+        shift
+        ;;
+      --foreground|--no-tmux)
+        chrome_launch_target_foreground=1
+        shift
+        ;;
+      --with-yubikey|--no-yubikey|--allow-existing|--yes|-y)
+        shift
+        ;;
+      -h|--help)
+        return 1
+        ;;
+      --)
+        break
+        ;;
+      -*)
+        return 1
+        ;;
+      *)
+        if [ -z "$chrome_launch_target_host" ]; then
+          chrome_launch_target_host="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$chrome_launch_target_host" ] || return 1
+  [ -n "$chrome_launch_target_session" ] ||
+    chrome_launch_target_session="$(chrome_default_session "$chrome_launch_target_host")"
+}
+
+# The bare HOST form is the normal day-to-day entry point.  A second explicit
+# invocation means reset the exact managed session, rather than attempting to
+# infer whether an old Waypipe stream still renders correctly after suspend.
+chrome_ensure() {
+  if ! chrome_launch_target "$@"; then
+    chrome_launch "$@"
+    return
+  fi
+
+  if [ "$chrome_launch_target_foreground" = "1" ]; then
+    chrome_launch "$@"
+    return
+  fi
+
+  need tmux
+  if tmux has-session -t "$chrome_launch_target_session" 2>/dev/null; then
+    echo "Managed tmux session $chrome_launch_target_session already exists; resetting the remote Chrome/Waypipe stream." >&2
+    chrome_reset "$chrome_launch_target_host" --session "$chrome_launch_target_session" --yes
+    return
+  fi
+
+  chrome_launch "$@"
 }
 
 chrome_launch() {
@@ -527,15 +604,15 @@ chrome_attach() {
   fi
 }
 
-chrome_reconnect_pane_id=""
-chrome_reconnect_pane_pid=""
-chrome_reconnect_pane_command=""
-chrome_reconnect_host=""
-chrome_reconnect_remote_socket=""
-chrome_reconnect_remote_pgid=""
-chrome_reconnect_remote_pid=""
+chrome_reset_pane_id=""
+chrome_reset_pane_pid=""
+chrome_reset_pane_command=""
+chrome_reset_host=""
+chrome_reset_remote_socket=""
+chrome_reset_remote_pgid=""
+chrome_reset_remote_pid=""
 
-chrome_reconnect_read_pane() {
+chrome_reset_read_pane() {
   local session="$1"
   local pane_output=""
   local line_count=0
@@ -551,34 +628,34 @@ chrome_reconnect_read_pane() {
     [ -n "$pane_line" ] || continue
     line_count=$((line_count + 1))
     [ "$line_count" -eq 1 ] || break
-    IFS=$'\t' read -r chrome_reconnect_pane_id chrome_reconnect_pane_pid \
-      chrome_reconnect_pane_command <<<"$pane_line"
+    IFS=$'\t' read -r chrome_reset_pane_id chrome_reset_pane_pid \
+      chrome_reset_pane_command <<<"$pane_line"
   done <<<"$pane_output"
   if [ "$line_count" -ne 1 ] ||
-    [ -z "$chrome_reconnect_pane_id" ] ||
-    [[ ! "$chrome_reconnect_pane_pid" =~ ^[0-9]+$ ]] ||
-    [ -z "$chrome_reconnect_pane_command" ]; then
+    [ -z "$chrome_reset_pane_id" ] ||
+    [[ ! "$chrome_reset_pane_pid" =~ ^[0-9]+$ ]] ||
+    [ -z "$chrome_reset_pane_command" ]; then
     echo "The $session:chrome window must contain exactly one readable pane with a start command." >&2
     return 1
   fi
   return 0
 }
 
-chrome_reconnect_parse_pane_host() {
+chrome_reset_parse_pane_host() {
   local command_line="$1"
 
   if [[ ! "$command_line" =~ ^waypipe[[:space:]]+--no-gpu[[:space:]]+ssh[[:space:]]+([^[:space:]]+)([[:space:]]|$) ]]; then
-    echo "The chrome pane is not a managed waypipe SSH command; refusing reconnect." >&2
+    echo "The chrome pane is not a managed waypipe SSH command; refusing reset." >&2
     return 1
   fi
-  chrome_reconnect_host="${BASH_REMATCH[1]}"
-  [ -n "$chrome_reconnect_host" ] || {
-    echo "The managed waypipe command is missing its SSH host; refusing reconnect." >&2
+  chrome_reset_host="${BASH_REMATCH[1]}"
+  [ -n "$chrome_reset_host" ] || {
+    echo "The managed waypipe command is missing its SSH host; refusing reset." >&2
     return 1
   }
 }
 
-chrome_reconnect_find_local_ssh() {
+chrome_reset_find_local_ssh() {
   local pane_pid="$1"
   local host="$2"
   local ps_output=""
@@ -682,7 +759,7 @@ chrome_reconnect_find_local_ssh() {
     [ "$remote_socket" = "$expected_socket" ] || continue
 
     candidate_count=$((candidate_count + 1))
-    chrome_reconnect_remote_socket="$expected_socket"
+    chrome_reset_remote_socket="$expected_socket"
   done <<<"$ps_output"
 
   if [ "$candidate_count" -eq 0 ]; then
@@ -690,13 +767,13 @@ chrome_reconnect_find_local_ssh() {
     return 1
   fi
   if [ "$candidate_count" -ne 1 ]; then
-    echo "Multiple managed waypipe SSH children match $host; refusing ambiguous reconnect." >&2
+    echo "Multiple managed waypipe SSH children match $host; refusing ambiguous reset." >&2
     return 1
   fi
   return 0
 }
 
-chrome_reconnect_remote_probe() {
+chrome_reset_remote_identity() {
   local host="$1"
   local socket_path="$2"
   local output=""
@@ -798,47 +875,47 @@ printf 'MATCH\t%s\t%s\n' "$pid" "$pgid"
 REMOTE_SCRIPT
 )"; then
     [ -n "$output" ] && printf '%s\n' "$output" >&2
-    echo "Could not inspect the exact remote waypipe server for socket $socket_path; refusing reconnect." >&2
+    echo "Could not inspect the exact remote waypipe server for socket $socket_path; refusing reset." >&2
     return 2
   fi
 
   result_line="$(printf '%s\n' "$output" | sed -n '1p')"
   case "$result_line" in
     MATCH$'\t'*)
-      IFS=$'\t' read -r _ chrome_reconnect_remote_pid chrome_reconnect_remote_pgid <<<"$result_line"
-      if [[ ! "$chrome_reconnect_remote_pid" =~ ^[0-9]+$ ]] ||
-        [[ ! "$chrome_reconnect_remote_pgid" =~ ^[0-9]+$ ]]; then
-        echo "Remote waypipe probe returned invalid process identity; refusing reconnect." >&2
+      IFS=$'\t' read -r _ chrome_reset_remote_pid chrome_reset_remote_pgid <<<"$result_line"
+      if [[ ! "$chrome_reset_remote_pid" =~ ^[0-9]+$ ]] ||
+        [[ ! "$chrome_reset_remote_pgid" =~ ^[0-9]+$ ]]; then
+        echo "Remote waypipe identity check returned an invalid process identity; refusing reset." >&2
         return 2
       fi
       return 0
       ;;
     ABSENT)
-      chrome_reconnect_remote_pid=""
-      chrome_reconnect_remote_pgid=""
+      chrome_reset_remote_pid=""
+      chrome_reset_remote_pgid=""
       return 1
       ;;
     UNRELATED$'\t'*)
-      echo "Remote Chrome process(es) remain while the exact waypipe server is absent; refusing to delegate reconnect." >&2
+      echo "Remote Chrome process(es) remain while the exact waypipe server is absent; refusing to delegate reset." >&2
       return 2
       ;;
     AMBIGUOUS$'\t'*)
-      echo "Multiple remote waypipe process groups match socket $socket_path; refusing ambiguous reconnect." >&2
+      echo "Multiple remote waypipe process groups match socket $socket_path; refusing ambiguous reset." >&2
       return 2
       ;;
     *)
       [ -n "$output" ] && printf '%s\n' "$output" >&2
-      echo "Remote waypipe probe returned an invalid result; refusing reconnect." >&2
+      echo "Remote waypipe identity check returned an invalid result; refusing reset." >&2
       return 2
       ;;
   esac
 }
 
-chrome_reconnect_remote_stop() {
+chrome_reset_remote_stop() {
   local host="$1"
   local socket_path="$2"
   local expected_pgid="$3"
-  local timeout="${REMOTE_CHROME_RECONNECT_TIMEOUT:-5}"
+  local timeout="${REMOTE_CHROME_RESET_TIMEOUT:-5}"
   local output=""
   [[ "$expected_pgid" =~ ^[0-9]+$ ]] || return 1
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5
@@ -948,7 +1025,7 @@ REMOTE_SCRIPT
   case "$(printf '%s\n' "$output" | sed -n '1p')" in
     STOPPED|ABSENT) return 0 ;;
     CHANGED)
-      echo "Remote waypipe process identity changed before termination; refusing reconnect." >&2
+      echo "Remote waypipe process identity changed before termination; refusing reset." >&2
       return 1
       ;;
     *)
@@ -959,15 +1036,15 @@ REMOTE_SCRIPT
   esac
 }
 
-chrome_reconnect() {
+chrome_reset() {
   local host=""
   local session=""
   local assume_yes=0
   local yk_state_present=0
   local yk_window_present=0
   local yk_needed=0
-  local remote_probe_code=0
-  local post_stop_probe_code=0
+  local remote_identity_code=0
+  local post_stop_identity_code=0
   local session_probe_code=0
   local session_probe_output=""
   local pane_host
@@ -992,7 +1069,7 @@ chrome_reconnect() {
         return 0
         ;;
       -*)
-        die "Unknown reconnect option: $1"
+        die "Unknown reset option: $1"
         ;;
       *)
         [ -z "$host" ] || die "Unexpected argument: $1"
@@ -1002,23 +1079,38 @@ chrome_reconnect() {
     esac
   done
 
-  [ -n "$host" ] || [ -n "$session" ] ||
-    die "Reconnect requires HOST or --session NAME; hostless reconnect is not supported."
+  need tmux
+  if [ -z "$host" ] && [ -z "$session" ]; then
+    local -a managed_sessions=()
+    mapfile -t managed_sessions < <(chrome_managed_sessions)
+    case "${#managed_sessions[@]}" in
+      0)
+        die "No managed remote-chrome tmux sessions found to reset."
+        ;;
+      1)
+        session="${managed_sessions[0]}"
+        ;;
+      *)
+        printf 'More than one managed remote-chrome tmux session exists; select one with %s reset HOST or --session NAME:\n' "$PROGRAM" >&2
+        printf '  %s\n' "${managed_sessions[@]}" >&2
+        return 1
+        ;;
+    esac
+  fi
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
 
-  need tmux
   need ssh
   need ps
   tmux has-session -t "$session" 2>/dev/null ||
     die "tmux session not found: $session"
-  chrome_reconnect_read_pane "$session" || return 1
-  chrome_reconnect_parse_pane_host "$chrome_reconnect_pane_command" || return 1
-  pane_host="$chrome_reconnect_host"
+  chrome_reset_read_pane "$session" || return 1
+  chrome_reset_parse_pane_host "$chrome_reset_pane_command" || return 1
+  pane_host="$chrome_reset_host"
   if [ -n "$host" ] && [ "$host" != "$pane_host" ]; then
-    die "The selected chrome pane targets $pane_host, not requested host $host; refusing reconnect."
+    die "The selected chrome pane targets $pane_host, not requested host $host; refusing reset."
   fi
   host="$pane_host"
-  chrome_reconnect_find_local_ssh "$chrome_reconnect_pane_pid" "$host" || return 1
+  chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" || return 1
 
   yk_prepare_for_launch "$host"
   [ -e "$yk_state_file" ] && yk_state_present=1
@@ -1027,33 +1119,33 @@ chrome_reconnect() {
     yk_window_present=1
   fi
 
-  chrome_reconnect_remote_probe "$host" "$chrome_reconnect_remote_socket" || remote_probe_code=$?
-  case "$remote_probe_code" in
+  chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" || remote_identity_code=$?
+  case "$remote_identity_code" in
     0)
-      echo "Remote waypipe server matched socket $chrome_reconnect_remote_socket (pid=$chrome_reconnect_remote_pid pgid=$chrome_reconnect_remote_pgid)." >&2
+      echo "Remote waypipe server matched socket $chrome_reset_remote_socket (pid=$chrome_reset_remote_pid pgid=$chrome_reset_remote_pgid)." >&2
       if [ "$assume_yes" != "1" ] &&
-        ! confirm "Reconnect will restart remote Chrome/Waypipe and may lose unsaved in-page state. Continue?"; then
-        echo "Reconnect canceled; the existing tmux session is unchanged." >&2
+        ! confirm "Reset will restart remote Chrome/Waypipe and may lose unsaved in-page state. Continue?"; then
+        echo "Reset canceled; the existing tmux session is unchanged." >&2
         return 1
       fi
-      chrome_reconnect_remote_stop "$host" "$chrome_reconnect_remote_socket" \
-        "$chrome_reconnect_remote_pgid" || return 1
+      chrome_reset_remote_stop "$host" "$chrome_reset_remote_socket" \
+        "$chrome_reset_remote_pgid" || return 1
       # A successful TERM only proves that the exact group accepted the
-      # request.  Re-probe before touching the local tmux session so a browser
+      # request.  Re-check identity before touching the local tmux session so a browser
       # that escaped the group, or an unrelated browser that was already
-      # present, cannot be hidden by a reconnect restart.
-      chrome_reconnect_remote_probe "$host" "$chrome_reconnect_remote_socket" ||
-        post_stop_probe_code=$?
-      if [ "$post_stop_probe_code" -ne 1 ]; then
+      # present, cannot be hidden by a reset restart.
+      chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" ||
+        post_stop_identity_code=$?
+      if [ "$post_stop_identity_code" -ne 1 ]; then
         echo "Remote Waypipe teardown did not leave a cleanly absent server; preserving the existing tmux session." >&2
         return 1
       fi
       ;;
     1)
-      echo "The exact remote waypipe server is already absent for socket $chrome_reconnect_remote_socket." >&2
+      echo "The exact remote waypipe server is already absent for socket $chrome_reset_remote_socket." >&2
       if [ "$assume_yes" != "1" ] &&
         ! confirm "No matching remote waypipe server or Chrome was found; recreate this frozen session?"; then
-        echo "Reconnect canceled; the existing tmux session is unchanged." >&2
+        echo "Reset canceled; the existing tmux session is unchanged." >&2
         return 1
       fi
       ;;
@@ -1070,7 +1162,7 @@ chrome_reconnect() {
   case "$session_probe_code" in
     0)
       if tmux kill-session -t "$session" 2>/dev/null; then
-        echo "Removed frozen tmux session $session after remote Waypipe teardown." >&2
+        echo "Removed managed tmux session $session after remote Waypipe teardown." >&2
       else
         echo "Remote Waypipe teardown succeeded, but could not remove tmux session $session." >&2
         return 1
@@ -1083,7 +1175,7 @@ chrome_reconnect() {
         echo "Remote Waypipe teardown succeeded, but could not confirm tmux session $session absence: $session_probe_output" >&2
         return 1
       fi
-      echo "Frozen tmux session $session already exited after remote Waypipe teardown; continuing with recreation." >&2
+      echo "Managed tmux session $session already exited after remote Waypipe teardown; continuing with recreation." >&2
       ;;
     *)
       echo "Remote Waypipe teardown succeeded, but could not verify tmux session $session absence." >&2
@@ -1093,7 +1185,7 @@ chrome_reconnect() {
 
   if [ "$yk_state_present" = "1" ] || [ "$yk_window_present" = "1" ]; then
     yk_stop || {
-      echo "YubiKey cleanup remains incomplete; retry $PROGRAM stop $host before reconnecting." >&2
+      echo "YubiKey cleanup remains incomplete; retry $PROGRAM stop $host before resetting." >&2
       return 1
     }
     yk_needed=1
@@ -1103,14 +1195,14 @@ chrome_reconnect() {
 
   if [ "$yk_needed" = "1" ]; then
     yk_preflight_for_forwarding 1
-    chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reconnect_pane_command"
+    chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reset_pane_command"
   else
-    if ! tmux new-session -d -s "$session" -n chrome "$chrome_reconnect_pane_command"; then
+    if ! tmux new-session -d -s "$session" -n chrome "$chrome_reset_pane_command"; then
       echo "Could not recreate chrome pane in tmux session $session." >&2
       return 1
     fi
   fi
-  echo "Reconnected $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
+  echo "Reset $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
   print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
   print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
   print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
@@ -1164,7 +1256,6 @@ chrome_status_all() {
 chrome_status() {
   local host=""
   local session=""
-  local live=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1175,10 +1266,6 @@ chrome_status() {
         ;;
       --session=*)
         session="${1#*=}"
-        shift
-        ;;
-      --live)
-        live=1
         shift
         ;;
       -h|--help)
@@ -1196,37 +1283,17 @@ chrome_status() {
     esac
   done
 
-  if [ "$live" = "1" ]; then
-    [ -n "$host" ] || die "status --live requires a host."
-    chrome_status_live "$host" "$session"
-    return
-  fi
-
   if [ -z "$host" ] && [ -z "$session" ]; then
     chrome_status_all
     return
   fi
 
-  [ -n "$session" ] || {
-    [ -n "$host" ] || die "Host or --session is required."
-    session="$(chrome_default_session "$host")"
-  }
-
-  need tmux
-  if tmux has-session -t "$session" 2>/dev/null; then
-    echo "running: $session"
-    tmux list-windows -t "$session" -F 'window: #{window_name} (#{window_index})' 2>/dev/null || true
-  else
-    echo "not running: $session"
-  fi
-
-  if [ -n "$host" ]; then
-    yk_prepare_for_launch "$host"
-    yk_print_status_line "yubikey:"
-  fi
+  [ -n "$host" ] || die "status with --session requires HOST."
+  [ -n "$session" ] || session="$(chrome_default_session "$host")"
+  chrome_status_current "$host" "$session"
 }
 
-chrome_status_live() {
+chrome_status_current() {
   local host="$1"
   local session="$2"
   local code=0
@@ -1237,36 +1304,36 @@ chrome_status_live() {
   need tmux
 
   if tmux has-session -t "$session" 2>/dev/null; then
-    echo "live: tmux session running: $session"
+    echo "status: tmux session running: $session"
     windows="$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null || true)"
     if [ -n "$windows" ]; then
-      printf '%s\n' "$windows" | sed 's/^/live: window: /'
+      printf '%s\n' "$windows" | sed 's/^/status: window: /'
     else
-      echo "live: degraded: tmux session has no readable windows." >&2
+      echo "status: degraded: tmux session has no readable windows." >&2
       code=1
     fi
     if ! printf '%s\n' "$windows" | grep -qx 'chrome'; then
-      echo "live: degraded: tmux session has no chrome window." >&2
+      echo "status: degraded: tmux session has no chrome window." >&2
       code=1
     fi
   else
-    echo "live: degraded: tmux session is not running: $session" >&2
+    echo "status: degraded: tmux session is not running: $session" >&2
     code=1
   fi
 
   yk_prepare_for_launch "$host"
   if yk_load_state; then
-    echo "live: yubikey phase=$yk_phase readiness=$yk_readiness"
+    echo "status: yubikey phase=$yk_phase readiness=$yk_readiness"
     if [ "$yk_phase" = "cleanup-failed" ]; then
-      echo "live: degraded: YubiKey cleanup previously failed; retry stop before trusting this state." >&2
+      echo "status: degraded: YubiKey cleanup previously failed; retry stop before trusting this state." >&2
       code=1
     fi
 
     if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" != "none" ]; then
       if yk_local_busid_bound "$yk_active_busid"; then
-        echo "live: local USB/IP bind present: $yk_active_busid"
+        echo "status: local USB/IP bind present: $yk_active_busid"
       else
-        echo "live: degraded: recorded local USB/IP bind is absent: $yk_active_busid" >&2
+        echo "status: degraded: recorded local USB/IP bind is absent: $yk_active_busid" >&2
         code=1
       fi
     fi
@@ -1274,9 +1341,9 @@ chrome_status_live() {
     if [ "$yk_started_usbipd" = "1" ]; then
       if yk_owned_usbipd_running "$yk_usbipd_pid" &&
         ss -ltn 2>/dev/null | grep -q ":${yk_usbip_port}\b"; then
-        echo "live: owned usbipd running and listening: pid=$yk_usbipd_pid port=$yk_usbip_port"
+        echo "status: owned usbipd running and listening: pid=$yk_usbipd_pid port=$yk_usbip_port"
       else
-        echo "live: degraded: owned usbipd is not alive, exact-owned, or listening on port $yk_usbip_port: pid=${yk_usbipd_pid:-unknown}" >&2
+        echo "status: degraded: owned usbipd is not alive, exact-owned, or listening on port $yk_usbip_port: pid=${yk_usbipd_pid:-unknown}" >&2
         code=1
       fi
     fi
@@ -1284,35 +1351,35 @@ chrome_status_live() {
     if [ "$yk_tunnel_open" = "1" ] || [ "$yk_attach_state" != "none" ]; then
       if [ -S "$yk_control_socket" ] &&
         ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
-        echo "live: SSH USB/IP control socket is alive: $yk_control_socket"
+        echo "status: SSH USB/IP control socket is alive: $yk_control_socket"
       else
-        echo "live: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
+        echo "status: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
         code=1
       fi
     fi
 
     if [ "$yk_attach_state" != "none" ] || [ "$yk_phase" = "ready" ]; then
       if (yk_remote_probe_readiness); then
-        echo "live: remote YubiKey readiness probe passed."
+        echo "status: remote YubiKey readiness probe passed."
       else
-        echo "live: degraded: remote YubiKey readiness probe failed (${yk_readiness:-not-ready})." >&2
+        echo "status: degraded: remote YubiKey readiness probe failed (${yk_readiness:-not-ready})." >&2
         code=1
       fi
     fi
   else
     state_code=$?
     if [ "$state_code" = "1" ]; then
-      echo "live: no managed YubiKey state for $host."
+      echo "status: no managed YubiKey state for $host."
     else
-      echo "live: degraded: managed YubiKey state is invalid for $host." >&2
+      echo "status: degraded: managed YubiKey state is invalid for $host." >&2
       code=1
     fi
   fi
 
   if [ "$code" = "0" ]; then
-    echo "live: healthy"
+    echo "status: healthy"
   else
-    echo "live: degraded; inspect the failing checks above and retry after repair." >&2
+    echo "status: degraded; inspect the failing checks above and retry after repair." >&2
   fi
   return "$code"
 }
@@ -3629,9 +3696,9 @@ main() {
       shift
       chrome_attach "$@"
       ;;
-    reconnect)
+    reset)
       shift
-      chrome_reconnect "$@"
+      chrome_reset "$@"
       ;;
     _yubikey-run)
       shift
@@ -3644,7 +3711,7 @@ main() {
       usage
       ;;
     *)
-      chrome_launch "$@"
+      chrome_ensure "$@"
       ;;
   esac
 }

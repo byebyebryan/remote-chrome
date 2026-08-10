@@ -133,7 +133,13 @@ Start Chrome on the remote host in a detached tmux session:
 remote-chrome remote-host
 ```
 
-The explicit `launch` subcommand is equivalent:
+The bare form is the everyday "make this connection usable" command. If its
+managed tmux session already exists, a repeated invocation resets that exact
+Chrome/Waypipe stream instead of trying to determine whether a suspended stream
+is still healthy.
+
+Use the explicit `launch` subcommand when you require a fresh session. It
+refuses to reuse an existing tmux session:
 
 ```bash
 remote-chrome launch remote-host
@@ -147,17 +153,17 @@ Check, attach to, or stop the session:
 
 ```bash
 remote-chrome status remote-host
-remote-chrome status --live remote-host
 remote-chrome doctor remote-host
 remote-chrome attach remote-host
-remote-chrome reconnect remote-host
+remote-chrome reset remote-host
 remote-chrome stop remote-host
 ```
 
-`status --live HOST` performs read-only health checks for the current tmux
+`status HOST` performs read-only checks for the current tmux
 windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, and remote
 YubiKey readiness. It returns nonzero and identifies the failing check when a
-resource is stale or unreachable. `doctor HOST` is a preflight-only diagnostic
+resource is stale or unreachable. `status` without a host is the managed-state
+overview. `doctor HOST` is a preflight-only diagnostic
 for local display/commands, detached SSH, remote Waypipe/Chrome, and USB/IP
 module prerequisites; it never loads modules or changes USB/IP state.
 
@@ -181,21 +187,22 @@ remote-chrome attach remote-host
 tmux capture-pane -pt remote-chrome-remote-host:chrome
 ```
 
-If a detached session is frozen after suspend or network loss, reconnect it
-explicitly:
+To force that reset explicitly after suspend or network loss:
 
 ```bash
-remote-chrome reconnect remote-host
+remote-chrome reset remote-host
 ```
 
-`reconnect` is a managed restart, not transparent Waypipe stream resumption. It
-verifies the exact Waypipe SSH reverse socket and remote process group from the
+`reset` is a managed restart, not transparent Waypipe stream resumption. It
+uses the exact Waypipe SSH reverse socket and remote process group from the
 selected `chrome` pane, warns that unsaved in-page state may be lost, then
 recreates the same pane command in the same tmux session. It refuses ambiguous
 or unreachable identities and never broad-kills remote Chrome; use `--yes` only
-to skip the restart or narrowly-confirmed-absence warning (identity checks and
-safety refusals still apply). A custom session can be selected with
-`--session NAME`; hostless reconnect is not supported.
+to skip the restart or narrowly-confirmed-absence warning (ownership checks and
+safety refusals still apply). `remote-chrome reset` without a host selects the
+sole default managed session, and asks for a host or `--session NAME` when
+several exist. The bare `remote-chrome HOST` form passes `--yes` automatically
+only after it has found that exact managed tmux session.
 
 When run from inside tmux, `attach` switches the current client instead of
 trying to create a nested tmux client. A successful detached launch prints the
