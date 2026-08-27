@@ -2682,21 +2682,22 @@ test_bare_host_launches_when_session_is_absent() (
 )
 
 test_reset_extracts_exact_socket_and_refuses_ambiguous_local_children() (
-  local test_dir ps_fixture code=0
+  local test_dir ps_fixture current_uid code=0
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   ps_fixture="$test_dir/ps"
+  current_uid="$(id -u)"
   printf '%s\n' \
-    $'4242 1 4242 1000 /bin/bash' \
-    $'5000 4242 5000 1000 ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo' \
-    $'5001 4242 5001 1000 ssh -R /tmp/waypipe-server-two.sock:/tmp/waypipe-client-two.sock test-host -- waypipe --socket /tmp/waypipe-server-two.sock server --foo' >"$ps_fixture"
+    "4242 1 4242 $current_uid /bin/bash" \
+    "5000 4242 5000 $current_uid ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo" \
+    "5001 4242 5001 $current_uid ssh -R /tmp/waypipe-server-two.sock:/tmp/waypipe-client-two.sock test-host -- waypipe --socket /tmp/waypipe-server-two.sock server --foo" >"$ps_fixture"
   ps() { command cat "$ps_fixture"; }
   chrome_reset_find_local_ssh 4242 test-host || code=$?
   [ "$code" -eq 1 ] || fail "ambiguous local waypipe children unexpectedly passed"
 
   printf '%s\n' \
-    $'4242 1 4242 1000 /bin/bash' \
-    $'5000 4242 5000 1000 ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo' >"$ps_fixture"
+    "4242 1 4242 $current_uid /bin/bash" \
+    "5000 4242 5000 $current_uid ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo" >"$ps_fixture"
   chrome_reset_find_local_ssh 4242 test-host
   [ "$chrome_reset_remote_socket" = "/tmp/waypipe-server-one.sock" ] ||
     fail "reset extracted the wrong exact reverse socket"
