@@ -851,6 +851,7 @@ test_doctor_checks_secure_dependencies_without_wallet_lookup() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   WAYLAND_DISPLAY=wayland-0
+  doctor_local_command() { return 0; }
   yk_local_candidate_exists() { return 1; }
   ssh() {
     remote_command="$*"
@@ -1754,6 +1755,7 @@ test_doctor_is_read_only_and_reports_degraded_checks() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   WAYLAND_DISPLAY=wayland-0
+  doctor_local_command() { return 0; }
   yk_remote_module_check() { events+="remote-module "; return 1; }
   yk_local_module_preflight() { events+="local-module "; return 0; }
   yk_local_candidate_exists() { events+="candidate "; return 1; }
@@ -1856,6 +1858,7 @@ test_doctor_auto_without_key_skips_yubikey_prerequisites() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   WAYLAND_DISPLAY=wayland-0
+  doctor_local_command() { return 0; }
   yk_local_candidate_exists() { return 1; }
   yk_remote_module_check() { events+="remote-module "; return 1; }
   ssh() { return 0; }
@@ -1876,6 +1879,7 @@ test_doctor_no_yubikey_ignores_invalid_settings() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   WAYLAND_DISPLAY=wayland-0
+  doctor_local_command() { return 0; }
   yk_usb_id="not-a-usb-id"
   yk_prepare_for_launch() { events+="prepare "; return 1; }
   ssh() { return 0; }
@@ -2048,6 +2052,7 @@ test_doctor_invalid_chrome_command_is_aggregated() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   WAYLAND_DISPLAY=wayland-0
+  doctor_local_command() { return 0; }
   ssh() { events+="ssh "; return 0; }
 
   if chrome_doctor test-host --chrome-command "google chrome" >"$test_dir/output" 2>&1; then
