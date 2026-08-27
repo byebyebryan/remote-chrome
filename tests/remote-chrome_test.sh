@@ -766,8 +766,9 @@ test_secure_bootstrap_cleanup_failure_preserves_replaced_proxy_socket() (
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/secret-tool"
   printf '%s\n' '#!/usr/bin/env bash' \
     'proxy_socket="${DBUS_SESSION_BUS_ADDRESS#unix:path=}"' \
-    'rm -f -- "$proxy_socket"' \
-    'printf replacement >"$proxy_socket"' >"$fake_bin/fake-chrome"
+    'replacement_socket="${proxy_socket}.replacement"' \
+    'printf replacement >"$replacement_socket"' \
+    'mv -f -- "$replacement_socket" "$proxy_socket"' >"$fake_bin/fake-chrome"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$fake_bin/ksecretd"
   chmod +x "$fake_bin"/*
 
