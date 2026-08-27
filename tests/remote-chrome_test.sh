@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2030,SC2031,SC2032,SC2034,SC2154,SC2329
+# shellcheck disable=SC1091,SC2016,SC2030,SC2031,SC2032,SC2034,SC2154,SC2329
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -462,6 +462,413 @@ test_chrome_command_rejects_shell_syntax() (
   if (chrome_process_pattern "chromium --incognito" >/dev/null 2>&1); then
     fail "Chrome command with shell syntax unexpectedly passed validation"
   fi
+)
+
+test_secret_identity_maps_chrome_chromium_and_custom() (
+  unset REMOTE_CHROME_SECRET_APPLICATION REMOTE_CHROME_SECRET_SCHEMA
+
+  chrome_secret_identity /usr/bin/google-chrome-stable
+  [ "$chrome_secret_application" = "chrome" ] || fail "Google Chrome application mapping changed"
+  [ "$chrome_secret_schema" = "chrome_libsecret_os_crypt_password_v2" ] ||
+    fail "Google Chrome Safe Storage schema mapping changed"
+
+  chrome_secret_identity /usr/bin/chromium
+  [ "$chrome_secret_application" = "chromium" ] || fail "Chromium application mapping missing"
+  [ "$chrome_secret_schema" = "chromium_libsecret_os_crypt_password_v2" ] ||
+    fail "Chromium Safe Storage schema mapping missing"
+
+  if chrome_secret_identity /opt/custom-browser >/dev/null 2>&1; then
+    fail "unknown custom Chrome executable unexpectedly received an implicit mapping"
+  fi
+  REMOTE_CHROME_SECRET_APPLICATION=custom-app
+  REMOTE_CHROME_SECRET_SCHEMA=custom_schema
+  chrome_secret_identity /opt/custom-browser
+  [ "$chrome_secret_application" = "custom-app" ] || fail "custom Safe Storage application override ignored"
+  [ "$chrome_secret_schema" = "custom_schema" ] || fail "custom Safe Storage schema override ignored"
+)
+
+test_password_store_override_is_rejected() (
+  local output code=0
+  if output="$(chrome_validate_password_store_args --profile-directory=Default --password-store=basic 2>&1)"; then
+    fail "conflicting --password-store argument unexpectedly passed"
+  else
+    code=$?
+  fi
+  [ "$code" -eq 1 ] || fail "password-store conflict returned unexpected status: $code"
+  assert_contains "$output" "forces --password-store=gnome-libsecret"
+
+  if (chrome_validate_password_store_args --password-store=gnome-libsecret) >/dev/null 2>&1; then
+    fail "user-supplied gnome-libsecret override was accepted instead of being forced"
+  fi
+)
+
+test_secure_bootstrap_encodes_minimal_proxy_policy() (
+  local script command_line
+  script="$(chrome_secure_bootstrap_script)"
+  assert_contains "$script" "--filter --talk=org.freedesktop.secrets"
+  assert_contains "$script" "org.freedesktop.portal.Desktop"
+  [[ "$script" != *"--talk=org.freedesktop.portal.Desktop"* ]] ||
+    fail "portal service was explicitly allowed through the Secret Service proxy"
+  assert_contains "$script" "secret-tool lookup application"
+  assert_contains "$script" "--password-store=gnome-libsecret"
+
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 --new-window)"
+  [[ "$command_line" == waypipe\ --no-gpu\ ssh\ test-host\ * ]] ||
+    fail "secure detached command did not preserve the direct Waypipe SSH prefix"
+  assert_contains "$command_line" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2"
+  assert_contains "$command_line" "<<< $'"
+  [[ "$command_line" != *$'\n'* ]] || fail "secure detached command contains a literal newline"
+)
+
+test_secure_command_shape_recreates_through_reset_parser() (
+  local test_dir command_line events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+    chrome chrome_libsecret_os_crypt_password_v2 --new-window)"
+  [ "${command_line#waypipe --no-gpu ssh test-host}" != "$command_line" ] ||
+    fail "generated secure pane command lost its direct Waypipe SSH prefix"
+  [[ "$command_line" != *$'\n'* ]] || fail "generated secure pane command contains a literal newline"
+
+  need() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\t%s\t%s\n' '%0' 4242 "$command_line" ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) events+="kill-session " ;;
+      new-session) events+="new-session:$* " ;;
+      *) return 0 ;;
+    esac
+  }
+  chrome_reset_find_local_ssh() {
+    chrome_reset_remote_socket="$test_dir/waypipe.sock"
+    return 0
+  }
+  chrome_reset_remote_identity() { return 1; }
+  confirm() { return 0; }
+
+  chrome_reset test-host --yes >/dev/null 2>&1
+  assert_contains "$events" "new-session:"
+  assert_contains "$events" "$command_line"
+  chrome_reset_parse_pane_host "$command_line"
+  [ "$chrome_reset_host" = "test-host" ] || fail "reset parser extracted the wrong host"
+)
+
+test_secure_command_line_replays_with_exact_arguments() (
+  local test_dir fake_bin command_line output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >"$SECURE_WAYPIPE_ARGS"' \
+    'cat >"$SECURE_WAYPIPE_STDIN"' >"$fake_bin/waypipe"
+  chmod +x "$fake_bin/waypipe"
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+    chrome chrome_libsecret_os_crypt_password_v2 \
+    '--profile-directory=Profile One' '--test=a;b')"
+  output="$(PATH="$fake_bin:$PATH" SECURE_WAYPIPE_ARGS="$test_dir/args" \
+    SECURE_WAYPIPE_STDIN="$test_dir/stdin" bash -c "$command_line" 2>&1)" ||
+    fail "replayed secure pane command failed: $output"
+  assert_contains "$(cat "$test_dir/args")" "test-host"
+  assert_contains "$(cat "$test_dir/args")" "--profile-directory=Profile One"
+  assert_contains "$(cat "$test_dir/args")" "--test=a;b"
+  assert_contains "$(cat "$test_dir/stdin")" "remote_secure_pid_stat"
+)
+
+test_tmux_command_option_records_exact_raw_command() (
+  local command_line="waypipe --no-gpu ssh test-host bash -s -- arg <<< x"
+  local recorded_command=""
+  tmux() {
+    case "$1" in
+      set-option)
+        [ "$2" = "-t" ] || return 1
+        [ "$4" = "$chrome_tmux_command_option" ] || return 1
+        recorded_command="$5"
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  }
+
+  chrome_tmux_record_command remote-chrome-test-host "$command_line"
+  [ "$recorded_command" = "$command_line" ] ||
+    fail "tmux canonical option changed the raw command"
+)
+
+test_reset_reads_canonical_option_before_teardown() (
+  local test_dir command_line="waypipe --no-gpu ssh test-host bash -s -- arg <<< x"
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  tmux() {
+    case "$1" in
+      list-panes)
+        printf '%s\t%s\t%s\n' '%0' 4242 'bash -c wrapped-command'
+        ;;
+      show-options)
+        [ "$3" = "-t" ] || return 1
+        [ "$5" = "$chrome_tmux_command_option" ] || return 1
+        printf '%s\n' "$command_line"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+
+  chrome_reset_read_pane remote-chrome-test-host
+  [ "$chrome_reset_pane_pid" = "4242" ] || fail "canonical-option read lost pane PID"
+  [ "$chrome_reset_pane_command" = "$command_line" ] ||
+    fail "reset did not use the canonical tmux command option"
+)
+
+test_tmux_command_option_failure_cleans_new_session() (
+  local events="" command_line="waypipe --no-gpu ssh test-host bash -s -- arg <<< x" code=0
+  tmux() {
+    case "$1" in
+      new-session) events+="new-session " ;;
+      set-option) events+="set-option " ; return 1 ;;
+      kill-session) events+="kill-session " ;;
+      *) return 1 ;;
+    esac
+  }
+
+  if chrome_tmux_create_chrome_session remote-chrome-test-host "$command_line"; then
+    fail "canonical option failure unexpectedly created a reset-safe session"
+  else
+    code=$?
+  fi
+  [ "$code" -eq 1 ] || fail "canonical option failure returned unexpected status: $code"
+  assert_contains "$events" "new-session"
+  assert_contains "$events" "set-option"
+  assert_contains "$events" "kill-session"
+)
+
+test_reset_recreation_restores_canonical_option_for_repeated_reset() (
+  local test_dir command_line events="" option_value set_count=0 session_alive=1
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+    chrome chrome_libsecret_os_crypt_password_v2 --new-window)"
+  option_value="$command_line"
+  need() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  tmux() {
+    case "$1" in
+      has-session) [ "$session_alive" -eq 1 ] ;;
+      list-panes) printf '%s\t%s\t%s\n' '%0' 4242 'bash -c wrapped-command' ;;
+      show-options) printf '%s\n' "$option_value" ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) session_alive=0 ;;
+      new-session) session_alive=1 ; events+="new-session:$* " ;;
+      set-option)
+        option_value="$5"
+        set_count=$((set_count + 1))
+        events+="set-option "
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  chrome_reset_find_local_ssh() {
+    chrome_reset_remote_socket="$test_dir/waypipe.sock"
+    return 0
+  }
+  chrome_reset_remote_identity() { return 1; }
+
+  chrome_reset test-host --yes >/dev/null 2>&1
+  chrome_reset test-host --yes >/dev/null 2>&1
+  [ "$set_count" -eq 2 ] || fail "repeated reset did not restore the canonical tmux option twice"
+  [ "$option_value" = "$command_line" ] || fail "repeated reset changed the canonical command option"
+  assert_contains "$events" "new-session:"
+)
+
+test_secure_bootstrap_has_signal_and_partial_failure_cleanup() (
+  local script
+  script="$(chrome_secure_bootstrap_script)"
+  assert_contains "$script" "trap 'remote_secure_on_exit' EXIT"
+  assert_contains "$script" "trap 'remote_secure_signal 130' INT"
+  assert_contains "$script" "trap 'remote_secure_signal 143' TERM"
+  assert_contains "$script" "trap 'remote_secure_signal 129' HUP"
+  assert_contains "$script" "xdg-dbus-proxy exited before creating its socket"
+  assert_contains "$script" "remote_secure_pid_starttime"
+  assert_contains "$script" "proxy_starttime"
+  assert_contains "$script" "secret_starttime"
+  assert_contains "$script" "chrome_starttime"
+  assert_contains "$script" "remote_secure_on_exit"
+  assert_contains "$script" "cleanup_status"
+  assert_contains "$script" "proxy socket identity changed; preserving"
+  assert_contains "$script" 'remote_secure_stop_pid "$proxy_pid" "$proxy_starttime" xdg-dbus-proxy'
+)
+
+test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
+  local test_dir fake_bin script output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+
+  # The fake proxy uses a symlink to an existing Unix socket and then waits,
+  # which exercises exact socket cleanup without requiring a real D-Bus proxy.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'normal_bus="$1"; proxy_socket="$2"; shift 2' \
+    'printf "%s\n" "$*" >"$SECURE_EVENTS"' \
+    'ln -s /run/dbus/system_bus_socket "$proxy_socket"' \
+    'exec -a xdg-dbus-proxy /usr/bin/bash -c "while :; do sleep 1; done"' >"$fake_bin/xdg-dbus-proxy"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS $*" >"$SECURE_SECRET_EVENTS"' \
+    'exit "${SECRET_TOOL_STATUS:-0}"' >"$fake_bin/secret-tool"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS $*" >"$SECURE_CHROME_EVENTS"' \
+    'exit "${CHROME_STATUS:-0}"' >"$fake_bin/fake-chrome"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'exit 0' >"$fake_bin/busctl"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" started >>"$SECURE_EVENTS"' \
+    'while :; do sleep 1; done' >"$fake_bin/ksecretd"
+  chmod +x "$fake_bin"/*
+
+  script="$(chrome_secure_bootstrap_script)"
+  output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
+    XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+    SECURE_EVENTS="$test_dir/events" SECURE_SECRET_EVENTS="$test_dir/secret" \
+    SECURE_CHROME_EVENTS="$test_dir/chrome" CHROME_STATUS=7 \
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 --new-window 2>&1)" || code=$?
+  [ "$code" -eq 7 ] || fail "secure bootstrap did not preserve Chrome exit status: $code ($output)"
+  assert_contains "$(cat "$test_dir/secret")" "unix:path=$test_dir/remote-chrome-dbus-proxy-"
+  assert_contains "$(cat "$test_dir/chrome")" "--password-store=gnome-libsecret --new-window"
+  assert_contains "$(cat "$test_dir/events")" "--filter --talk=org.freedesktop.secrets"
+  [[ "$(cat "$test_dir/events")" != *started* ]] || fail "pre-existing Secret Service owner was replaced"
+  [ -z "$(find "$test_dir" -name 'remote-chrome-dbus-proxy-*.sock' -print -quit)" ] ||
+    fail "proxy socket survived existing-owner cleanup"
+)
+
+test_secure_bootstrap_cleanup_failure_preserves_replaced_proxy_socket() (
+  local test_dir fake_bin script output code=0 replacement_socket
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'proxy_socket="$2"; shift 2' \
+    'ln -s /run/dbus/system_bus_socket "$proxy_socket"' \
+    'exec -a xdg-dbus-proxy /usr/bin/bash -c "while :; do sleep 1; done"' >"$fake_bin/xdg-dbus-proxy"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/busctl"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/secret-tool"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'proxy_socket="${DBUS_SESSION_BUS_ADDRESS#unix:path=}"' \
+    'rm -f -- "$proxy_socket"' \
+    'printf replacement >"$proxy_socket"' >"$fake_bin/fake-chrome"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$fake_bin/ksecretd"
+  chmod +x "$fake_bin"/*
+
+  script="$(chrome_secure_bootstrap_script)"
+  output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
+    XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "replaced proxy socket cleanup unexpectedly succeeded: $code ($output)"
+  assert_contains "$output" "proxy socket identity changed; preserving"
+  replacement_socket="$(find "$test_dir" -name 'remote-chrome-dbus-proxy-*.sock' -print -quit)"
+  [ -n "$replacement_socket" ] || fail "cleanup removed the replacement proxy socket"
+  [ "$(cat "$replacement_socket")" = "replacement" ] ||
+    fail "replacement proxy socket contents changed"
+)
+
+test_secure_bootstrap_starts_and_cleans_owned_secret_service() (
+  local test_dir fake_bin script output code=0 secret_pid
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'proxy_socket="$2"; shift 2' \
+    'ln -s /run/dbus/system_bus_socket "$proxy_socket"' \
+    'exec -a xdg-dbus-proxy /usr/bin/bash -c "while :; do sleep 1; done"' >"$fake_bin/xdg-dbus-proxy"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    '[ -f "$SECURE_OWNER_FILE" ]' >"$fake_bin/busctl"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf started >"$SECURE_OWNER_FILE"' \
+    'printf "%s\n" "$$" >"$SECURE_SECRET_PID"' \
+    'exec -a ksecretd /usr/bin/bash -c "while :; do sleep 1; done"' >"$fake_bin/ksecretd"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/secret-tool"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/fake-chrome"
+  chmod +x "$fake_bin"/*
+
+  script="$(chrome_secure_bootstrap_script)"
+  output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
+    XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+    SECURE_OWNER_FILE="$test_dir/owner" SECURE_SECRET_PID="$test_dir/secret-pid" \
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 2>&1)" || code=$?
+  [ "$code" -eq 0 ] || fail "owned ksecretd bootstrap failed: $code ($output)"
+  [ -f "$test_dir/secret-pid" ] || fail "owned ksecretd PID was not recorded"
+  secret_pid="$(cat "$test_dir/secret-pid")"
+  if kill -0 "$secret_pid" 2>/dev/null; then
+    fail "owned ksecretd survived secure bootstrap cleanup"
+  fi
+)
+
+test_secure_bootstrap_lookup_failure_prevents_chrome() (
+  local test_dir fake_bin script output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'proxy_socket="$2"; shift 2' \
+    'ln -s /run/dbus/system_bus_socket "$proxy_socket"' \
+    'exec -a xdg-dbus-proxy /usr/bin/bash -c "while :; do sleep 1; done"' >"$fake_bin/xdg-dbus-proxy"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/busctl"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$fake_bin/secret-tool"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf started >"$SECURE_CHROME_EVENTS"' >"$fake_bin/fake-chrome"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$fake_bin/ksecretd"
+  chmod +x "$fake_bin"/*
+
+  script="$(chrome_secure_bootstrap_script)"
+  output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
+    XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+    SECURE_CHROME_EVENTS="$test_dir/chrome" \
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "Safe Storage lookup failure returned unexpected status: $code"
+  assert_contains "$output" "Safe Storage lookup failed or was canceled"
+  [ ! -e "$test_dir/chrome" ] || fail "Chrome launched after Safe Storage lookup failure"
+  [ -z "$(find "$test_dir" -name 'remote-chrome-dbus-proxy-*.sock' -print -quit)" ] ||
+    fail "proxy socket survived lookup failure cleanup"
+)
+
+test_doctor_checks_secure_dependencies_without_wallet_lookup() (
+  local test_dir output code=0 remote_command=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  WAYLAND_DISPLAY=wayland-0
+  yk_local_candidate_exists() { return 1; }
+  ssh() {
+    remote_command="$*"
+    return 0
+  }
+
+  if chrome_doctor test-host --no-yubikey >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  output="$(cat "$test_dir/output")"
+  [ "$code" -eq 0 ] || fail "read-only secure doctor degraded: $output"
+  assert_contains "$remote_command" "command -v xdg-dbus-proxy"
+  assert_contains "$remote_command" "command -v secret-tool"
+  assert_contains "$remote_command" "command -v ksecretd"
+  assert_contains "$remote_command" "command -v busctl"
+  [[ "$remote_command" != *"secret-tool lookup"* ]] || fail "doctor performed a Safe Storage lookup"
+  [[ "$remote_command" != *"org.freedesktop.secrets"* ]] || fail "doctor queried the wallet service"
 )
 
 test_existing_process_check_uses_custom_command() (
@@ -1134,6 +1541,7 @@ test_foreground_duplicate_checks_yubikey_state_before_existing_chrome() (
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
+  assert_contains "$output" "1.3.0"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
@@ -2544,6 +2952,21 @@ tests=(
   test_remote_detach_failure_is_reported
   test_custom_chrome_command_is_in_process_pattern
   test_chrome_command_rejects_shell_syntax
+  test_secret_identity_maps_chrome_chromium_and_custom
+  test_password_store_override_is_rejected
+  test_secure_bootstrap_encodes_minimal_proxy_policy
+  test_secure_command_shape_recreates_through_reset_parser
+  test_secure_command_line_replays_with_exact_arguments
+  test_tmux_command_option_records_exact_raw_command
+  test_reset_reads_canonical_option_before_teardown
+  test_tmux_command_option_failure_cleans_new_session
+  test_reset_recreation_restores_canonical_option_for_repeated_reset
+  test_secure_bootstrap_has_signal_and_partial_failure_cleanup
+  test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status
+  test_secure_bootstrap_cleanup_failure_preserves_replaced_proxy_socket
+  test_secure_bootstrap_starts_and_cleans_owned_secret_service
+  test_secure_bootstrap_lookup_failure_prevents_chrome
+  test_doctor_checks_secure_dependencies_without_wallet_lookup
   test_existing_process_check_uses_custom_command
   test_existing_process_prompts_and_kills_by_default
   test_existing_process_declined_cancel_launch

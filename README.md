@@ -32,7 +32,12 @@ Local host requirements:
 
 Remote host requirements:
 
+- `bash`
 - `waypipe`
+- `xdg-dbus-proxy`
+- `secret-tool` (from `libsecret`)
+- `ksecretd` (from the remote desktop's Secret Service/KWallet package)
+- `busctl` (from `systemd`)
 - `google-chrome-stable`
 
 The launcher starts Chrome with:
@@ -44,6 +49,66 @@ The launcher starts Chrome with:
 Waypipe is intentionally kept as a prerequisite rather than installed by this
 script. Package names and setup differ enough across distros that automatic
 installation would add churn and surprising behavior.
+
+### Secure Chrome Session
+
+Every launch runs an embedded bootstrap inside the remote Waypipe environment.
+It connects `xdg-dbus-proxy` to the normal remote user session bus (normally
+`DBUS_SESSION_BUS_ADDRESS=/run/user/1000/bus`, normalized to the D-Bus
+`unix:path=` form) with a minimal filtered
+policy that permits only `org.freedesktop.secrets`. The portal service
+`org.freedesktop.portal.Desktop` is intentionally hidden, so Chromium's GTK
+file chooser remains a Waypipe-rendered chooser instead of using the remote
+desktop portal.
+
+Before Chrome starts, the bootstrap looks up Chrome Safe Storage through that
+proxy with `secret-tool lookup application chrome xdg:schema
+chrome_libsecret_os_crypt_password_v2`; the secret output is discarded. A
+missing service/key, a canceled KWallet prompt, a missing proxy, or any failed
+lookup aborts the launch. There is no basic/password-file fallback, and the
+bootstrap always passes `--password-store=gnome-libsecret`. User-supplied
+`--password-store` arguments are rejected. A nonzero Chrome status is
+preserved; a successful Chrome exit becomes nonzero if exact owned cleanup
+remains unresolved.
+
+An existing `org.freedesktop.secrets` owner is reused and is never stopped. If
+there is no owner, the bootstrap starts `ksecretd` inside the Waypipe remote
+environment and cleans only that exact process, together with its exact proxy
+socket, on success, failure, `INT`, `TERM`, or `HUP`. The `doctor` command only
+checks command availability and SSH reachability; it never performs a wallet
+lookup or unlocks a wallet.
+
+After a cold boot, the first launch may show a KWallet/Secret Service unlock
+prompt. Unlock it and retry if the prompt is canceled; secure failure is
+deliberate so Chrome cannot silently fall back to weaker storage. An unattended
+reboot also needs a pre-login network connection so SSH can reach the host;
+the current working assumption is that wired networking provides this path, but
+unattended reboot reachability has not been reboot-tested and remains a risk.
+Wi-Fi/NetworkManager remediation is outside this launcher and deferred.
+
+Google Chrome and Chromium use separate built-in Safe Storage identities:
+
+```text
+google-chrome-stable, google-chrome, chrome -> application=chrome
+  xdg:schema=chrome_libsecret_os_crypt_password_v2
+chromium, chromium-browser -> application=chromium
+  xdg:schema=chromium_libsecret_os_crypt_password_v2
+```
+
+The Chromium values are the conventional libsecret mapping and can be
+overridden with the two environment variables below if an existing profile
+uses different metadata.
+
+For an unknown custom executable, set both values explicitly before launching:
+
+```bash
+export REMOTE_CHROME_SECRET_APPLICATION=my-browser
+export REMOTE_CHROME_SECRET_SCHEMA=my_browser_libsecret_os_crypt_password_v2
+remote-chrome launch remote-host --chrome-command /opt/my-browser
+```
+
+The launcher fails with actionable guidance when an unknown executable has no
+explicit mapping.
 
 ### YubiKey Forwarding
 
@@ -73,11 +138,12 @@ remote commands run over noninteractive SSH and cannot complete a sudo prompt.
 On an Arch-family remote host, install the remote-side packages:
 
 ```bash
-ssh remote-host 'sudo pacman -S --needed waypipe usbip coreutils libfido2'
+ssh remote-host 'sudo pacman -S --needed waypipe xdg-dbus-proxy libsecret systemd usbip coreutils libfido2'
 ```
 
 Install Google Chrome on the remote host through the appropriate channel for
-that machine.
+that machine. Package names for `ksecretd` vary by desktop/KWallet version;
+`remote-chrome doctor HOST` checks the actual executable names before launch.
 
 ## Local Setup
 
@@ -164,14 +230,20 @@ windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, and remote
 YubiKey readiness. It returns nonzero and identifies the failing check when a
 resource is stale or unreachable. `status` without a host is the managed-state
 overview. `doctor HOST` is a preflight-only diagnostic
-for local display/commands, detached SSH, remote Waypipe/Chrome, and USB/IP
-module prerequisites; it never loads modules or changes USB/IP state.
+for local display/commands, detached SSH, remote Waypipe/Chrome plus the
+secure-session dependencies, and USB/IP module prerequisites; it never loads
+modules, performs a Secret Service lookup, unlocks a wallet, or changes USB/IP
+state.
 
 Pass extra Chrome arguments after `--`:
 
 ```bash
 remote-chrome launch remote-host -- --profile-directory=Default
 ```
+
+Do not pass `--password-store`; the launcher rejects that option and supplies
+`--password-store=gnome-libsecret` only after the proxied Safe Storage check
+passes.
 
 Run in the foreground instead of tmux:
 
@@ -196,7 +268,9 @@ remote-chrome reset remote-host
 `reset` is a managed restart, not transparent Waypipe stream resumption. It
 uses the exact Waypipe SSH reverse socket and remote process group from the
 selected `chrome` pane, warns that unsaved in-page state may be lost, then
-recreates the same pane command in the same tmux session. It refuses ambiguous
+recreates the recorded canonical Waypipe command in the same tmux session. A
+legacy pre-1.3 session may fall back to its direct pane command; wrapped pane
+metadata is never decoded. It refuses ambiguous
 or unreachable identities and never broad-kills remote Chrome; use `--yes` only
 to skip the restart or narrowly-confirmed-absence warning (ownership checks and
 safety refusals still apply). `remote-chrome reset` without a host selects the
@@ -370,6 +444,12 @@ The local `usbipd` daemon may still listen on the local host's network
 interfaces while forwarding is active, depending on your distro's `usbipd`
 behavior. `remote-chrome stop HOST` tears the forwarding down together with the
 Chrome session.
+
+The secure-session proxy is deliberately scoped to the remote user's existing
+session bus and Secret Service. It does not grant Chrome access to desktop
+portals, does not print or persist the Safe Storage value, and does not stop a
+pre-existing Secret Service owner. If Chrome exits or the Waypipe process group
+is reset, only proxy/ksecretd resources owned by that bootstrap are cleaned.
 
 ## Development
 

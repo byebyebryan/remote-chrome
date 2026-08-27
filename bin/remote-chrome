@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 usage() {
   cat <<USAGE
@@ -45,6 +45,8 @@ Environment:
   REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT
   REMOTE_CHROME_YUBIKEY_READY_GRACE
   REMOTE_CHROME_RESET_TIMEOUT
+  REMOTE_CHROME_SECRET_APPLICATION
+  REMOTE_CHROME_SECRET_SCHEMA
 USAGE
 }
 
@@ -90,6 +92,516 @@ chrome_default_session() {
   printf '%s-%s\n' "${REMOTE_CHROME_SESSION_PREFIX:-remote-chrome}" "$(safe_name "$1")"
 }
 
+chrome_secret_application=""
+chrome_secret_schema=""
+
+chrome_secret_identity() {
+  local chrome_command="$1"
+  local command_name="${chrome_command##*/}"
+  local configured_application="${REMOTE_CHROME_SECRET_APPLICATION:-}"
+  local configured_schema="${REMOTE_CHROME_SECRET_SCHEMA:-}"
+
+  case "$command_name" in
+    google-chrome|google-chrome-stable|chrome)
+      chrome_secret_application="chrome"
+      chrome_secret_schema="chrome_libsecret_os_crypt_password_v2"
+      ;;
+    chromium|chromium-browser)
+      chrome_secret_application="chromium"
+      chrome_secret_schema="chromium_libsecret_os_crypt_password_v2"
+      ;;
+    *)
+      if [ -n "$configured_application" ] && [ -n "$configured_schema" ]; then
+        chrome_secret_application="$configured_application"
+        chrome_secret_schema="$configured_schema"
+      else
+        echo "No Safe Storage mapping is known for custom Chrome executable '$chrome_command'." >&2
+        echo "Set both REMOTE_CHROME_SECRET_APPLICATION and REMOTE_CHROME_SECRET_SCHEMA, then retry." >&2
+        return 1
+      fi
+      ;;
+  esac
+
+  if [ -n "$configured_application" ] || [ -n "$configured_schema" ]; then
+    if [ -z "$configured_application" ] || [ -z "$configured_schema" ]; then
+      echo "REMOTE_CHROME_SECRET_APPLICATION and REMOTE_CHROME_SECRET_SCHEMA must be set together." >&2
+      return 1
+    fi
+    chrome_secret_application="$configured_application"
+    chrome_secret_schema="$configured_schema"
+  fi
+}
+
+chrome_validate_password_store_args() {
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      --password-store|--password-store=*)
+        die "Do not provide --password-store; remote-chrome forces --password-store=gnome-libsecret after a Safe Storage preflight."
+        ;;
+    esac
+  done
+}
+
+# This script is sent over the existing Waypipe SSH connection. It creates a
+# narrowly filtered bus proxy, verifies the exact Safe Storage item through
+# that proxy, and only then starts Chrome. Keep this literal heredoc free of
+# local expansion: values arrive as positional arguments in the command line.
+chrome_secure_bootstrap_script() {
+  cat <<'REMOTE_CHROME_SECURE_BOOTSTRAP'
+set -u
+
+chrome_command="${1:-}"
+secret_application="${2:-}"
+secret_schema="${3:-}"
+shift 3 2>/dev/null || exit 64
+
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+normal_bus="${DBUS_SESSION_BUS_ADDRESS:-}"
+case "$normal_bus" in
+  /*) normal_bus="unix:path=$normal_bus" ;;
+esac
+export DBUS_SESSION_BUS_ADDRESS="$normal_bus"
+proxy_socket="$runtime_dir/remote-chrome-dbus-proxy-${BASHPID:-$$}.sock"
+umask 077
+proxy_pid=""
+proxy_starttime=""
+proxy_socket_owned=0
+proxy_socket_inode=""
+secret_pid=""
+secret_starttime=""
+secret_owned=0
+chrome_pid=""
+chrome_starttime=""
+cleanup_done=0
+cleanup_status=0
+
+remote_secure_pid_stat() {
+  local pid="$1"
+  local stat_line rest state parent_pid starttime index
+  local -a stat_fields=()
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  IFS= read -r stat_line <"/proc/$pid/stat" 2>/dev/null || return 1
+  case "$stat_line" in
+    "$pid ("*) stat_line="${stat_line#"$pid ("}" ;;
+    *) return 1 ;;
+  esac
+
+  # comm may contain spaces and right parentheses.  Scan candidates from the
+  # end and accept only the one whose state/ppid/starttime fields are valid.
+  for ((index = ${#stat_line} - 1; index >= 0; index--)); do
+    [ "${stat_line:index:1}" = ")" ] || continue
+    rest="${stat_line:index+1}"
+    stat_fields=()
+    read -r -a stat_fields <<<"$rest"
+    [ "${#stat_fields[@]}" -ge 20 ] || continue
+    state="${stat_fields[0]}"
+    case "$state" in
+      R|S|D|Z|T|t|W|X|K|P) ;;
+      *) continue ;;
+    esac
+    parent_pid="${stat_fields[1]}"
+    starttime="${stat_fields[19]}"
+    [[ "$parent_pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$starttime" =~ ^[0-9]+$ ]] || continue
+    printf '%s\t%s\n' "$starttime" "$parent_pid"
+    return 0
+  done
+  return 1
+}
+
+remote_secure_pid_starttime() {
+  local pid="$1"
+  local identity starttime parent_pid
+  identity="$(remote_secure_pid_stat "$pid" 2>/dev/null)" || return 1
+  IFS=$'\t' read -r starttime parent_pid <<<"$identity"
+  [ -n "$starttime" ] || return 1
+  printf '%s\n' "$starttime"
+}
+
+remote_secure_pid_parent() {
+  local pid="$1"
+  local identity starttime parent_pid
+  identity="$(remote_secure_pid_stat "$pid" 2>/dev/null)" || return 1
+  IFS=$'\t' read -r starttime parent_pid <<<"$identity"
+  [ -n "$parent_pid" ] || return 1
+  printf '%s\n' "$parent_pid"
+}
+
+remote_secure_pid_matches() {
+  local pid="$1"
+  local recorded_starttime="$2"
+  local expected="${3:-}"
+  local expected_parent="${4:-}"
+  local command_line first current_starttime current_parent
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$recorded_starttime" =~ ^[0-9]+$ ]] || return 1
+  current_starttime="$(remote_secure_pid_starttime "$pid" 2>/dev/null || true)"
+  [ "$current_starttime" = "$recorded_starttime" ] || return 1
+  if [ -n "$expected" ]; then
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    first="${command_line%% *}"
+    first="${first##*/}"
+    [ "$first" = "$expected" ] || return 1
+  fi
+  if [ -n "$expected_parent" ]; then
+    current_parent="$(remote_secure_pid_parent "$pid" 2>/dev/null || true)"
+    [ "$current_parent" = "$expected_parent" ] || return 1
+  fi
+}
+
+remote_secure_child_pid_matches() {
+  local pid="$1"
+  local recorded_starttime="$2"
+  # Custom Chrome commands may be wrapper scripts whose /proc executable is
+  # the interpreter.  The direct-child relationship plus birth identity is
+  # the stable ownership check for this child; helper daemons additionally
+  # require their expected executable name below.
+  remote_secure_pid_matches "$pid" "$recorded_starttime" "" "$$"
+}
+
+remote_secure_stop_pid() {
+  local pid="$1"
+  local recorded_starttime="$2"
+  local expected="$3"
+  local attempt
+  remote_secure_pid_matches "$pid" "$recorded_starttime" "$expected" "$$" || return 1
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    remote_secure_pid_matches "$pid" "$recorded_starttime" "$expected" "$$" || return 0
+    sleep 0.1
+  done
+  if remote_secure_pid_matches "$pid" "$recorded_starttime" "$expected" "$$"; then
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  fi
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    remote_secure_pid_matches "$pid" "$recorded_starttime" "$expected" "$$" || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+remote_secure_stop_child_pid() {
+  local pid="$1"
+  local recorded_starttime="$2"
+  local attempt
+  remote_secure_child_pid_matches "$pid" "$recorded_starttime" || return 1
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    remote_secure_child_pid_matches "$pid" "$recorded_starttime" || return 0
+    sleep 0.1
+  done
+  if remote_secure_child_pid_matches "$pid" "$recorded_starttime"; then
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  fi
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    remote_secure_child_pid_matches "$pid" "$recorded_starttime" || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+remote_secure_wait_owned_pid() {
+  local pid="$1"
+  local recorded_starttime="$2"
+  local expected="$3"
+  local attempt
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    remote_secure_pid_matches "$pid" "$recorded_starttime" "$expected" "$$" && return 0
+    kill -0 "$pid" >/dev/null 2>&1 || return 1
+    sleep 0.1
+  done
+  remote_secure_pid_matches "$pid" "$recorded_starttime" "$expected" "$$"
+}
+
+remote_secure_wait_owned_child() {
+  local pid="$1"
+  local recorded_starttime="$2"
+  local attempt
+  for ((attempt = 0; attempt < 20; attempt++)); do
+    remote_secure_child_pid_matches "$pid" "$recorded_starttime" && return 0
+    kill -0 "$pid" >/dev/null 2>&1 || return 1
+    sleep 0.1
+  done
+  remote_secure_child_pid_matches "$pid" "$recorded_starttime"
+}
+
+remote_secure_cleanup() {
+  [ "$cleanup_done" = "0" ] || return "$cleanup_status"
+  cleanup_done=1
+  local cleanup_failed=0
+  local process_stopped=0
+
+  if [ -n "$chrome_pid" ]; then
+    process_stopped=0
+    if [ -z "$chrome_starttime" ]; then
+      echo "remote-chrome secure session: Chrome child PID $chrome_pid has no recorded starttime; preserving it." >&2
+      cleanup_failed=1
+    elif remote_secure_wait_owned_child "$chrome_pid" "$chrome_starttime"; then
+      if remote_secure_stop_child_pid "$chrome_pid" "$chrome_starttime"; then
+        process_stopped=1
+      else
+        echo "remote-chrome secure session: owned Chrome child PID $chrome_pid remains after TERM/KILL; inspect it before retrying." >&2
+        cleanup_failed=1
+      fi
+    elif kill -0 "$chrome_pid" >/dev/null 2>&1; then
+      echo "remote-chrome secure session: Chrome child PID $chrome_pid identity changed; preserving the replacement process." >&2
+      cleanup_failed=1
+    fi
+    if [ "$process_stopped" = "1" ]; then
+      wait "$chrome_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if [ -n "$proxy_pid" ]; then
+    process_stopped=0
+    if [ -z "$proxy_starttime" ]; then
+      echo "remote-chrome secure session: proxy PID $proxy_pid has no recorded starttime; preserving it." >&2
+      cleanup_failed=1
+    elif remote_secure_wait_owned_pid "$proxy_pid" "$proxy_starttime" xdg-dbus-proxy; then
+      if remote_secure_stop_pid "$proxy_pid" "$proxy_starttime" xdg-dbus-proxy; then
+        process_stopped=1
+      else
+        echo "remote-chrome secure session: owned xdg-dbus-proxy PID $proxy_pid remains after TERM/KILL; inspect it before retrying." >&2
+        cleanup_failed=1
+      fi
+    elif kill -0 "$proxy_pid" >/dev/null 2>&1; then
+      echo "remote-chrome secure session: xdg-dbus-proxy PID $proxy_pid identity changed; preserving the replacement process." >&2
+      cleanup_failed=1
+    fi
+    if [ "$process_stopped" = "1" ]; then
+      wait "$proxy_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if [ -n "$secret_pid" ] && [ "$secret_owned" = "1" ]; then
+    process_stopped=0
+    if [ -z "$secret_starttime" ]; then
+      echo "remote-chrome secure session: owned ksecretd PID $secret_pid has no recorded starttime; preserving it." >&2
+      cleanup_failed=1
+    elif remote_secure_wait_owned_pid "$secret_pid" "$secret_starttime" ksecretd; then
+      if remote_secure_stop_pid "$secret_pid" "$secret_starttime" ksecretd; then
+        process_stopped=1
+      else
+        echo "remote-chrome secure session: owned ksecretd PID $secret_pid remains after TERM/KILL; inspect it before retrying." >&2
+        cleanup_failed=1
+      fi
+    elif kill -0 "$secret_pid" >/dev/null 2>&1; then
+      echo "remote-chrome secure session: ksecretd PID $secret_pid identity changed; preserving the replacement process." >&2
+      cleanup_failed=1
+    fi
+    if [ "$process_stopped" = "1" ]; then
+      wait "$secret_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if [ "$proxy_socket_owned" = "1" ]; then
+    if [ -e "$proxy_socket" ] || [ -L "$proxy_socket" ]; then
+      current_inode="$(stat -c '%d:%i' "$proxy_socket" 2>/dev/null || true)"
+    else
+      current_inode=""
+    fi
+    if [ -z "$current_inode" ]; then
+      if [ -e "$proxy_socket" ] || [ -L "$proxy_socket" ]; then
+        echo "remote-chrome secure session: could not inspect owned proxy socket $proxy_socket; preserving it." >&2
+        cleanup_failed=1
+      fi
+    elif [ -z "$proxy_socket_inode" ]; then
+      echo "remote-chrome secure session: owned proxy socket $proxy_socket has no recorded inode; preserving it." >&2
+      cleanup_failed=1
+    elif [ "$current_inode" != "$proxy_socket_inode" ]; then
+      echo "remote-chrome secure session: proxy socket identity changed; preserving $proxy_socket." >&2
+      cleanup_failed=1
+    else
+      if ! rm -f -- "$proxy_socket"; then
+        echo "remote-chrome secure session: could not remove owned proxy socket $proxy_socket; inspect it before retrying." >&2
+        cleanup_failed=1
+      elif [ -e "$proxy_socket" ] || [ -L "$proxy_socket" ]; then
+        echo "remote-chrome secure session: owned proxy socket $proxy_socket remains after removal." >&2
+        cleanup_failed=1
+      fi
+    fi
+  fi
+  cleanup_status="$cleanup_failed"
+  return "$cleanup_status"
+}
+
+remote_secure_on_exit() {
+  local exit_status="$?"
+  local final_status="$exit_status"
+  remote_secure_cleanup || true
+  if [ "$final_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    final_status="$cleanup_status"
+  fi
+  trap - EXIT
+  exit "$final_status"
+}
+
+remote_secure_signal() {
+  local status="$1"
+  trap - INT TERM HUP
+  exit "$status"
+}
+
+remote_secure_fail() {
+  echo "remote-chrome secure session: $*" >&2
+  exit 1
+}
+
+trap 'remote_secure_on_exit' EXIT
+trap 'remote_secure_signal 130' INT
+trap 'remote_secure_signal 143' TERM
+trap 'remote_secure_signal 129' HUP
+
+[ -n "$chrome_command" ] || remote_secure_fail "Chrome command is missing."
+[ -n "$secret_application" ] && [ -n "$secret_schema" ] ||
+  remote_secure_fail "Safe Storage identity mapping is missing."
+[ -n "$normal_bus" ] ||
+  remote_secure_fail "DBUS_SESSION_BUS_ADDRESS is not set to the normal remote user session bus."
+[ -d "$runtime_dir" ] ||
+  remote_secure_fail "XDG_RUNTIME_DIR does not exist: $runtime_dir"
+
+for required_command in bash busctl secret-tool xdg-dbus-proxy ksecretd; do
+  command -v "$required_command" >/dev/null 2>&1 ||
+    remote_secure_fail "remote prerequisite is missing: $required_command"
+done
+command -v "$chrome_command" >/dev/null 2>&1 ||
+  remote_secure_fail "remote Chrome command is missing: $chrome_command"
+
+if [ -e "$proxy_socket" ] || [ -L "$proxy_socket" ]; then
+  remote_secure_fail "refusing to reuse an existing proxy socket: $proxy_socket"
+fi
+
+secret_owner=0
+if busctl --user --no-pager --quiet status org.freedesktop.secrets >/dev/null 2>&1; then
+  secret_owner=1
+else
+  # No Secret Service owner exists. This process is started inside the
+  # Waypipe environment and is the only Secret Service process this wrapper
+  # may clean up. A pre-existing owner is never stopped.
+  ksecretd >/dev/null 2>&1 &
+  secret_pid=$!
+  secret_owned=1
+  secret_starttime="$(remote_secure_pid_starttime "$secret_pid" 2>/dev/null || true)"
+  [ -n "$secret_starttime" ] ||
+    remote_secure_fail "could not record the owned ksecretd PID $secret_pid starttime; refusing unverified cleanup."
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    if busctl --user --no-pager --quiet status org.freedesktop.secrets >/dev/null 2>&1; then
+      secret_owner=1
+      break
+    fi
+    kill -0 "$secret_pid" >/dev/null 2>&1 ||
+      remote_secure_fail "ksecretd exited before owning org.freedesktop.secrets."
+    sleep 0.1
+  done
+fi
+[ "$secret_owner" = "1" ] ||
+  remote_secure_fail "no org.freedesktop.secrets owner became available; a KWallet prompt may have been canceled."
+
+# --filter with this single --talk rule is intentional: org.freedesktop.portal.Desktop
+# receives no talk/see/own policy and remains hidden, so GTK file choosers use Waypipe.
+xdg-dbus-proxy "$normal_bus" "$proxy_socket" \
+  --filter --talk=org.freedesktop.secrets >/dev/null 2>&1 &
+proxy_pid=$!
+proxy_socket_owned=1
+proxy_starttime="$(remote_secure_pid_starttime "$proxy_pid" 2>/dev/null || true)"
+[ -n "$proxy_starttime" ] ||
+  remote_secure_fail "could not record the owned xdg-dbus-proxy PID $proxy_pid starttime; refusing unverified cleanup."
+for ((attempt = 0; attempt < 100; attempt++)); do
+  if [ -S "$proxy_socket" ]; then
+    proxy_socket_inode="$(stat -c '%d:%i' "$proxy_socket" 2>/dev/null || true)"
+    break
+  fi
+  kill -0 "$proxy_pid" >/dev/null 2>&1 ||
+    remote_secure_fail "xdg-dbus-proxy exited before creating its socket."
+  sleep 0.1
+done
+[ -n "$proxy_socket_inode" ] ||
+  remote_secure_fail "xdg-dbus-proxy did not create a socket: $proxy_socket"
+
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$proxy_socket"
+if ! secret-tool lookup application "$secret_application" \
+  xdg:schema "$secret_schema" >/dev/null 2>&1; then
+  remote_secure_fail "Safe Storage lookup failed or was canceled; Chrome will not start and basic password storage is never allowed."
+fi
+
+# Run Chrome as a child so EXIT/signal cleanup always owns the proxy and any
+# KWallet Secret Service started above. The caller's exit status is preserved.
+"$chrome_command" --password-store=gnome-libsecret "$@" &
+chrome_pid=$!
+chrome_starttime="$(remote_secure_pid_starttime "$chrome_pid" 2>/dev/null || true)"
+if [ -z "$chrome_starttime" ] && kill -0 "$chrome_pid" >/dev/null 2>&1; then
+  remote_secure_fail "could not record the Chrome child PID $chrome_pid starttime; refusing unverified cleanup."
+fi
+if wait "$chrome_pid"; then
+  chrome_status=$?
+else
+  chrome_status=$?
+fi
+chrome_pid=""
+remote_secure_cleanup || true
+if [ "$chrome_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+  chrome_status="$cleanup_status"
+fi
+exit "$chrome_status"
+REMOTE_CHROME_SECURE_BOOTSTRAP
+}
+
+chrome_secure_command_line() {
+  local host="$1"
+  local chrome_command="$2"
+  local secret_application="$3"
+  local secret_schema="$4"
+  shift 4
+  local script
+  local argument quoted
+
+  script="$(chrome_secure_bootstrap_script)"
+  printf -v quoted '%q' "$host"
+  local command_line="waypipe --no-gpu ssh $quoted bash -s --"
+  for argument in "$chrome_command" "$secret_application" "$secret_schema" "$@"; do
+    printf -v quoted '%q' "$argument"
+  command_line+=" $quoted"
+  done
+  # tmux may render pane_start_command with wrappers/escaping, so reset stores
+  # this raw direct Waypipe command in a session-scoped user option. Keep the
+  # command one line and use Bash's %q to carry the literal bootstrap over
+  # stdin without eval or remote installation.
+  printf -v quoted '%q' "$script"
+  command_line+=" <<< $quoted"
+  printf '%s\n' "$command_line"
+}
+
+chrome_tmux_command_option="@remote-chrome-command"
+
+chrome_tmux_record_command() {
+  local session="$1"
+  local command_line="$2"
+
+  if ! tmux set-option -t "$session" "$chrome_tmux_command_option" \
+    "$command_line" >/dev/null 2>&1; then
+    echo "Could not record the canonical Chrome command in tmux session $session." >&2
+    return 1
+  fi
+  return 0
+}
+
+chrome_tmux_create_chrome_session() {
+  local session="$1"
+  local command_line="$2"
+
+  if ! tmux new-session -d -s "$session" -n chrome bash -c "$command_line"; then
+    return 1
+  fi
+  if ! chrome_tmux_record_command "$session" "$command_line"; then
+    tmux kill-session -t "$session" >/dev/null 2>&1 ||
+      echo "Could not remove tmux session $session after canonical command recording failed." >&2
+    return 1
+  fi
+  return 0
+}
+
 # Parse only the options that determine a detached launch's tmux target.  The
 # full launch parser remains the source of truth for validation and launch
 # behavior; a parse miss deliberately falls back to it unchanged.
@@ -114,6 +626,11 @@ chrome_launch_target() {
       --chrome-command=*|--yubikey-usb-id=*|--yubikey-port=*)
         shift
         ;;
+      --password-store|--password-store=*)
+        # Force the full launch parser to inspect and reject this argument;
+        # bare-host reset must not bypass the password-store safety gate.
+        return 1
+        ;;
       --foreground|--no-tmux)
         chrome_launch_target_foreground=1
         shift
@@ -125,6 +642,12 @@ chrome_launch_target() {
         return 1
         ;;
       --)
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --password-store|--password-store=*) return 1 ;;
+          esac
+          shift
+        done
         break
         ;;
       -*)
@@ -178,6 +701,8 @@ chrome_launch() {
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
   local chrome_args=("--ozone-platform=wayland" "--disable-gpu" "--disable-features=Vulkan" "--new-window")
   local yubikey_args=()
+  local secure_script
+  local command_line
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -239,6 +764,9 @@ chrome_launch() {
         assume_yes=1
         shift
         ;;
+      --password-store|--password-store=*)
+        die "Do not provide --password-store; remote-chrome forces --password-store=gnome-libsecret after a Safe Storage preflight."
+        ;;
       -h|--help)
         usage
         return 0
@@ -264,6 +792,8 @@ chrome_launch() {
 
   [ -n "$host" ] || die "Remote host is required. Example: $PROGRAM launch HOST"
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
+  chrome_validate_password_store_args "${chrome_args[@]}"
+  chrome_secret_identity "$chrome_command" || exit 1
 
   need ssh
   need waypipe
@@ -324,7 +854,11 @@ chrome_launch() {
   fi
   chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
 
-  local command=(waypipe --no-gpu ssh "$host" "$chrome_command" "${chrome_args[@]}")
+  secure_script="$(chrome_secure_bootstrap_script)"
+  local command=(waypipe --no-gpu ssh "$host" bash -s -- "$chrome_command" \
+    "$chrome_secret_application" "$chrome_secret_schema" "${chrome_args[@]}")
+  command_line="$(chrome_secure_command_line "$host" "$chrome_command" \
+    "$chrome_secret_application" "$chrome_secret_schema" "${chrome_args[@]}")"
 
   if [ "$foreground" = "1" ]; then
     if [ "$forwarding_expected" = "1" ]; then
@@ -335,19 +869,24 @@ chrome_launch() {
       trap 'yk_cleanup; exit 129' HUP
       trap 'yk_cleanup' EXIT
       yk_start
-      "${command[@]}"
-      local code=$?
+      local code=0
+      if "${command[@]}" <<<"$secure_script"; then
+        code=$?
+      else
+        code=$?
+      fi
       yk_stop
       trap - EXIT INT TERM HUP
       return "$code"
     fi
-    exec "${command[@]}"
+    exec "${command[@]}" <<<"$secure_script"
   fi
 
   if [ "$forwarding_expected" = "1" ]; then
-    chrome_launch_detached_with_yubikey "$host" "$session" "$(quote_command "${command[@]}")" "${yubikey_args[@]}"
+    chrome_launch_detached_with_yubikey "$host" "$session" "$command_line" "${yubikey_args[@]}"
   else
-    tmux new-session -d -s "$session" -n chrome "$(quote_command "${command[@]}")"
+    chrome_tmux_create_chrome_session "$session" "$command_line" ||
+      die "Could not create a reset-safe Chrome tmux session on $host."
   fi
 
   echo "Started remote Chrome on $host in tmux session $session."
@@ -376,16 +915,20 @@ chrome_preflight() {
   local chrome_command="$2"
   local foreground="$3"
   local quoted_chrome_command
+  local remote_requirements
 
   if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
     die "No local Wayland/X display variables found. Run from a graphical session."
   fi
 
+  printf -v quoted_chrome_command '%q' "$chrome_command"
+  remote_requirements="command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null && command -v $quoted_chrome_command >/dev/null"
   if [ "$foreground" = "0" ]; then
-    printf -v quoted_chrome_command '%q' "$chrome_command"
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-      "command -v waypipe >/dev/null && command -v $quoted_chrome_command >/dev/null" ||
-      die "Detached launch needs noninteractive SSH to $host, plus remote waypipe and $chrome_command in PATH."
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "$remote_requirements" ||
+      die "Detached launch needs noninteractive SSH to $host plus remote bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command."
+  else
+    ssh -o ConnectTimeout=5 "$host" "$remote_requirements" ||
+      die "Secure launch needs remote bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command on $host."
   fi
 }
 
@@ -617,6 +1160,9 @@ chrome_reset_read_pane() {
   local pane_output=""
   local line_count=0
   local pane_line
+  local pane_start_command=""
+  local canonical_command=""
+  chrome_reset_pane_command=""
 
   if ! pane_output="$(tmux list-panes -t "$session:chrome" \
     -F '#{pane_id}\t#{pane_pid}\t#{pane_start_command}' 2>&1)"; then
@@ -629,13 +1175,25 @@ chrome_reset_read_pane() {
     line_count=$((line_count + 1))
     [ "$line_count" -eq 1 ] || break
     IFS=$'\t' read -r chrome_reset_pane_id chrome_reset_pane_pid \
-      chrome_reset_pane_command <<<"$pane_line"
+      pane_start_command <<<"$pane_line"
   done <<<"$pane_output"
   if [ "$line_count" -ne 1 ] ||
     [ -z "$chrome_reset_pane_id" ] ||
     [[ ! "$chrome_reset_pane_pid" =~ ^[0-9]+$ ]] ||
-    [ -z "$chrome_reset_pane_command" ]; then
+    [ -z "$pane_start_command" ]; then
     echo "The $session:chrome window must contain exactly one readable pane with a start command." >&2
+    return 1
+  fi
+
+  if canonical_command="$(tmux show-options -qv -t "$session" \
+    "$chrome_tmux_command_option" 2>/dev/null)" && [ -n "$canonical_command" ]; then
+    chrome_reset_pane_command="$canonical_command"
+  elif [[ "$pane_start_command" == waypipe[[:space:]]--no-gpu[[:space:]]ssh[[:space:]]* ]]; then
+    # Pre-1.3 sessions stored the direct command in pane_start_command.  Do
+    # not attempt to decode a newly wrapped `bash -c` pane command.
+    chrome_reset_pane_command="$pane_start_command"
+  else
+    echo "The $session:chrome pane has no canonical remote-chrome command option; refusing reset." >&2
     return 1
   fi
   return 0
@@ -1195,9 +1753,12 @@ chrome_reset() {
 
   if [ "$yk_needed" = "1" ]; then
     yk_preflight_for_forwarding 1
-    chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reset_pane_command"
+    if ! chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reset_pane_command"; then
+      echo "Could not recreate the Chrome/YubiKey tmux session after remote Waypipe teardown." >&2
+      return 1
+    fi
   else
-    if ! tmux new-session -d -s "$session" -n chrome "$chrome_reset_pane_command"; then
+    if ! chrome_tmux_create_chrome_session "$session" "$chrome_reset_pane_command"; then
       echo "Could not recreate chrome pane in tmux session $session." >&2
       return 1
     fi
@@ -2243,11 +2804,15 @@ doctor_remote_chrome() {
   local quoted_chrome
   printf -v quoted_chrome '%q' "$chrome_command"
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-    "command -v waypipe >/dev/null && command -v $quoted_chrome >/dev/null"
+    "command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null && command -v $quoted_chrome >/dev/null"
 }
 
 doctor_chrome_command() {
   (chrome_process_pattern "$1" >/dev/null)
+}
+
+doctor_chrome_secret_identity() {
+  (chrome_secret_identity "$1" >/dev/null)
 }
 
 doctor_local_command() {
@@ -2339,9 +2904,12 @@ chrome_doctor() {
   if ! doctor_check "Chrome command is a simple executable name/path" doctor_chrome_command "$chrome_command"; then
     code=1
   fi
+  if ! doctor_check "Chrome Safe Storage identity mapping" doctor_chrome_secret_identity "$chrome_command"; then
+    code=1
+  fi
   if ! doctor_check "detached SSH reachability and remote waypipe/$chrome_command" \
     doctor_remote_chrome "$host" "$chrome_command"; then
-    echo "doctor: verify BatchMode SSH and install waypipe plus $chrome_command on $host." >&2
+    echo "doctor: verify BatchMode SSH and install bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, plus $chrome_command on $host." >&2
     code=1
   fi
 
@@ -3289,8 +3857,14 @@ chrome_launch_detached_with_yubikey() {
     return 1
   fi
 
-  if ! tmux new-window -d -t "$session" -n chrome "$chrome_command_line"; then
+  if ! tmux new-window -d -t "$session" -n chrome bash -c "$chrome_command_line"; then
     echo "Could not create the remote Chrome tmux window after YubiKey readiness." >&2
+    chrome_detached_cleanup
+    trap - INT TERM HUP
+    return 1
+  fi
+  if ! chrome_tmux_record_command "$session" "$chrome_command_line"; then
+    echo "Could not record the canonical Chrome command after YubiKey readiness; cleaning up the managed session." >&2
     chrome_detached_cleanup
     trap - INT TERM HUP
     return 1
