@@ -2362,7 +2362,7 @@ test_cleanup_lock_releases_on_signal() (
     yk_set_runtime_paths
     yk_cleanup_lock_acquire
     trap 'yk_cleanup_lock_release_on_exit' EXIT
-    trap - INT TERM HUP
+    trap 'exit 143' TERM
     kill -TERM "$BASHPID"
   ) &
   child_pid=$!
