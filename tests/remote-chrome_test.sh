@@ -6,6 +6,16 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../bin/remote-chrome
 source "$repo_root/bin/remote-chrome"
 
+# Keep any accidentally unmocked tmux or runtime-state access away from the
+# developer's live remote-chrome sessions. Individual tests use narrower
+# temporary directories where needed; these defaults are the outer safety net.
+test_suite_dir="$(mktemp -d)"
+trap 'rm -rf "$test_suite_dir"' EXIT
+mkdir -m 700 "$test_suite_dir/runtime" "$test_suite_dir/tmux"
+export XDG_RUNTIME_DIR="$test_suite_dir/runtime"
+export TMUX_TMPDIR="$test_suite_dir/tmux"
+unset TMUX
+
 fail() {
   echo "FAIL: $*" >&2
   return 1
