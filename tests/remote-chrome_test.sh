@@ -11,10 +11,22 @@ source "$repo_root/bin/remote-chrome"
 # temporary directories where needed; these defaults are the outer safety net.
 test_suite_dir="$(mktemp -d)"
 trap 'rm -rf "$test_suite_dir"' EXIT
-mkdir -m 700 "$test_suite_dir/runtime" "$test_suite_dir/tmux"
+mkdir -m 700 "$test_suite_dir/runtime" "$test_suite_dir/tmux" \
+  "$test_suite_dir/usbip-host"
 export XDG_RUNTIME_DIR="$test_suite_dir/runtime"
 export TMUX_TMPDIR="$test_suite_dir/tmux"
+export REMOTE_CHROME_USBIP_HOST_SYSFS="$test_suite_dir/usbip-host"
+yk_usbip_host_sysfs="$REMOTE_CHROME_USBIP_HOST_SYSFS"
 unset TMUX
+
+test_block_external_command() {
+  echo "FAIL: unmocked external command blocked: $*" >&2
+  return 97
+}
+
+tmux() { test_block_external_command tmux "$@"; }
+ssh() { test_block_external_command ssh "$@"; }
+sudo() { test_block_external_command sudo "$@"; }
 
 fail() {
   echo "FAIL: $*" >&2
