@@ -1079,7 +1079,37 @@ test_readiness_probe_rejects_unrelated_and_otp_hidraw_devices() (
   printf '%s\n' '#!/usr/bin/env bash' 'exit 127' >"$fake_bin_no_fido/fido2-token"
   chmod +x "$fake_bin_no_fido/fido2-token"
   output="$(PATH="$fake_bin_no_fido:/usr/bin:/bin" REMOTE_CHROME_HIDRAW_ROOT="$hidraw_root" bash "$script_file")" || true
-  [ "$output" = "not-ready" ] || fail "OTP-only hidraw metadata satisfied readiness: $output"
+  [ "$output" = "fido2-unconfirmed" ] ||
+    fail "OTP-only hidraw metadata produced unexpected readiness: $output"
+)
+
+test_readiness_probe_rejects_inaccessible_exact_fido_device() (
+  local test_dir fake_bin hidraw_root script_file output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  hidraw_root="$test_dir/hidraw"
+  script_file="$test_dir/probe.sh"
+  mkdir -p "$fake_bin" "$hidraw_root"
+  : >"$hidraw_root/hidraw-inaccessible"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/fido2-token"
+  chmod +x "$fake_bin/fido2-token"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "ID_VENDOR_ID=1050" "ID_MODEL_ID=0407" "ID_FIDO_TOKEN=1"' \
+    >"$fake_bin/udevadm"
+  chmod +x "$fake_bin/udevadm"
+
+  yk_usb_id="1050:0407"
+  yk_ssh() { printf '%s' "$1" >"$script_file"; return 1; }
+  yk_remote_probe_readiness >/dev/null 2>&1 || true
+  if output="$(PATH="$fake_bin:/usr/bin:/bin" \
+    REMOTE_CHROME_HIDRAW_ROOT="$hidraw_root" bash "$script_file")"; then
+    code=0
+  else
+    code=$?
+  fi
+  [ "$code" -ne 0 ] || fail "inaccessible exact FIDO device satisfied readiness"
+  assert_contains "$output" "permission-denied:/dev/hidraw-inaccessible:user=$(id -un)"
 )
 
 test_parent_wait_preserves_bootstrap_and_readiness_windows() (
@@ -1543,7 +1573,7 @@ test_foreground_duplicate_checks_yubikey_state_before_existing_chrome() (
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
-  assert_contains "$output" "1.3.0"
+  assert_contains "$output" "1.3.1"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
@@ -2987,6 +3017,7 @@ tests=(
   test_invalid_timeout_values_fall_back
   test_readiness_probe_matches_exact_device_and_fido_metadata
   test_readiness_probe_rejects_unrelated_and_otp_hidraw_devices
+  test_readiness_probe_rejects_inaccessible_exact_fido_device
   test_parent_wait_preserves_bootstrap_and_readiness_windows
   test_stop_cleans_provisional_state_without_busid
   test_stop_loads_earliest_usbipd_provisional_phase

@@ -61,11 +61,17 @@ Forwarding starts in a `yubikey` tmux window first. Bootstrap has a separate
 bounded timeout (30 seconds by default), then the launcher waits up to 15
 seconds after attach until the exact configured device enumerates as a FIDO/hidraw device,
 then creates the `chrome` window. Preferred readiness is verified by
-`fido2-token -L`; if only udev/hidraw metadata is available, output labels the
-result USB-only. Both paths require the configured vendor/product and
+`fido2-token -L`; if the command is unavailable, an accessible udev/hidraw
+device can satisfy the lower-confidence USB-only fallback. Both paths require
+read/write access, the configured vendor/product, and
 FIDO/security-token metadata, so an OTP keyboard hidraw interface or unrelated
 FIDO key cannot satisfy readiness. A child failure or timeout prints its pane/log diagnostics,
 removes the failed session, and rolls back the exact resources acquired.
+
+On a headless remote host, systemd-logind may grant the security-token `uaccess`
+ACL to the display-manager greeter rather than the SSH user. Configure a narrow
+static group/udev rule as described in the README's **Headless Remote Hosts**
+section; graphical autologin is not required.
 
 Closing the remote Chrome browser only exits the `chrome` window; the `yubikey`
 window and forwarding keep running until you stop the whole session:

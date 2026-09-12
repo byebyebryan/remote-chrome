@@ -129,9 +129,35 @@ Remote host requirements:
   `usbip port`, and `usbip detach`
 - `libfido2` for preferred `fido2-token` verification (a lower-confidence
   hidraw/udev check is used when it is unavailable)
+- read/write access to the matching FIDO `hidraw` device for the remote Chrome
+  user
 
 Passwordless remote `sudo` is a hard requirement for YubiKey forwarding. The
 remote commands run over noninteractive SSH and cannot complete a sudo prompt.
+
+#### Headless Remote Hosts
+
+On a normal desktop, systemd-logind grants security-token access to the active
+graphical-seat user through the `uaccess` tag. After a headless reboot, the
+active seat may instead belong to a display-manager greeter such as `sddm`, so
+an SSH-launched Chrome process cannot open the forwarded FIDO device.
+
+For a dedicated remote Chrome host, use a narrow system group and udev rule
+instead of enabling graphical autologin. The example below covers the default
+YubiKey USB ID; adjust the IDs when `--yubikey-usb-id` is customized:
+
+```bash
+getent group remote-chrome >/dev/null || sudo groupadd --system remote-chrome
+sudo usermod --append --groups remote-chrome "$USER"
+sudo tee /etc/udev/rules.d/99-remote-chrome-yubikey.rules >/dev/null <<'EOF'
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="1050", ATTRS{idProduct}=="0407", ENV{ID_FIDO_TOKEN}=="1", GROUP="remote-chrome", MODE="0660"
+EOF
+sudo udevadm control --reload-rules
+```
+
+Reconnect the forwarded device (or reboot) and start a new SSH/Chrome session
+so the new supplementary group is present. `fido2-token -L` on the remote host
+must list the exact YubiKey as that user before Chrome starts.
 
 ### Remote Host Setup (Arch)
 
@@ -431,8 +457,9 @@ kernels, their `/lib/modules/<kernel>` trees, `usbip-host`/`vhci-hcd`, command
 prerequisites, and required sudo paths. Module mismatch diagnostics include the
 running kernel and available module directories and recommend rebooting after a
 kernel upgrade. The launcher never installs packages, copies modules, or
-reboots automatically. `fido2-token -L` is preferred for readiness; when only
-the hidraw/udev fallback succeeds, output is labeled USB-only.
+reboots automatically. When `fido2-token` is installed, it must confirm the
+exact device. The hidraw/udev fallback is used only when `fido2-token` is
+unavailable, requires read/write access, and is labeled USB-only.
 
 ## Security Notes
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.3.0"
+VERSION="1.3.1"
 
 usage() {
   cat <<USAGE
@@ -3657,6 +3657,19 @@ target_hidraw() {
   fi
   return 0
 }
+matching_hidraw_access_error() {
+  user="$(id -un 2>/dev/null || printf unknown)"
+  for hidraw in "$hidraw_root"/hidraw*; do
+    [ -e "$hidraw" ] || continue
+    device="/dev/${hidraw##*/}"
+    target_hidraw "$device" 1 || continue
+    if [ ! -r "$device" ] || [ ! -w "$device" ]; then
+      printf 'permission-denied:%s:user=%s\n' "$device" "$user"
+      return 0
+    fi
+  done
+  return 1
+}
 if command -v udevadm >/dev/null 2>&1 && command -v fido2-token >/dev/null 2>&1; then
   fido_output="$(timeout 3 fido2-token -L 2>/dev/null)"
   for device in $(printf '%s\n' "$fido_output" | awk -F: '/^\/dev\/hidraw/ {print $1}'); do
@@ -3664,12 +3677,24 @@ if command -v udevadm >/dev/null 2>&1 && command -v fido2-token >/dev/null 2>&1;
       /dev/hidraw*) target_hidraw "$device" 1 && { echo verified-fido; exit 0; } ;;
     esac
   done
+  if matching_hidraw_access_error; then
+    exit 1
+  fi
+  echo fido2-unconfirmed
+  exit 1
 fi
 if command -v udevadm >/dev/null 2>&1; then
   for hidraw in "$hidraw_root"/hidraw*; do
     [ -e "$hidraw" ] || continue
     device="/dev/${hidraw##*/}"
-    target_hidraw "$device" 1 && { echo usb-only; exit 0; }
+    target_hidraw "$device" 1 || continue
+    if [ ! -r "$device" ] || [ ! -w "$device" ]; then
+      printf 'permission-denied:%s:user=%s\n' "$device" \
+        "$(id -un 2>/dev/null || printf unknown)"
+      exit 1
+    fi
+    echo usb-only
+    exit 0
   done
 fi
 echo not-ready
