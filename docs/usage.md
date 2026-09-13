@@ -90,6 +90,9 @@ remote-chrome stop remote-host
 
 `stop` is the explicit teardown that kills the session and tears down forwarding
 together. It also cleans provisional state left by an interrupted setup.
+When the remote host rebooted and no longer has a `vhci_hcd` import controller,
+the missing controller proves that its old attachment is already gone, allowing
+the recovery ledger to be reconciled before the next launch.
 Run `remote-chrome stop` with no host to stop every default managed tmux session
 (`remote-chrome-*` by default) and every YubiKey forwarding using the default
 runtime state path. It leaves an exact-name `remote-chrome` session and

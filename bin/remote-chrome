@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.3.2"
+VERSION="1.3.3"
 
 usage() {
   cat <<USAGE
@@ -3167,6 +3167,17 @@ yk_remote_detach_busid() {
   yk_ssh 'bash -s' -- "$busid" <<'REMOTE_SCRIPT'
 busid="$1"
 
+platform_devices=/sys/bus/platform/devices
+if [ ! -d "$platform_devices" ]; then
+  echo "Could not inspect remote platform devices while detaching busid $busid." >&2
+  exit 1
+fi
+if [ ! -e "$platform_devices/vhci_hcd.0" ]; then
+  # The USB/IP import controller does not exist after a remote reboot until
+  # vhci_hcd is loaded again, so no imported device can still be attached.
+  exit 0
+fi
+
 if ! port_output="$(timeout 5 sudo -n usbip port 2>&1)"; then
   echo "Could not inspect remote USB/IP ports while detaching busid $busid:" >&2
   printf '%s\n' "$port_output" >&2
@@ -3210,6 +3221,17 @@ yk_remote_probe_attachment() {
 
   if ! output="$(yk_ssh 'bash -s' -- "$busid" 2>&1 <<'REMOTE_SCRIPT'
 busid="$1"
+
+platform_devices=/sys/bus/platform/devices
+if [ ! -d "$platform_devices" ]; then
+  echo "Could not inspect remote platform devices while reconciling busid $busid." >&2
+  exit 2
+fi
+if [ ! -e "$platform_devices/vhci_hcd.0" ]; then
+  # The import controller and every attachment disappear together on reboot.
+  printf '%s\n' absent
+  exit 0
+fi
 
 if ! port_output="$(timeout 5 sudo -n usbip port 2>&1)"; then
   echo "Could not inspect remote USB/IP ports while reconciling busid $busid:" >&2

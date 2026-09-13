@@ -443,8 +443,12 @@ and returns nonzero. `status HOST` reports tmux windows and the managed YubiKey
 phase/readiness without changing anything; it also exposes a provisional setup
 lock that exists before the first state write. Cleanup callers for one state
 serialize, so a parent stop waits for a detached forwarding child to finish
-before taking over. Hostless stop may reconcile only a daemon whose standard
-PID file, `/proc` command name, and exact `--pid` path all verify as tool-owned,
+before taking over. If the remote host rebooted and its `vhci_hcd` import
+controller no longer exists, cleanup treats that as proof that its prior USB/IP
+attachment is gone; an unreachable host or unreadable sysfs remains ambiguous
+and keeps recovery state. Hostless stop may reconcile only a daemon whose
+standard PID file, `/proc` command name, and exact `--pid` path all verify as
+tool-owned,
 with no remaining USB/IP exports. If a prior cleanup leaves a
 `phase=cleanup-failed` ledger, a later launch performs bounded reconciliation
 probes (and removes only exact stale evidence) and clears it only when the

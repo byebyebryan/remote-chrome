@@ -374,11 +374,12 @@ test_remote_preflight_uses_scoped_sudo_command() (
 )
 
 test_remote_detach_failure_is_reported() (
-  local test_dir fake_bin output code=0
+  local test_dir fake_bin platform_dir remote_script output code=0
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   fake_bin="$test_dir/bin"
-  mkdir -p "$fake_bin"
+  platform_dir="$test_dir/platform-devices"
+  mkdir -p "$fake_bin" "$platform_dir/vhci_hcd.0"
 
   printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -402,12 +403,37 @@ test_remote_detach_failure_is_reported() (
     local remote_command="$1"
     shift
     [ "$remote_command" = "bash -s" ] || fail "unexpected remote detach command: $remote_command"
-    PATH="$fake_bin:$PATH" bash -s "$@"
+    remote_script="$(command cat)"
+    remote_script="${remote_script//\/sys\/bus\/platform\/devices/$platform_dir}"
+    PATH="$fake_bin:$PATH" bash -s "$@" <<<"$remote_script"
   }
 
   output="$(yk_remote_detach_busid "5-1.2.2" 2>&1)" || code=$?
   [ "$code" -ne 0 ] || fail "remote detach failure was swallowed"
   assert_contains "$output" "Could not detach remote USB/IP port 00 for busid 5-1.2.2."
+)
+
+test_remote_reboot_without_vhci_proves_attachment_absent() (
+  local test_dir fake_bin platform_dir remote_script probe_code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  platform_dir="$test_dir/platform-devices"
+  mkdir -p "$fake_bin" "$platform_dir"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' >"$fake_bin/sudo"
+  chmod +x "$fake_bin/sudo"
+
+  yk_ssh() {
+    [ "$1" = "bash -s" ] || fail "unexpected remote command: $1"
+    shift
+    remote_script="$(command cat)"
+    remote_script="${remote_script//\/sys\/bus\/platform\/devices/$platform_dir}"
+    PATH="$fake_bin:$PATH" bash -s "$@" <<<"$remote_script"
+  }
+
+  yk_remote_probe_attachment "5-1.2.2" || probe_code=$?
+  [ "$probe_code" -eq 1 ] || fail "missing remote vhci controller was not treated as an absent attachment"
+  yk_remote_detach_busid "5-1.2.2" || fail "cleanup failed with no remote vhci controller"
 )
 
 test_forwarding_preflight_requires_local_timeout() (
@@ -1663,7 +1689,7 @@ test_occupied_remote_port_preserves_existing_chrome() (
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
-  assert_contains "$output" "1.3.2"
+  assert_contains "$output" "1.3.3"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
@@ -3077,6 +3103,7 @@ tests=(
   test_stop_without_host_cleans_all_recorded_yubikey_states
   test_remote_preflight_uses_scoped_sudo_command
   test_remote_detach_failure_is_reported
+  test_remote_reboot_without_vhci_proves_attachment_absent
   test_custom_chrome_command_is_in_process_pattern
   test_chrome_command_rejects_shell_syntax
   test_secret_identity_maps_chrome_chromium_and_custom
