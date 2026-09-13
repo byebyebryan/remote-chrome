@@ -159,6 +159,38 @@ Reconnect the forwarded device (or reboot) and start a new SSH/Chrome session
 so the new supplementary group is present. `fido2-token -L` on the remote host
 must list the exact YubiKey as that user before Chrome starts.
 
+#### Expire Reverse Tunnels After a Forwarding-Host Reboot
+
+The forwarding SSH client sends keepalives while it is running. A hard reboot
+of that client cannot close its connection, however, and the remote SSH server
+may otherwise retain the old reverse-forward listener until TCP eventually
+times out. A later launch then cannot bind the default port `3240`.
+
+On a dedicated remote host, add a narrowly matched server-side keepalive. For
+example, create `/etc/ssh/sshd_config.d/60-remote-chrome-keepalive.conf` on the
+remote host, replacing both placeholders with the remote Chrome account and a
+stable address for the forwarding host (such as its Tailscale IP):
+
+```text
+Match User <remote-user> Address <forwarding-host-ip>
+    ClientAliveInterval 30
+    ClientAliveCountMax 2
+Match all
+```
+
+Validate and reload the server without dropping healthy sessions:
+
+```bash
+sudo sshd -t
+sudo systemctl reload sshd
+```
+
+These settings make `sshd` probe only matching sessions and normally bound the
+lifetime of a stale listener to roughly one minute after an unclean client
+restart. The launcher also checks the remote port before stopping an existing
+Chrome; when it finds a listener, it reports the collision and leaves Chrome
+untouched.
+
 ### Remote Host Setup (Arch)
 
 On an Arch-family remote host, install the remote-side packages:

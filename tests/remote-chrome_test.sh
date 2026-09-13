@@ -1476,6 +1476,43 @@ test_remote_preflight_failure_is_propagated() (
   assert_contains "$output" "Remote YubiKey preflight failed"
 )
 
+test_remote_forward_port_probe_is_read_only() (
+  yk_usbip_port=3240
+  local remote_script="" code=0
+  yk_ssh() {
+    [ "$1" = "bash -s" ] || fail "unexpected remote command: $1"
+    [ "$2" = "--" ] || fail "remote port probe omitted argument separator"
+    [ "$3" = "3240" ] || fail "remote port probe omitted configured port"
+    remote_script="$(command cat)"
+    return 23
+  }
+
+  yk_remote_forward_port_available || code=$?
+  [ "$code" -eq 23 ] || fail "occupied remote port status was not preserved"
+  assert_contains "$remote_script" "/proc/net/tcp"
+  assert_contains "$remote_script" "/proc/net/tcp6"
+  assert_contains "$remote_script" 'state" = "0A'
+  [[ "$remote_script" != *sudo* ]] || fail "remote port probe requested privileges"
+)
+
+test_forwarding_preflight_rejects_occupied_remote_port() (
+  yk_remote="test-host"
+  yk_usbip_port=3240
+  need() { :; }
+  sudo() { return 0; }
+  yk_local_module_preflight() { return 0; }
+  yk_remote_module_preflight() { return 0; }
+  yk_local_candidate_exists() { return 0; }
+  yk_remote_forward_port_available() { return 23; }
+
+  local output code=0
+  output="$(yk_preflight_for_forwarding 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "occupied remote port unexpectedly passed preflight"
+  assert_contains "$output" "reverse-forward port 3240 is already listening on test-host"
+  assert_contains "$output" "stale SSH tunnel"
+  assert_contains "$output" "Refusing to stop remote Chrome"
+)
+
 test_other_exports_ignores_module_symlink() (
   local test_dir
   test_dir="$(mktemp -d)"
@@ -1592,10 +1629,41 @@ test_foreground_duplicate_checks_yubikey_state_before_existing_chrome() (
   [[ "$events" != *preflight* ]] || fail "duplicate foreground launch ran forwarding setup first"
 )
 
+test_occupied_remote_port_preserves_existing_chrome() (
+  local test_dir events_file output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { printf 'existing ' >>"$events_file"; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_usbip_port=3240
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 0; }
+  yk_local_module_preflight() { return 0; }
+  yk_remote_module_preflight() { return 0; }
+  yk_remote_forward_port_available() { return 23; }
+  sudo() { return 0; }
+  tmux() {
+    [ "$1" != "has-session" ] || return 1
+    return 0
+  }
+
+  output="$( (chrome_launch test-host --with-yubikey --yes) 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "launch with occupied remote port did not abort"
+  assert_contains "$output" "Refusing to stop remote Chrome"
+  [ ! -s "$events_file" ] || fail "occupied remote port check touched existing Chrome"
+)
+
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
-  assert_contains "$output" "1.3.1"
+  assert_contains "$output" "1.3.2"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
@@ -3057,10 +3125,13 @@ tests=(
   test_local_missing_module_tree_has_diagnostics
   test_local_missing_module_has_diagnostics
   test_remote_preflight_failure_is_propagated
+  test_remote_forward_port_probe_is_read_only
+  test_forwarding_preflight_rejects_occupied_remote_port
   test_other_exports_ignores_module_symlink
   test_launch_mode_auto_and_opt_out
   test_detached_duplicate_checks_tmux_before_existing_chrome
   test_foreground_duplicate_checks_yubikey_state_before_existing_chrome
+  test_occupied_remote_port_preserves_existing_chrome
   test_version_flag_reports_version
   test_stop_partial_cleanup_retains_ledger_and_attempts_all_resources
   test_stop_tunnel_failure_still_attempts_unbind_and_daemon

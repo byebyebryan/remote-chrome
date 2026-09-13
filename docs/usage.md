@@ -73,6 +73,14 @@ ACL to the display-manager greeter rather than the SSH user. Configure a narrow
 static group/udev rule as described in the README's **Headless Remote Hosts**
 section; graphical autologin is not required.
 
+If the forwarding host may reboot or lose power, configure the remote SSH
+server with the narrowly matched `ClientAliveInterval` and
+`ClientAliveCountMax` drop-in from the README's **Expire Reverse Tunnels After
+a Forwarding-Host Reboot** section. This bounds stale port `3240` listeners
+that a dead forwarding client cannot close. Launch checks this listener before
+stopping an existing remote Chrome and aborts without touching Chrome when the
+port is occupied.
+
 Closing the remote Chrome browser only exits the `chrome` window; the `yubikey`
 window and forwarding keep running until you stop the whole session:
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.3.1"
+VERSION="1.3.2"
 
 usage() {
   cat <<USAGE
@@ -3035,6 +3035,34 @@ yk_ensure_remote_ready() {
   fi
 }
 
+yk_remote_forward_port_available() {
+  # Read the remote kernel socket tables directly so this check does not add a
+  # remote ss/lsof dependency or require privileges. Exit 23 is reserved for a
+  # confirmed listener; other failures mean availability could not be proven.
+  yk_ssh 'bash -s' -- "$yk_usbip_port" <<'REMOTE_SCRIPT'
+set -u
+port="$1"
+printf -v wanted_port '%04X' "$port" || exit 2
+checked=0
+
+for table in /proc/net/tcp /proc/net/tcp6; do
+  [ -r "$table" ] || continue
+  checked=1
+  while read -r slot local_address remote_address state rest; do
+    [ "$state" = "0A" ] || continue
+    [ "${local_address##*:}" = "$wanted_port" ] || continue
+    exit 23
+  done <"$table"
+done
+
+if [ "$checked" != "1" ]; then
+  echo "Remote TCP listener tables are unavailable." >&2
+  exit 2
+fi
+exit 0
+REMOTE_SCRIPT
+}
+
 yk_preflight_for_tmux() {
   yk_preflight_for_forwarding 1
 }
@@ -3056,6 +3084,20 @@ yk_preflight_for_forwarding() {
   yk_remote_module_preflight || die "Remote YubiKey USB/IP preflight failed for $yk_remote."
   yk_local_candidate_exists ||
     die "No local YubiKey found with USB id $yk_usb_id."
+
+  local remote_port_code=0
+  yk_remote_forward_port_available || remote_port_code=$?
+  case "$remote_port_code" in
+    0) ;;
+    23)
+      echo "Remote USB/IP reverse-forward port $yk_usbip_port is already listening on $yk_remote." >&2
+      echo "This can be a stale SSH tunnel after the forwarding host reboots; wait for the remote SSH server to expire it or inspect that listener." >&2
+      die "Refusing to stop remote Chrome because YubiKey forwarding cannot start."
+      ;;
+    *)
+      die "Could not verify that remote USB/IP reverse-forward port $yk_usbip_port is available on $yk_remote."
+      ;;
+  esac
 }
 
 yk_local_candidate_exists() {
