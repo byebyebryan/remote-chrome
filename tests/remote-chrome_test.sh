@@ -16,6 +16,9 @@ mkdir -m 700 "$test_suite_dir/runtime" "$test_suite_dir/tmux" \
 export XDG_RUNTIME_DIR="$test_suite_dir/runtime"
 export TMUX_TMPDIR="$test_suite_dir/tmux"
 export REMOTE_CHROME_USBIP_HOST_SYSFS="$test_suite_dir/usbip-host"
+# Launch tests must not spawn real notification listeners; focused relay tests
+# exercise the notify helpers directly instead.
+export REMOTE_CHROME_NOTIFICATIONS=0
 yk_usbip_host_sysfs="$REMOTE_CHROME_USBIP_HOST_SYSFS"
 unset TMUX
 
@@ -554,13 +557,14 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
   local script command_line
   script="$(chrome_secure_bootstrap_script)"
   assert_contains "$script" "--filter --talk=org.freedesktop.secrets"
+  assert_contains "$script" "--talk=org.freedesktop.Notifications"
   assert_contains "$script" "org.freedesktop.portal.Desktop"
   [[ "$script" != *"--talk=org.freedesktop.portal.Desktop"* ]] ||
     fail "portal service was explicitly allowed through the Secret Service proxy"
   assert_contains "$script" "secret-tool lookup application"
   assert_contains "$script" "--password-store=gnome-libsecret"
 
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 --new-window)"
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" --new-window)"
   [[ "$command_line" == waypipe\ --no-gpu\ ssh\ test-host\ * ]] ||
     fail "secure detached command did not preserve the direct Waypipe SSH prefix"
   assert_contains "$command_line" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2"
@@ -568,12 +572,140 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
   [[ "$command_line" != *$'\n'* ]] || fail "secure detached command contains a literal newline"
 )
 
+test_notification_command_shape_round_trips() (
+  local enabled disabled
+  enabled="$(chrome_secure_command_line test-host google-chrome-stable chrome \
+    chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock \
+    /run/user/1000/remote-chrome-notify-1.sock chrome --new-window)"
+  assert_contains "$enabled" "-R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock"
+  assert_contains "$enabled" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock chrome"
+  [[ "$enabled" != *$'\n'* ]] || fail "notify command line contains a literal newline"
+
+  disabled="$(chrome_secure_command_line test-host google-chrome-stable chrome \
+    chrome_libsecret_os_crypt_password_v2 "" "" "")"
+  [[ "$disabled" != *"-R "* ]] || fail "disabled notify command line unexpectedly forwards a socket"
+)
+
+test_launch_target_accepts_notification_flag() (
+  chrome_launch_target test-host --no-notifications >/dev/null 2>&1 ||
+    fail "launch target parser rejected --no-notifications"
+  [ "$chrome_launch_target_host" = "test-host" ] || fail "launch target lost the host"
+)
+
+test_notify_stop_listener_reaps_recorded_process() (
+  local test_dir state_file socket log pid starttime
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  socket="$test_dir/listener.sock"
+  state_file="$test_dir/remote-chrome-notify-test.state"
+  log="${state_file}.log"
+  notify_remove_remote_socket() { :; }
+  sleep 600 &
+  pid=$!
+  starttime="$(notify_pid_starttime "$pid")"
+  : >"$socket"
+  : >"$log"
+  {
+    printf 'listener_pid\t%s\n' "$pid"
+    printf 'listener_starttime\t%s\n' "$starttime"
+    printf 'local_socket\t%s\n' "$socket"
+    printf 'remote_socket\t%s\n' "/tmp/remote-chrome-notify-absent.sock"
+    printf 'apps\t%s\n' "chrome"
+    printf 'session\t%s\n' "remote-chrome-test"
+    printf 'host\t%s\n' "test-host"
+  } >"$state_file"
+
+  notify_stop_state_file "$state_file" ""
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "recorded listener process survived stop"
+  fi
+  assert_file_missing "$state_file"
+  assert_file_missing "$socket"
+  assert_file_missing "$log"
+
+  notify_state_file="$test_dir/absent.state"
+  notify_stop_listener || fail "stop without state did not succeed"
+)
+
+test_launch_with_notifications_plumbs_relay() (
+  local test_dir events_file code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  WAYLAND_DISPLAY=wayland-0
+  REMOTE_CHROME_NOTIFICATIONS=1
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_secret_identity() { return 0; }
+  chrome_handle_existing() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  notify_start_listener() { printf 'start-listener ' >>"$events_file"; }
+  notify_stop_listener() { printf 'stop-listener ' >>"$events_file"; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      new-session) printf 'new-session:%s\n' "$*" >>"$events_file" ;;
+      *) return 0 ;;
+    esac
+  }
+
+  chrome_launch test-host >/dev/null 2>&1 || code=$?
+  [ "$code" -eq 0 ] || fail "notify-enabled launch failed with status $code"
+  local events
+  events="$(cat "$events_file")"
+  assert_contains "$events" "start-listener"
+  assert_contains "$events" "-R /tmp/remote-chrome-notify-"
+  [[ "$events" != *stop-listener* ]] ||
+    fail "successful notify-enabled launch stopped its listener"
+)
+
+test_notify_launch_failure_stops_listener() (
+  local test_dir events_file code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  WAYLAND_DISPLAY=wayland-0
+  REMOTE_CHROME_NOTIFICATIONS=1
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_secret_identity() { return 0; }
+  chrome_handle_existing() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  notify_start_listener() { printf 'start-listener ' >>"$events_file"; }
+  notify_stop_listener() { printf 'stop-listener ' >>"$events_file"; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      new-session) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+
+  (chrome_launch test-host) >/dev/null 2>&1 || code=$?
+  [ "$code" -eq 1 ] || fail "failed notify-enabled launch returned status $code"
+  local events
+  events="$(cat "$events_file" 2>/dev/null || true)"
+  assert_contains "$events" "start-listener"
+  assert_contains "$events" "stop-listener"
+)
+
 test_secure_command_shape_recreates_through_reset_parser() (
   local test_dir command_line events=""
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   command_line="$(chrome_secure_command_line test-host google-chrome-stable \
-    chrome chrome_libsecret_os_crypt_password_v2 --new-window)"
+    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" --new-window)"
   [ "${command_line#waypipe --no-gpu ssh test-host}" != "$command_line" ] ||
     fail "generated secure pane command lost its direct Waypipe SSH prefix"
   [[ "$command_line" != *$'\n'* ]] || fail "generated secure pane command contains a literal newline"
@@ -620,7 +752,7 @@ test_secure_command_line_replays_with_exact_arguments() (
     'cat >"$SECURE_WAYPIPE_STDIN"' >"$fake_bin/waypipe"
   chmod +x "$fake_bin/waypipe"
   command_line="$(chrome_secure_command_line test-host google-chrome-stable \
-    chrome chrome_libsecret_os_crypt_password_v2 \
+    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
     '--profile-directory=Profile One' '--test=a;b')"
   output="$(PATH="$fake_bin:$PATH" SECURE_WAYPIPE_ARGS="$test_dir/args" \
     SECURE_WAYPIPE_STDIN="$test_dir/stdin" bash -c "$command_line" 2>&1)" ||
@@ -702,7 +834,7 @@ test_reset_recreation_restores_canonical_option_for_repeated_reset() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   command_line="$(chrome_secure_command_line test-host google-chrome-stable \
-    chrome chrome_libsecret_os_crypt_password_v2 --new-window)"
+    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" --new-window)"
   option_value="$command_line"
   need() { :; }
   yk_prepare_for_launch() {
@@ -756,6 +888,10 @@ test_secure_bootstrap_has_signal_and_partial_failure_cleanup() (
   assert_contains "$script" "cleanup_status"
   assert_contains "$script" "proxy socket identity changed; preserving"
   assert_contains "$script" 'remote_secure_stop_pid "$proxy_pid" "$proxy_starttime" xdg-dbus-proxy'
+  assert_contains "$script" "REMOTE_CHROME_NOTIFY_FORWARDER"
+  assert_contains "$script" "notify_forwarder_script"
+  assert_contains "$script" "notify socket identity changed; preserving"
+  assert_contains "$script" 'remote_secure_stop_pid "$notify_pid" "$notify_starttime" python3'
 )
 
 test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
@@ -790,7 +926,7 @@ test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
     XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     SECURE_EVENTS="$test_dir/events" SECURE_SECRET_EVENTS="$test_dir/secret" \
     SECURE_CHROME_EVENTS="$test_dir/chrome" CHROME_STATUS=7 \
-    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 --new-window 2>&1)" || code=$?
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 "" "" --new-window 2>&1)" || code=$?
   [ "$code" -eq 7 ] || fail "secure bootstrap did not preserve Chrome exit status: $code ($output)"
   assert_contains "$(cat "$test_dir/secret")" "unix:path=$test_dir/remote-chrome-dbus-proxy-"
   assert_contains "$(cat "$test_dir/chrome")" "--password-store=gnome-libsecret --new-window"
@@ -823,7 +959,7 @@ test_secure_bootstrap_cleanup_failure_preserves_replaced_proxy_socket() (
   script="$(chrome_secure_bootstrap_script)"
   output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
     XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
-    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 2>&1)" || code=$?
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 "" "" 2>&1)" || code=$?
   [ "$code" -eq 1 ] || fail "replaced proxy socket cleanup unexpectedly succeeded: $code ($output)"
   assert_contains "$output" "proxy socket identity changed; preserving"
   replacement_socket="$(find "$test_dir" -name 'remote-chrome-dbus-proxy-*.sock' -print -quit)"
@@ -856,7 +992,7 @@ test_secure_bootstrap_starts_and_cleans_owned_secret_service() (
   output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
     XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     SECURE_OWNER_FILE="$test_dir/owner" SECURE_SECRET_PID="$test_dir/secret-pid" \
-    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 2>&1)" || code=$?
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 "" "" 2>&1)" || code=$?
   [ "$code" -eq 0 ] || fail "owned ksecretd bootstrap failed: $code ($output)"
   [ -f "$test_dir/secret-pid" ] || fail "owned ksecretd PID was not recorded"
   secret_pid="$(cat "$test_dir/secret-pid")"
@@ -886,7 +1022,7 @@ test_secure_bootstrap_lookup_failure_prevents_chrome() (
   output="$(printf '%s\n' "$script" | PATH="$fake_bin:$PATH" \
     XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     SECURE_CHROME_EVENTS="$test_dir/chrome" \
-    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 2>&1)" || code=$?
+    bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 "" "" 2>&1)" || code=$?
   [ "$code" -eq 1 ] || fail "Safe Storage lookup failure returned unexpected status: $code"
   assert_contains "$output" "Safe Storage lookup failed or was canceled"
   [ ! -e "$test_dir/chrome" ] || fail "Chrome launched after Safe Storage lookup failure"
@@ -2843,10 +2979,78 @@ test_reset_extracts_exact_socket_and_refuses_ambiguous_local_children() (
 
   printf '%s\n' \
     "4242 1 4242 $current_uid /bin/bash" \
-    "5000 4242 5000 $current_uid ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo" >"$ps_fixture"
+    "5000 4242 5000 $current_uid ssh -R /tmp/waypipe-server-one.sock:/tmp/waypipe-client-one.sock -R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock test-host -- waypipe --socket /tmp/waypipe-server-one.sock server --foo" >"$ps_fixture"
   chrome_reset_find_local_ssh 4242 test-host
   [ "$chrome_reset_remote_socket" = "/tmp/waypipe-server-one.sock" ] ||
     fail "reset extracted the wrong exact reverse socket"
+)
+
+test_reset_restarts_notification_listener() (
+  local test_dir command_line events="" session="remote-chrome-test-host"
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+    chrome chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock \
+    /run/user/1000/remote-chrome-notify-1.sock chrome --new-window)"
+  [[ "$command_line" == *"-R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock"* ]] ||
+    fail "notify-enabled reset fixture lacks the reverse forward"
+
+  notify_set_runtime_paths "$session"
+  {
+    printf 'listener_pid\t%s\n' "999999"
+    printf 'listener_starttime\t%s\n' "1"
+    printf 'local_socket\t%s\n' "$test_dir/remote-chrome-notify-1.sock"
+    printf 'remote_socket\t%s\n' "/tmp/remote-chrome-notify-1.sock"
+    printf 'apps\t%s\n' "chrome"
+    printf 'session\t%s\n' "$session"
+    printf 'host\t%s\n' "test-host"
+  } >"$notify_state_file"
+
+  need() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  notify_stop_listener() { events+="stop-listener "; }
+  notify_start_listener() { events+="start-listener "; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\t%s\t%s\n' '%0' 4242 "$command_line" ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) events+="kill-session " ;;
+      new-session) events+="new-session " ;;
+      *) return 0 ;;
+    esac
+  }
+  chrome_reset_find_local_ssh() {
+    chrome_reset_remote_socket="$test_dir/waypipe.sock"
+    return 0
+  }
+  chrome_reset_remote_identity() { return 1; }
+  confirm() { return 0; }
+
+  chrome_reset test-host --yes >/dev/null 2>&1
+  [[ "$events" == *"stop-listener"*"new-session"*"start-listener"* ]] ||
+    fail "reset did not restart the notification listener around recreation: $events"
+)
+
+test_reset_parser_skips_ssh_options_before_host() (
+  chrome_reset_parse_pane_host \
+    "waypipe --no-gpu ssh -R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock test-host bash -s -- x" ||
+    fail "reset parser rejected a notify forward"
+  [ "$chrome_reset_host" = "test-host" ] || fail "reset parser read the forward spec as host"
+
+  chrome_reset_parse_pane_host "waypipe --no-gpu ssh -o BatchMode=yes test-host bash -s -- x" ||
+    fail "reset parser rejected an ssh option"
+  [ "$chrome_reset_host" = "test-host" ] || fail "reset parser mishandled an ssh option"
+
+  chrome_reset_parse_pane_host "waypipe --no-gpu ssh test-host bash -s -- x" ||
+    fail "reset parser rejected a plain waypipe command"
+  [ "$chrome_reset_host" = "test-host" ] || fail "reset parser lost a plain host"
 )
 
 test_reset_remote_stop_targets_only_verified_pgid() (
@@ -3109,6 +3313,13 @@ tests=(
   test_secret_identity_maps_chrome_chromium_and_custom
   test_password_store_override_is_rejected
   test_secure_bootstrap_encodes_minimal_proxy_policy
+  test_notification_command_shape_round_trips
+  test_launch_target_accepts_notification_flag
+  test_notify_stop_listener_reaps_recorded_process
+  test_launch_with_notifications_plumbs_relay
+  test_notify_launch_failure_stops_listener
+  test_reset_parser_skips_ssh_options_before_host
+  test_reset_restarts_notification_listener
   test_secure_command_shape_recreates_through_reset_parser
   test_secure_command_line_replays_with_exact_arguments
   test_tmux_command_option_records_exact_raw_command

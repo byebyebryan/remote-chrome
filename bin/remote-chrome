@@ -25,6 +25,7 @@ Chrome options:
       --yubikey-port PORT  USB/IP TCP port, default: 3240
       --allow-existing     launch even if remote Chrome is already running
       --yes                do not prompt before killing remote Chrome
+      --no-notifications   do not relay remote notifications to this machine
 
 Reset options:
       --yes                skip reset restart/absent-group confirmations;
@@ -47,6 +48,8 @@ Environment:
   REMOTE_CHROME_RESET_TIMEOUT
   REMOTE_CHROME_SECRET_APPLICATION
   REMOTE_CHROME_SECRET_SCHEMA
+  REMOTE_CHROME_NOTIFICATIONS
+  REMOTE_CHROME_NOTIFICATION_APPS
 USAGE
 }
 
@@ -154,7 +157,9 @@ set -u
 chrome_command="${1:-}"
 secret_application="${2:-}"
 secret_schema="${3:-}"
-shift 3 2>/dev/null || exit 64
+notify_socket="${4:-}"
+notify_apps="${5:-}"
+shift 5 2>/dev/null || exit 64
 
 runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
 normal_bus="${DBUS_SESSION_BUS_ADDRESS:-}"
@@ -163,6 +168,7 @@ case "$normal_bus" in
 esac
 export DBUS_SESSION_BUS_ADDRESS="$normal_bus"
 proxy_socket="$runtime_dir/remote-chrome-dbus-proxy-${BASHPID:-$$}.sock"
+notify_forwarder_script=""
 umask 077
 proxy_pid=""
 proxy_starttime=""
@@ -171,6 +177,9 @@ proxy_socket_inode=""
 secret_pid=""
 secret_starttime=""
 secret_owned=0
+notify_pid=""
+notify_starttime=""
+notify_socket_inode=""
 chrome_pid=""
 chrome_starttime=""
 cleanup_done=0
@@ -375,6 +384,48 @@ remote_secure_cleanup() {
     fi
   fi
 
+  if [ -n "$notify_pid" ]; then
+    process_stopped=0
+    if [ -z "$notify_starttime" ]; then
+      echo "remote-chrome secure session: notify forwarder PID $notify_pid has no recorded starttime; preserving it." >&2
+      cleanup_failed=1
+    elif remote_secure_wait_owned_pid "$notify_pid" "$notify_starttime" python3; then
+      if remote_secure_stop_pid "$notify_pid" "$notify_starttime" python3; then
+        process_stopped=1
+      else
+        echo "remote-chrome secure session: owned notify forwarder PID $notify_pid remains after TERM/KILL; inspect it before retrying." >&2
+        cleanup_failed=1
+      fi
+    elif kill -0 "$notify_pid" >/dev/null 2>&1; then
+      echo "remote-chrome secure session: notify forwarder PID $notify_pid identity changed; preserving the replacement process." >&2
+      cleanup_failed=1
+    fi
+    if [ "$process_stopped" = "1" ]; then
+      wait "$notify_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if [ -n "$notify_forwarder_script" ]; then
+    rm -f -- "$notify_forwarder_script" || {
+      echo "remote-chrome secure session: could not remove forwarder script $notify_forwarder_script; inspect it before retrying." >&2
+      cleanup_failed=1
+    }
+  fi
+
+  if [ -n "$notify_socket_inode" ] && [ -S "$notify_socket" ]; then
+    current_inode="$(stat -c '%d:%i' "$notify_socket" 2>/dev/null || true)"
+    if [ -z "$current_inode" ]; then
+      echo "remote-chrome secure session: could not inspect notify socket $notify_socket; preserving it." >&2
+      cleanup_failed=1
+    elif [ "$current_inode" != "$notify_socket_inode" ]; then
+      echo "remote-chrome secure session: notify socket identity changed; preserving $notify_socket." >&2
+      cleanup_failed=1
+    elif ! rm -f -- "$notify_socket"; then
+      echo "remote-chrome secure session: could not remove notify socket $notify_socket; inspect it before retrying." >&2
+      cleanup_failed=1
+    fi
+  fi
+
   if [ -n "$secret_pid" ] && [ "$secret_owned" = "1" ]; then
     process_stopped=0
     if [ -z "$secret_starttime" ]; then
@@ -499,10 +550,14 @@ fi
 [ "$secret_owner" = "1" ] ||
   remote_secure_fail "no org.freedesktop.secrets owner became available; a KWallet prompt may have been canceled."
 
-# --filter with this single --talk rule is intentional: org.freedesktop.portal.Desktop
-# receives no talk/see/own policy and remains hidden, so GTK file choosers use Waypipe.
+# --filter with these --talk rules is intentional: Chrome needs the Secret
+# Service for the password store and org.freedesktop.Notifications so web
+# notifications reach the remote daemon instead of Chrome drawing its own
+# toplevels (which a tiling compositor will tile on the local machine).
+# org.freedesktop.portal.Desktop receives no talk/see/own policy and remains
+# hidden, so GTK file choosers use Waypipe.
 xdg-dbus-proxy "$normal_bus" "$proxy_socket" \
-  --filter --talk=org.freedesktop.secrets >/dev/null 2>&1 &
+  --filter --talk=org.freedesktop.secrets --talk=org.freedesktop.Notifications >/dev/null 2>&1 &
 proxy_pid=$!
 proxy_socket_owned=1
 proxy_starttime="$(remote_secure_pid_starttime "$proxy_pid" 2>/dev/null || true)"
@@ -519,6 +574,147 @@ for ((attempt = 0; attempt < 100; attempt++)); do
 done
 [ -n "$proxy_socket_inode" ] ||
   remote_secure_fail "xdg-dbus-proxy did not create a socket: $proxy_socket"
+
+if [ -n "$notify_socket" ]; then
+  if [ -S "$notify_socket" ]; then
+    notify_socket_inode="$(stat -c '%d:%i' "$notify_socket" 2>/dev/null || true)"
+  fi
+  notify_forwarder_script="$runtime_dir/remote-chrome-notify-forwarder-${BASHPID:-$$}.py"
+  cat >"$notify_forwarder_script" <<'REMOTE_CHROME_NOTIFY_FORWARDER'
+import json
+import signal
+import socket
+import subprocess
+import sys
+
+NOTIFY_INTERFACE = "org.freedesktop.Notifications"
+BUSCTL = ["busctl", "--user", "monitor", "--json=short", NOTIFY_INTERFACE]
+MAX_RECORD = 1 << 20
+
+
+def parse_apps(argument):
+    if argument.strip() == "*":
+        return None
+    apps = [term.strip().lower() for term in argument.split(",") if term.strip()]
+    return apps or None
+
+
+def matches(app_name, apps):
+    if apps is None:
+        return True
+    lowered = app_name.lower()
+    return any(term in lowered for term in apps)
+
+
+def hint(data, name):
+    hints = data[6] if len(data) > 6 else None
+    if not isinstance(hints, dict):
+        return None
+    entry = hints.get(name)
+    if isinstance(entry, dict):
+        return entry.get("data")
+    return None
+
+
+def extract(message):
+    if not isinstance(message, dict):
+        return None
+    if message.get("type") != "method_call":
+        return None
+    if message.get("member") != "Notify":
+        return None
+    if message.get("interface") != NOTIFY_INTERFACE:
+        return None
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list) or len(data) < 8:
+        return None
+    app_name = data[0] if isinstance(data[0], str) else ""
+    if not app_name:
+        return None
+    return {
+        "app_name": app_name,
+        "replaces_id": data[1] if isinstance(data[1], int) else 0,
+        "summary": data[3] if isinstance(data[3], str) else "",
+        "body": data[4] if isinstance(data[4], str) else "",
+        "urgency": hint(data, "urgency"),
+        "desktop_entry": hint(data, "desktop-entry"),
+    }
+
+
+def send(socket_path, blob):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(5)
+        client.connect(socket_path)
+        client.sendall(blob)
+
+
+def main(argv):
+    if len(argv) < 2 or len(argv) > 3:
+        print("usage: notify-forwarder.py SOCKET [APPS]", file=sys.stderr)
+        return 64
+    socket_path = argv[1]
+    apps = parse_apps(argv[2] if len(argv) > 2 else "chrome")
+
+    def stop(_signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    monitor = subprocess.Popen(
+        BUSCTL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        errors="replace",
+    )
+    unavailable = False
+    try:
+        for line in monitor.stdout:
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            record = extract(message)
+            if record is None or not matches(record["app_name"], apps):
+                continue
+            blob = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+            if len(blob) > MAX_RECORD:
+                continue
+            try:
+                send(socket_path, blob)
+                unavailable = False
+            except OSError as error:
+                if not unavailable:
+                    print(
+                        f"notify-forwarder: relay unavailable: {error}",
+                        file=sys.stderr,
+                    )
+                    unavailable = True
+    finally:
+        monitor.terminate()
+        try:
+            monitor.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            monitor.kill()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(130)
+REMOTE_CHROME_NOTIFY_FORWARDER
+  python3 "$notify_forwarder_script" "$notify_socket" "$notify_apps" &
+  notify_pid=$!
+  notify_starttime="$(remote_secure_pid_starttime "$notify_pid" 2>/dev/null || true)"
+  [ -n "$notify_starttime" ] ||
+    remote_secure_fail "could not record the notify forwarder PID $notify_pid starttime; refusing unverified cleanup."
+fi
 
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$proxy_socket"
 if ! secret-tool lookup application "$secret_application" \
@@ -553,14 +749,25 @@ chrome_secure_command_line() {
   local chrome_command="$2"
   local secret_application="$3"
   local secret_schema="$4"
-  shift 4
+  local notify_remote_socket="$5"
+  local notify_local_socket="$6"
+  local notify_apps="$7"
+  shift 7
   local script
   local argument quoted
 
   script="$(chrome_secure_bootstrap_script)"
+  local command_line="waypipe --no-gpu ssh"
+  if [ -n "$notify_remote_socket" ]; then
+    printf -v quoted '%q' "-R"
+    command_line+=" $quoted"
+    printf -v quoted '%q' "$notify_remote_socket:$notify_local_socket"
+    command_line+=" $quoted"
+  fi
   printf -v quoted '%q' "$host"
-  local command_line="waypipe --no-gpu ssh $quoted bash -s --"
-  for argument in "$chrome_command" "$secret_application" "$secret_schema" "$@"; do
+  command_line+=" $quoted bash -s --"
+  for argument in "$chrome_command" "$secret_application" "$secret_schema" \
+    "$notify_remote_socket" "$notify_apps" "$@"; do
     printf -v quoted '%q' "$argument"
   command_line+=" $quoted"
   done
@@ -635,7 +842,7 @@ chrome_launch_target() {
         chrome_launch_target_foreground=1
         shift
         ;;
-      --with-yubikey|--no-yubikey|--allow-existing|--yes|-y)
+      --with-yubikey|--no-yubikey|--allow-existing|--yes|-y|--no-notifications)
         shift
         ;;
       -h|--help)
@@ -701,8 +908,13 @@ chrome_launch() {
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
   local chrome_args=("--ozone-platform=wayland" "--disable-gpu" "--disable-features=Vulkan" "--new-window")
   local yubikey_args=()
+  local notifications=1
   local secure_script
   local command_line
+
+  case "${REMOTE_CHROME_NOTIFICATIONS:-1}" in
+    0|no|off|false|FALSE|NO|OFF) notifications=0 ;;
+  esac
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -760,6 +972,10 @@ chrome_launch() {
         allow_existing=1
         shift
         ;;
+      --no-notifications)
+        notifications=0
+        shift
+        ;;
       --yes|-y)
         assume_yes=1
         shift
@@ -797,7 +1013,7 @@ chrome_launch() {
 
   need ssh
   need waypipe
-  chrome_preflight "$host" "$chrome_command" "$foreground"
+  chrome_preflight "$host" "$chrome_command" "$foreground" "$notifications"
 
   local forwarding_expected=0
   if [ "$yubikey_mode" != "off" ]; then
@@ -855,19 +1071,34 @@ chrome_launch() {
   chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
 
   secure_script="$(chrome_secure_bootstrap_script)"
-  local command=(waypipe --no-gpu ssh "$host" bash -s -- "$chrome_command" \
-    "$chrome_secret_application" "$chrome_secret_schema" "${chrome_args[@]}")
+  notify_remote_socket=""
+  notify_local_socket=""
+  notify_apps=""
+  if [ "$notifications" = "1" ]; then
+    notify_prepare_session "$session" "$host"
+  fi
+  local -a command=(waypipe --no-gpu ssh)
+  if [ -n "$notify_remote_socket" ]; then
+    command+=(-R "$notify_remote_socket:$notify_local_socket")
+  fi
+  command+=("$host" bash -s -- "$chrome_command" "$chrome_secret_application" \
+    "$chrome_secret_schema" "$notify_remote_socket" "$notify_apps" "${chrome_args[@]}")
   command_line="$(chrome_secure_command_line "$host" "$chrome_command" \
-    "$chrome_secret_application" "$chrome_secret_schema" "${chrome_args[@]}")"
+    "$chrome_secret_application" "$chrome_secret_schema" "$notify_remote_socket" \
+    "$notify_local_socket" "$notify_apps" "${chrome_args[@]}")"
 
   if [ "$foreground" = "1" ]; then
+    if [ -n "$notify_local_socket" ]; then
+      notify_start_listener ||
+        echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
+    fi
     if [ "$forwarding_expected" = "1" ]; then
       # Install cleanup traps before setup so Ctrl-C during module loading,
       # tunnel creation, attach, or readiness polling cannot leak resources.
-      trap 'yk_cleanup; exit 130' INT
-      trap 'yk_cleanup; exit 143' TERM
-      trap 'yk_cleanup; exit 129' HUP
-      trap 'yk_cleanup' EXIT
+      trap 'notify_stop_listener; yk_cleanup; exit 130' INT
+      trap 'notify_stop_listener; yk_cleanup; exit 143' TERM
+      trap 'notify_stop_listener; yk_cleanup; exit 129' HUP
+      trap 'notify_stop_listener; yk_cleanup' EXIT
       yk_start
       local code=0
       if "${command[@]}" <<<"$secure_script"; then
@@ -877,17 +1108,36 @@ chrome_launch() {
       fi
       yk_stop
       trap - EXIT INT TERM HUP
+      notify_stop_listener "$host"
+      return "$code"
+    fi
+    if [ -n "$notify_local_socket" ]; then
+      trap 'notify_stop_listener' EXIT INT TERM HUP
+      local code=0
+      if "${command[@]}" <<<"$secure_script"; then
+        code=$?
+      else
+        code=$?
+      fi
+      trap - EXIT INT TERM HUP
+      notify_stop_listener "$host"
       return "$code"
     fi
     exec "${command[@]}" <<<"$secure_script"
   fi
 
+  if [ -n "$notify_local_socket" ]; then
+    trap 'notify_stop_listener' EXIT
+    notify_start_listener ||
+      echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
+  fi
   if [ "$forwarding_expected" = "1" ]; then
     chrome_launch_detached_with_yubikey "$host" "$session" "$command_line" "${yubikey_args[@]}"
   else
     chrome_tmux_create_chrome_session "$session" "$command_line" ||
       die "Could not create a reset-safe Chrome tmux session on $host."
   fi
+  trap - EXIT
 
   echo "Started remote Chrome on $host in tmux session $session."
   if [ "$forwarding_expected" = "1" ]; then
@@ -914,15 +1164,22 @@ chrome_preflight() {
   local host="$1"
   local chrome_command="$2"
   local foreground="$3"
+  local notifications="$4"
   local quoted_chrome_command
   local remote_requirements
+  local python_requirement=""
 
   if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
     die "No local Wayland/X display variables found. Run from a graphical session."
   fi
 
+  if [ "$notifications" = "1" ]; then
+    need python3
+    python_requirement=" && command -v python3 >/dev/null"
+  fi
+
   printf -v quoted_chrome_command '%q' "$chrome_command"
-  remote_requirements="command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null && command -v $quoted_chrome_command >/dev/null"
+  remote_requirements="command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null$python_requirement && command -v $quoted_chrome_command >/dev/null"
   if [ "$foreground" = "0" ]; then
     ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "$remote_requirements" ||
       die "Detached launch needs noninteractive SSH to $host plus remote bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command."
@@ -1009,6 +1266,186 @@ EOF
   exit 1
 }
 
+# Remote notification relay helpers.  The relay is per managed tmux session: a
+# local listener receives JSON records from an ssh -R streamlocal forward and
+# re-emits them through the local notification daemon.  The relay is advisory
+# only; failures disable local popups but never block or change a launch.
+notify_state_file=""
+notify_log_file=""
+notify_local_socket=""
+notify_remote_socket=""
+notify_apps=""
+notify_token=""
+notify_session=""
+notify_host=""
+
+notify_set_runtime_paths() {
+  local session="$1"
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+
+  notify_state_file="$runtime_dir/remote-chrome-notify-$(safe_name "$session").state"
+  notify_log_file="${notify_state_file}.log"
+}
+
+notify_prepare_session() {
+  local session="$1"
+  local host="$2"
+
+  notify_set_runtime_paths "$session"
+  notify_session="$session"
+  notify_host="$host"
+  notify_token="${BASHPID:-$$}.${RANDOM}.${SECONDS}"
+  notify_local_socket="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-${notify_token}.sock"
+  notify_remote_socket="/tmp/remote-chrome-notify-${notify_token}.sock"
+  notify_apps="${REMOTE_CHROME_NOTIFICATION_APPS:-chrome}"
+  # Keep the value representable in the tab-separated state file.
+  notify_apps="${notify_apps//$'\t'/}"
+  notify_apps="${notify_apps//$'\n'/}"
+  notify_apps="${notify_apps//$'\r'/}"
+}
+
+notify_load_state() {
+  local state_file="$1"
+
+  notify_state_file="$state_file"
+  notify_log_file="${state_file}.log"
+  notify_local_socket="$(notify_state_field "$state_file" local_socket)"
+  notify_remote_socket="$(notify_state_field "$state_file" remote_socket)"
+  notify_apps="$(notify_state_field "$state_file" apps)"
+  notify_session="$(notify_state_field "$state_file" session)"
+  notify_host="$(notify_state_field "$state_file" host)"
+}
+
+notify_state_field() {
+  local state_file="$1"
+  local field="$2"
+
+  awk -F '\t' -v key="$field" '$1 == key {print $2; exit}' "$state_file" 2>/dev/null || true
+}
+
+notify_pid_starttime() {
+  local pid="$1"
+  local stat_line rest
+  local -a fields=()
+
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  IFS= read -r stat_line <"/proc/$pid/stat" 2>/dev/null || return 1
+  rest="${stat_line##*) }"
+  [ "$rest" != "$stat_line" ] || return 1
+  read -r -a fields <<<"$rest"
+  [ "${#fields[@]}" -ge 20 ] || return 1
+  printf '%s\n' "${fields[19]}"
+}
+
+notify_remove_remote_socket() {
+  local host="$1"
+  local socket_path="$2"
+  local quoted
+
+  [ -n "$host" ] || return 0
+  [ -n "$socket_path" ] || return 0
+  printf -v quoted '%q' "$socket_path"
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "rm -f -- $quoted" >/dev/null 2>&1 || true
+}
+
+notify_stop_state_file() {
+  local state_file="$1"
+  local host="$2"
+  local listener_pid listener_starttime local_socket remote_socket attempt current_starttime
+
+  [ -f "$state_file" ] || return 0
+  [ -n "$host" ] || host="$(notify_state_field "$state_file" host)"
+  listener_pid="$(notify_state_field "$state_file" listener_pid)"
+  listener_starttime="$(notify_state_field "$state_file" listener_starttime)"
+  local_socket="$(notify_state_field "$state_file" local_socket)"
+  remote_socket="$(notify_state_field "$state_file" remote_socket)"
+
+  if [ -n "$listener_pid" ] && kill -0 "$listener_pid" 2>/dev/null; then
+    current_starttime="$(notify_pid_starttime "$listener_pid" 2>/dev/null || true)"
+    if [ -n "$listener_starttime" ] && [ "$current_starttime" = "$listener_starttime" ]; then
+      kill "$listener_pid" 2>/dev/null || true
+      for ((attempt = 0; attempt < 20; attempt++)); do
+        kill -0 "$listener_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      if kill -0 "$listener_pid" 2>/dev/null; then
+        kill -KILL "$listener_pid" 2>/dev/null || true
+      fi
+    else
+      echo "remote-chrome notify: listener PID $listener_pid identity changed; preserving the replacement process." >&2
+    fi
+  fi
+
+  [ -n "$local_socket" ] && rm -f -- "$local_socket" 2>/dev/null || true
+  rm -f -- "$state_file" "${state_file}.log" 2>/dev/null || true
+  notify_remove_remote_socket "$host" "$remote_socket"
+  return 0
+}
+
+notify_stop_listener() {
+  local host="${1:-${notify_host:-}}"
+
+  [ -n "$notify_state_file" ] || return 0
+  notify_stop_state_file "$notify_state_file" "$host"
+}
+
+notify_stop_all() {
+  local runtime_dir state_file
+  runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+
+  for state_file in "$runtime_dir"/remote-chrome-notify-*.state; do
+    [ -f "$state_file" ] || continue
+    notify_stop_state_file "$state_file" "$(notify_state_field "$state_file" host)"
+  done
+}
+
+notify_start_listener() {
+  local self pid starttime attempt
+
+  [ -n "$notify_local_socket" ] || return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "remote-chrome notify: python3 is required to forward notifications; notifications are not forwarded." >&2
+    return 1
+  fi
+  notify_stop_listener "${notify_host:-}"
+  : >"$notify_log_file" 2>/dev/null || true
+  self="$(script_path)"
+  nohup "$self" _notify-listener "$notify_local_socket" "$notify_log_file" \
+    </dev/null >/dev/null 2>&1 &
+  pid=$!
+  starttime="$(notify_pid_starttime "$pid" 2>/dev/null || true)"
+  if [ -z "$starttime" ]; then
+    kill "$pid" 2>/dev/null || true
+    echo "remote-chrome notify: could not record listener PID $pid starttime; notifications are not forwarded." >&2
+    return 1
+  fi
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    [ -S "$notify_local_socket" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [ ! -S "$notify_local_socket" ]; then
+    kill "$pid" 2>/dev/null || true
+    echo "remote-chrome notify: listener did not create $notify_local_socket (see $notify_log_file); notifications are not forwarded." >&2
+    return 1
+  fi
+  if ! {
+    printf 'listener_pid\t%s\n' "$pid"
+    printf 'listener_starttime\t%s\n' "$starttime"
+    printf 'local_socket\t%s\n' "$notify_local_socket"
+    printf 'remote_socket\t%s\n' "$notify_remote_socket"
+    printf 'apps\t%s\n' "$notify_apps"
+    printf 'session\t%s\n' "$notify_session"
+    printf 'host\t%s\n' "$notify_host"
+  } >"${notify_state_file}.tmp" || ! mv -f -- "${notify_state_file}.tmp" "$notify_state_file"; then
+    rm -f -- "${notify_state_file}.tmp" 2>/dev/null || true
+    notify_stop_listener "${notify_host:-}"
+    echo "remote-chrome notify: could not record listener state in $notify_state_file; notifications are not forwarded." >&2
+    return 1
+  fi
+  return 0
+}
+
 chrome_stop() {
   local host=""
   local session=""
@@ -1057,6 +1494,9 @@ chrome_stop() {
     echo "tmux session not found: $session" >&2
   fi
 
+  notify_set_runtime_paths "$session"
+  notify_stop_listener "$host"
+
   if [ -n "$host" ]; then
     yk_prepare_for_launch "$host"
     yk_stop || echo "YubiKey cleanup reported an error; inspect $yk_state_file." >&2
@@ -1098,6 +1538,7 @@ chrome_stop_all() {
   if ! yk_stop_all; then
     code=1
   fi
+  notify_stop_all
   return "$code"
 }
 
@@ -1201,12 +1642,33 @@ chrome_reset_read_pane() {
 
 chrome_reset_parse_pane_host() {
   local command_line="$1"
+  local remainder token argument
 
-  if [[ ! "$command_line" =~ ^waypipe[[:space:]]+--no-gpu[[:space:]]+ssh[[:space:]]+([^[:space:]]+)([[:space:]]|$) ]]; then
+  if [[ ! "$command_line" =~ ^waypipe[[:space:]]+--no-gpu[[:space:]]+ssh[[:space:]]+(.*)$ ]]; then
     echo "The chrome pane is not a managed waypipe SSH command; refusing reset." >&2
     return 1
   fi
-  chrome_reset_host="${BASH_REMATCH[1]}"
+  chrome_reset_host=""
+  remainder="${BASH_REMATCH[1]}"
+  # SSH options (including the optional -R notification forward) precede the
+  # destination; skip them before taking the first non-option token as host.
+  while [ -n "$remainder" ]; do
+    token="${remainder%%[[:space:]]*}"
+    remainder="${remainder#"$token"}"
+    remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+    case "$token" in
+      -R|-L|-D|-o|-p|-l|-i|-J|-F|-E|-b|-c|-m|-O|-Q|-S|-w|-W)
+        argument="${remainder%%[[:space:]]*}"
+        remainder="${remainder#"$argument"}"
+        remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+        ;;
+      -*) ;;
+      *)
+        chrome_reset_host="$token"
+        break
+        ;;
+    esac
+  done
   [ -n "$chrome_reset_host" ] || {
     echo "The managed waypipe command is missing its SSH host; refusing reset." >&2
     return 1
@@ -1222,6 +1684,7 @@ chrome_reset_find_local_ssh() {
   local current depth descendant
   local reverse_spec=""
   local remote_socket=""
+  local candidate_spec=""
   local token
   local token_index
   local server_seen
@@ -1277,11 +1740,17 @@ chrome_reset_find_local_ssh() {
           ;;
         -R)
           if [ $((token_index + 1)) -lt "${#argv[@]}" ]; then
-            reverse_spec="${argv[$((token_index + 1))]}"
+            candidate_spec="${argv[$((token_index + 1))]}"
+            case "$candidate_spec" in
+              /tmp/waypipe-server-*:/tmp/waypipe-client-*) reverse_spec="$candidate_spec" ;;
+            esac
           fi
           ;;
         -R*)
-          reverse_spec="${token#-R}"
+          candidate_spec="${token#-R}"
+          case "$candidate_spec" in
+            /tmp/waypipe-server-*:/tmp/waypipe-client-*) reverse_spec="$candidate_spec" ;;
+          esac
           ;;
         --)
           if [ $((token_index + 2)) -lt "${#argv[@]}" ] && {
@@ -1606,6 +2075,7 @@ chrome_reset() {
   local session_probe_code=0
   local session_probe_output=""
   local pane_host
+  local notify_reset_state=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1669,6 +2139,12 @@ chrome_reset() {
   fi
   host="$pane_host"
   chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" || return 1
+
+  notify_set_runtime_paths "$session"
+  if [ -f "$notify_state_file" ]; then
+    notify_load_state "$notify_state_file"
+    notify_reset_state=1
+  fi
 
   yk_prepare_for_launch "$host"
   [ -e "$yk_state_file" ] && yk_state_present=1
@@ -1751,6 +2227,10 @@ chrome_reset() {
     yk_needed=1
   fi
 
+  if [ "$notify_reset_state" = "1" ]; then
+    notify_stop_listener "$host"
+  fi
+
   if [ "$yk_needed" = "1" ]; then
     yk_preflight_for_forwarding 1
     if ! chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reset_pane_command"; then
@@ -1762,6 +2242,10 @@ chrome_reset() {
       echo "Could not recreate chrome pane in tmux session $session." >&2
       return 1
     fi
+  fi
+  if [ "$notify_reset_state" = "1" ]; then
+    notify_start_listener ||
+      echo "remote-chrome notify: listener restart failed; remote notifications will not appear locally." >&2
   fi
   echo "Reset $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
   print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
@@ -2801,10 +3285,67 @@ doctor_local_display() {
 doctor_remote_chrome() {
   local host="$1"
   local chrome_command="$2"
+  local notifications="$3"
   local quoted_chrome
+  local python_requirement=""
   printf -v quoted_chrome '%q' "$chrome_command"
+  if [ "$notifications" = "1" ]; then
+    python_requirement=" && command -v python3 >/dev/null"
+  fi
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-    "command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null && command -v $quoted_chrome >/dev/null"
+    "command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null$python_requirement && command -v $quoted_chrome >/dev/null"
+}
+
+doctor_notifications() {
+  local host="$1"
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  local state_file="" candidate listener_pid listener_starttime apps probe_app marker delivered=0
+  local attempt
+
+  for candidate in "$runtime_dir"/remote-chrome-notify-*.state; do
+    [ -f "$candidate" ] || continue
+    if [ "$(notify_state_field "$candidate" host)" = "$host" ]; then
+      state_file="$candidate"
+      break
+    fi
+  done
+  if [ -z "$state_file" ]; then
+    echo "doctor: notifications: no live relay session for $host; skipping round-trip probe"
+    return 0
+  fi
+
+  listener_pid="$(notify_state_field "$state_file" listener_pid)"
+  listener_starttime="$(notify_state_field "$state_file" listener_starttime)"
+  if [ -z "$listener_pid" ] ||
+    ! kill -0 "$listener_pid" 2>/dev/null ||
+    [ "$(notify_pid_starttime "$listener_pid" 2>/dev/null || true)" != "$listener_starttime" ]; then
+    echo "doctor: FAIL: notification listener for $host is not running; relaunch or reset the session." >&2
+    return 1
+  fi
+
+  apps="$(notify_state_field "$state_file" apps)"
+  probe_app="${apps%%,*}"
+  [ "$probe_app" = "*" ] && probe_app="chrome"
+  marker="remote-chrome doctor probe ${SECONDS}.${RANDOM}"
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+    "busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications Notify susssasa{sv}i $(printf '%q' "$probe_app") 0 '' $(printf '%q' "remote-chrome doctor") $(printf '%q' "$marker") 0 0 5000" >/dev/null 2>&1; then
+    echo "doctor: FAIL: remote notification probe failed; notifications will not be forwarded." >&2
+    return 1
+  fi
+
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    if grep -qF -- "$marker" "${state_file}.log" 2>/dev/null; then
+      delivered=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$delivered" = "1" ]; then
+    echo "doctor: ok: notification round-trip through the local notification daemon"
+    return 0
+  fi
+  echo "doctor: FAIL: probe was sent but never delivered locally; inspect ${state_file}.log and the ssh -R forward." >&2
+  return 1
 }
 
 doctor_chrome_command() {
@@ -2831,6 +3372,11 @@ chrome_doctor() {
   local code=0
   local command_name
   local local_key=0
+  local notifications_default=1
+
+  case "${REMOTE_CHROME_NOTIFICATIONS:-1}" in
+    0|no|off|false|FALSE|NO|OFF) notifications_default=0 ;;
+  esac
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2901,6 +3447,17 @@ chrome_doctor() {
       code=1
     fi
   done
+  if [ "$notifications_default" = "1" ]; then
+    if ! doctor_check "local command: python3" doctor_local_command python3; then
+      code=1
+    fi
+    if ! doctor_check "local command: notify-send" doctor_local_command notify-send; then
+      echo "doctor: install python3 and libnotify (notify-send) to forward remote notifications." >&2
+      code=1
+    fi
+  else
+    echo "doctor: notifications disabled by REMOTE_CHROME_NOTIFICATIONS; skipping relay command checks."
+  fi
   if ! doctor_check "Chrome command is a simple executable name/path" doctor_chrome_command "$chrome_command"; then
     code=1
   fi
@@ -2908,8 +3465,11 @@ chrome_doctor() {
     code=1
   fi
   if ! doctor_check "detached SSH reachability and remote waypipe/$chrome_command" \
-    doctor_remote_chrome "$host" "$chrome_command"; then
-    echo "doctor: verify BatchMode SSH and install bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, plus $chrome_command on $host." >&2
+    doctor_remote_chrome "$host" "$chrome_command" "$notifications_default"; then
+    echo "doctor: verify BatchMode SSH and install bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, python3, plus $chrome_command on $host." >&2
+    code=1
+  fi
+  if ! doctor_notifications "$host"; then
     code=1
   fi
 
@@ -4335,6 +4895,189 @@ _yubikey_run_main() {
   yk_run
 }
 
+_notify_listener_main() {
+  exec python3 - "$@" <<'REMOTE_CHROME_NOTIFY_LISTENER'
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+MAX_SUMMARY = 512
+MAX_BODY = 4096
+MAX_APP = 128
+MAX_DESKTOP_ENTRY = 128
+MAX_LINE = 1 << 20
+RATE_LIMIT = 10
+RATE_WINDOW = 1.0
+URGENCY = {0: "low", 1: "normal", 2: "critical"}
+TAGS = re.compile(r"<[^>]*>")
+ENTITIES = (
+    ("&lt;", "<"),
+    ("&gt;", ">"),
+    ("&quot;", '"'),
+    ("&#39;", "'"),
+    ("&nbsp;", " "),
+    ("&amp;", "&"),
+)
+SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def log_line(log_path, message):
+    try:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.time():.0f}\t{message}\n")
+    except OSError:
+        pass
+
+
+def clean_text(value, limit):
+    if not isinstance(value, str):
+        return ""
+    text = value
+    for source, target in ENTITIES:
+        text = text.replace(source, target)
+    previous = None
+    while previous != text:
+        previous = text
+        text = TAGS.sub("", text)
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def clean_name(value, limit):
+    if not isinstance(value, str):
+        return ""
+    return SAFE_NAME.sub("-", value)[:limit].strip("-")
+
+
+def deliver(record, log_path):
+    summary = clean_text(record.get("summary"), MAX_SUMMARY)
+    body = clean_text(record.get("body"), MAX_BODY)
+    if not summary and not body:
+        return
+    app_name = clean_text(record.get("app_name"), MAX_APP) or "remote-chrome"
+    urgency = URGENCY.get(record.get("urgency"), "normal")
+    desktop_entry = clean_name(record.get("desktop_entry"), MAX_DESKTOP_ENTRY)
+
+    command = ["notify-send", f"--app-name={app_name}", f"--urgency={urgency}"]
+    if desktop_entry:
+        command.append(f"--hint=string:desktop-entry:{desktop_entry}")
+    command.append(summary or body)
+    if summary and body:
+        command.append(body)
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log_line(log_path, f"delivery-failed\t{error}")
+        return
+    if result.returncode == 0:
+        log_line(log_path, f"delivered\t{app_name}\t{summary}")
+    else:
+        log_line(log_path, f"delivery-failed\tstatus {result.returncode}")
+
+
+def handle_connection(connection, recent, log_path):
+    buffer = b""
+    connection.settimeout(5)
+    try:
+        while True:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+            if len(buffer) > MAX_LINE:
+                log_line(log_path, "oversized-record-dropped")
+                return
+    except OSError:
+        pass
+    for line in buffer.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        now = time.monotonic()
+        recent[:] = [stamp for stamp in recent if now - stamp < RATE_WINDOW]
+        if len(recent) >= RATE_LIMIT:
+            log_line(log_path, "rate-limited")
+            continue
+        recent.append(now)
+        deliver(record, log_path)
+
+
+def main(argv):
+    if len(argv) != 3:
+        print("usage: _notify-listener SOCKET LOG", file=sys.stderr)
+        return 64
+    socket_path = argv[1]
+    log_path = argv[2]
+    try:
+        sys.stderr = open(log_path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        pass
+
+    if os.path.exists(socket_path):
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(socket_path)
+        except OSError:
+            os.unlink(socket_path)
+        else:
+            print(
+                f"notify-listener: another listener owns {socket_path}",
+                file=sys.stderr,
+            )
+            return 73
+        finally:
+            probe.close()
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(socket_path)
+    os.chmod(socket_path, 0o600)
+    server.listen(8)
+
+    def stop(_signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    log_line(log_path, f"started\tpid {os.getpid()}")
+    recent = []
+    try:
+        while True:
+            try:
+                connection, _ = server.accept()
+            except InterruptedError:
+                continue
+            with connection:
+                handle_connection(connection, recent, log_path)
+    finally:
+        server.close()
+        try:
+            os.unlink(socket_path)
+        except FileNotFoundError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+REMOTE_CHROME_NOTIFY_LISTENER
+}
+
 main() {
   local subcommand="${1:-}"
 
@@ -4366,6 +5109,10 @@ main() {
     _yubikey-run)
       shift
       _yubikey_run_main "$@"
+      ;;
+    _notify-listener)
+      shift
+      _notify_listener_main "$@"
       ;;
     -V|--version|version)
       echo "$PROGRAM $VERSION"
