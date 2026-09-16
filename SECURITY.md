@@ -23,6 +23,7 @@ Security-sensitive areas include:
 - YubiKey device selection, binding, attachment, and cleanup
 - local and remote `sudo` boundaries
 - lifecycle state and process ownership
+- the notification relay socket, its payload handling, and reverse-forward construction
 
 Reports will be acknowledged as soon as practical. Validation and remediation
 timelines depend on severity and reproducibility.

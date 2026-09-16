@@ -28,6 +28,7 @@ Local host requirements:
 - `ssh`
 - `waypipe`
 - `tmux`
+- `python3` and `notify-send` (from `libnotify`) for the notification relay
 - a graphical Wayland session
 
 Remote host requirements:
@@ -38,6 +39,7 @@ Remote host requirements:
 - `secret-tool` (from `libsecret`)
 - `ksecretd` (from the remote desktop's Secret Service/KWallet package)
 - `busctl` (from `systemd`)
+- `python3` for the notification relay
 - `google-chrome-stable`
 
 The launcher starts Chrome with:
@@ -55,11 +57,11 @@ installation would add churn and surprising behavior.
 Every launch runs an embedded bootstrap inside the remote Waypipe environment.
 It connects `xdg-dbus-proxy` to the normal remote user session bus (normally
 `DBUS_SESSION_BUS_ADDRESS=/run/user/1000/bus`, normalized to the D-Bus
-`unix:path=` form) with a minimal filtered
-policy that permits only `org.freedesktop.secrets`. The portal service
-`org.freedesktop.portal.Desktop` is intentionally hidden, so Chromium's GTK
-file chooser remains a Waypipe-rendered chooser instead of using the remote
-desktop portal.
+`unix:path=` form) with a filtered policy that permits only
+`org.freedesktop.secrets` and `org.freedesktop.Notifications`. The portal
+service `org.freedesktop.portal.Desktop` is intentionally hidden, so
+Chromium's GTK file chooser remains a Waypipe-rendered chooser instead of
+using the remote desktop portal.
 
 Before Chrome starts, the bootstrap looks up Chrome Safe Storage through that
 proxy with `secret-tool lookup application chrome xdg:schema
@@ -109,6 +111,35 @@ remote-chrome launch remote-host --chrome-command /opt/my-browser
 
 The launcher fails with actionable guidance when an unknown executable has no
 explicit mapping.
+
+### Remote Notifications
+
+Allowing `org.freedesktop.Notifications` through the proxy means Chrome sends
+web notifications to the remote daemon instead of drawing its own toplevel
+windows (which a tiling compositor renders as tiled windows). On top of that,
+every launch with notifications enabled also opens a per-session `ssh -R`
+unix socket. A small embedded forwarder on the remote host watches
+`org.freedesktop.Notifications` and writes one JSON record per notification to
+that socket; a local listener re-emits them through this machine's
+notification daemon. This is enabled by default.
+
+```bash
+remote-chrome remote-host --no-notifications   # keep remote notifications off this machine
+export REMOTE_CHROME_NOTIFICATIONS=0           # same, for every launch
+export REMOTE_CHROME_NOTIFICATION_APPS=chrome,chromium  # substring allowlist, default: chrome
+```
+
+Allowlist terms are comma-separated, case-insensitive substrings and must not
+contain spaces. `--no-notifications` disables only the relay. The proxy
+permission stays in place, so Chrome never falls back to its own notification
+windows.
+
+Relayed notifications are informational only: content is forwarded
+(summary/body/urgency/app identity), but clicks, buttons, and inline replies
+are not, HTML is stripped, and remote icon files are not transferred. A live
+relay session is probed end to end by `doctor HOST`; per-session activity is
+logged next to the session state in
+`${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
 
 ### YubiKey Forwarding
 
@@ -196,7 +227,7 @@ untouched.
 On an Arch-family remote host, install the remote-side packages:
 
 ```bash
-ssh remote-host 'sudo pacman -S --needed waypipe xdg-dbus-proxy libsecret systemd usbip coreutils libfido2'
+ssh remote-host 'sudo pacman -S --needed waypipe xdg-dbus-proxy libsecret systemd usbip coreutils libfido2 python3'
 ```
 
 Install Google Chrome on the remote host through the appropriate channel for
@@ -208,7 +239,7 @@ that machine. Package names for `ksecretd` vary by desktop/KWallet version;
 On an Arch-family local host, install the runtime dependencies:
 
 ```bash
-sudo pacman -S --needed waypipe tmux usbip iproute2 coreutils
+sudo pacman -S --needed waypipe tmux usbip iproute2 coreutils python3 libnotify
 ```
 
 Clone the repository:
@@ -509,10 +540,18 @@ behavior. `remote-chrome stop HOST` tears the forwarding down together with the
 Chrome session.
 
 The secure-session proxy is deliberately scoped to the remote user's existing
-session bus and Secret Service. It does not grant Chrome access to desktop
-portals, does not print or persist the Safe Storage value, and does not stop a
-pre-existing Secret Service owner. If Chrome exits or the Waypipe process group
-is reset, only proxy/ksecretd resources owned by that bootstrap are cleaned.
+session bus, Secret Service, and notifications. It does not grant Chrome access
+to desktop portals, does not print or persist the Safe Storage value, and does
+not stop a pre-existing Secret Service owner. If Chrome exits or the Waypipe
+process group is reset, only proxy/ksecretd resources owned by that bootstrap
+are cleaned.
+
+The notification relay adds a per-session reverse unix socket that carries
+notification records (app name, summary, body, urgency hints) to a local
+listener; no D-Bus access crosses that socket, and it is removed with the
+session. Any same-user process on the remote host can send records to it, so
+relayed notifications are treated as untrusted input: content is stripped and
+length-limited, delivered without shell interpolation, and rate-limited.
 
 ## Development
 

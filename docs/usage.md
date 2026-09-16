@@ -121,16 +121,19 @@ session is stale or degraded. `status` without a host remains the managed-state
 overview. `doctor remote-host` checks local display and
 commands, detached SSH plus remote Waypipe/Chrome and secure-session
 dependencies, and USB/IP module prerequisites without loading modules, looking
-up a wallet secret, unlocking a wallet, or changing USB/IP state.
+up a wallet secret, unlocking a wallet, or changing USB/IP state. When a
+notification relay session is live, it also sends a probe notification from
+the remote host and verifies that it arrives through the local daemon.
 
 ## Secure session and GTK chooser
 
 Launches send an embedded bootstrap through the direct `waypipe --no-gpu ssh
 HOST` pane command. The bootstrap connects `xdg-dbus-proxy` to the normal remote
 user session bus (`DBUS_SESSION_BUS_ADDRESS=/run/user/1000/bus`, normalized to
-`unix:path=`) and enables only `--talk=org.freedesktop.secrets` under
-`--filter`. `org.freedesktop.portal.Desktop` is not visible through that proxy,
-so Chromium's GTK file chooser travels over Waypipe instead of using a remote
+`unix:path=`) and enables only `--talk=org.freedesktop.secrets` and
+`--talk=org.freedesktop.Notifications` under `--filter`.
+`org.freedesktop.portal.Desktop` is not visible through that proxy, so
+Chromium's GTK file chooser travels over Waypipe instead of using a remote
 desktop portal.
 
 The bootstrap first reuses an existing `org.freedesktop.secrets` owner. If none
@@ -173,7 +176,42 @@ remote-chrome launch remote-host --chrome-command /opt/my-browser
 ```
 
 Remote secure-session requirements are `bash`, `waypipe`, `xdg-dbus-proxy`,
-`secret-tool`, `ksecretd`, `busctl`, and the selected Chrome executable.
+`secret-tool`, `ksecretd`, `busctl`, `python3`, and the selected Chrome
+executable.
+
+## Remote notifications
+
+The proxy permits `org.freedesktop.Notifications` as well as
+`org.freedesktop.secrets`, so Chrome delivers web notifications to the remote
+daemon instead of drawing its own toplevel windows; the portal service stays
+hidden. With notifications enabled (the default), the launch also opens a
+per-session `ssh -R` unix socket. An embedded forwarder on the remote host
+watches the notification service and relays one JSON record per notification;
+a local listener sanitizes the content and re-emits it through this machine's
+notification daemon.
+
+```bash
+remote-chrome remote-host --no-notifications
+REMOTE_CHROME_NOTIFICATIONS=0 remote-chrome remote-host
+REMOTE_CHROME_NOTIFICATION_APPS=chrome,chromium remote-chrome remote-host
+```
+
+`--no-notifications` and `REMOTE_CHROME_NOTIFICATIONS=0` disable only the
+relay; the proxy permission remains, so Chrome still does not fall back to its
+own notification windows. `REMOTE_CHROME_NOTIFICATION_APPS` is a
+comma-separated, case-insensitive substring allowlist (default: `chrome`; use
+`*` to relay everything). Keep terms free of spaces: the detached command
+quotes values correctly, but the foreground argument path cannot carry a space
+inside one value.
+
+Relayed notifications are informational: summary, body, urgency, and app
+identity are forwarded, but clicks, buttons, inline replies, HTML markup, and
+remote icon files are not. Notification forwarding failures are advisory and
+never block or change a launch; local popups simply stop. `stop`, `reset`, and
+`stop` without a host clean up every recorded listener, local socket, remote
+socket, and state file. `doctor HOST` performs a round-trip probe when a live
+relay session is present. Per-session activity is recorded in
+`${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
 
 Cleanup attempts every applicable resource in order. If remote detach, tunnel
 close, local unbind, or owned-daemon cleanup remains unresolved, `stop` returns
