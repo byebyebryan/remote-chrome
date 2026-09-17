@@ -1376,7 +1376,9 @@ notify_stop_state_file() {
     fi
   fi
 
-  [ -n "$local_socket" ] && rm -f -- "$local_socket" 2>/dev/null || true
+  if [ -n "$local_socket" ]; then
+    rm -f -- "$local_socket" 2>/dev/null || true
+  fi
   rm -f -- "$state_file" "${state_file}.log" 2>/dev/null || true
   notify_remove_remote_socket "$host" "$remote_socket"
   return 0
