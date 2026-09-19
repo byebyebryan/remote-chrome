@@ -744,6 +744,31 @@ exit "$chrome_status"
 REMOTE_CHROME_SECURE_BOOTSTRAP
 }
 
+chrome_bootstrap_script_path() {
+  local session="$1"
+
+  printf '%s/remote-chrome-%s.bootstrap.sh\n' \
+    "${XDG_RUNTIME_DIR:-/tmp}" "$(safe_name "$session")"
+}
+
+chrome_prepare_bootstrap_script() {
+  local session="$1"
+  local script_path
+
+  script_path="$(chrome_bootstrap_script_path "$session")"
+  if ! (umask 077 && chrome_secure_bootstrap_script >"$script_path"); then
+    echo "Could not write the remote Chrome bootstrap script to $script_path." >&2
+    return 1
+  fi
+  printf '%s\n' "$script_path"
+}
+
+chrome_remove_bootstrap_script() {
+  local session="$1"
+
+  rm -f -- "$(chrome_bootstrap_script_path "$session")" 2>/dev/null || true
+}
+
 chrome_secure_command_line() {
   local host="$1"
   local chrome_command="$2"
@@ -752,11 +777,10 @@ chrome_secure_command_line() {
   local notify_remote_socket="$5"
   local notify_local_socket="$6"
   local notify_apps="$7"
-  shift 7
-  local script
+  local bootstrap_script="$8"
+  shift 8
   local argument quoted
 
-  script="$(chrome_secure_bootstrap_script)"
   local command_line="waypipe --no-gpu ssh"
   if [ -n "$notify_remote_socket" ]; then
     printf -v quoted '%q' "-R"
@@ -772,11 +796,12 @@ chrome_secure_command_line() {
   command_line+=" $quoted"
   done
   # tmux may render pane_start_command with wrappers/escaping, so reset stores
-  # this raw direct Waypipe command in a session-scoped user option. Keep the
-  # command one line and use Bash's %q to carry the literal bootstrap over
-  # stdin without eval or remote installation.
-  printf -v quoted '%q' "$script"
-  command_line+=" <<< $quoted"
+  # this raw direct Waypipe command in a session-scoped user option. tmux
+  # rejects a single command line over 16 KiB, and the bootstrap exceeds that,
+  # so feed the frozen bootstrap from its session-scoped file over stdin
+  # instead of embedding it, without eval or remote installation.
+  printf -v quoted '%q' "$bootstrap_script"
+  command_line+=" < $quoted"
   printf '%s\n' "$command_line"
 }
 
@@ -1083,10 +1108,6 @@ chrome_launch() {
   fi
   command+=("$host" bash -s -- "$chrome_command" "$chrome_secret_application" \
     "$chrome_secret_schema" "$notify_remote_socket" "$notify_apps" "${chrome_args[@]}")
-  command_line="$(chrome_secure_command_line "$host" "$chrome_command" \
-    "$chrome_secret_application" "$chrome_secret_schema" "$notify_remote_socket" \
-    "$notify_local_socket" "$notify_apps" "${chrome_args[@]}")"
-
   if [ "$foreground" = "1" ]; then
     if [ -n "$notify_local_socket" ]; then
       notify_start_listener ||
@@ -1131,11 +1152,19 @@ chrome_launch() {
     notify_start_listener ||
       echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
   fi
+  local bootstrap_script
+  bootstrap_script="$(chrome_prepare_bootstrap_script "$session")" ||
+    die "Could not prepare the remote Chrome bootstrap script for $host."
+  command_line="$(chrome_secure_command_line "$host" "$chrome_command" \
+    "$chrome_secret_application" "$chrome_secret_schema" "$notify_remote_socket" \
+    "$notify_local_socket" "$notify_apps" "$bootstrap_script" "${chrome_args[@]}")"
   if [ "$forwarding_expected" = "1" ]; then
     chrome_launch_detached_with_yubikey "$host" "$session" "$command_line" "${yubikey_args[@]}"
   else
-    chrome_tmux_create_chrome_session "$session" "$command_line" ||
+    if ! chrome_tmux_create_chrome_session "$session" "$command_line"; then
+      chrome_remove_bootstrap_script "$session"
       die "Could not create a reset-safe Chrome tmux session on $host."
+    fi
   fi
   trap - EXIT
 
@@ -1500,6 +1529,7 @@ chrome_stop() {
   else
     echo "tmux session not found: $session" >&2
   fi
+  chrome_remove_bootstrap_script "$session"
 
   notify_set_runtime_paths "$session"
   notify_stop_listener "$host"
@@ -1531,6 +1561,7 @@ chrome_stop_all() {
     [ -n "$session" ] || continue
     if tmux kill-session -t "$session"; then
       echo "Stopped tmux session $session."
+      chrome_remove_bootstrap_script "$session"
       stopped_sessions=$((stopped_sessions + 1))
     else
       echo "Could not stop tmux session $session." >&2
@@ -2237,6 +2268,10 @@ chrome_reset() {
   if [ "$notify_reset_state" = "1" ]; then
     notify_stop_listener "$host"
   fi
+
+  # Recreate the session-scoped bootstrap the canonical pane command reads from
+  # stdin; it may have been pruned from the runtime directory since launch.
+  chrome_prepare_bootstrap_script "$session" >/dev/null || return 1
 
   if [ "$yk_needed" = "1" ]; then
     yk_preflight_for_forwarding 1
@@ -4392,6 +4427,7 @@ chrome_detached_cleanup() {
   chrome_detached_cleanup_done=1
   if [ -n "$chrome_detached_session" ]; then
     tmux kill-session -t "$chrome_detached_session" >/dev/null 2>&1 || true
+    chrome_remove_bootstrap_script "$chrome_detached_session"
   fi
   if [ "$chrome_detached_yk_owned" = "1" ]; then
     if ! yk_stop; then
@@ -4496,6 +4532,7 @@ chrome_launch_detached_with_yubikey() {
 
   if [ -e "$yk_state_file" ] || [ -e "$yk_attempt_lock" ]; then
     echo "YubiKey forwarding already has an active or provisional attempt for $yk_remote; stop it before launching again." >&2
+    chrome_remove_bootstrap_script "$session"
     trap - INT TERM HUP
     return 1
   fi

@@ -564,25 +564,29 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
   assert_contains "$script" "secret-tool lookup application"
   assert_contains "$script" "--password-store=gnome-libsecret"
 
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" --new-window)"
+  command_line="$(chrome_secure_command_line test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   [[ "$command_line" == waypipe\ --no-gpu\ ssh\ test-host\ * ]] ||
     fail "secure detached command did not preserve the direct Waypipe SSH prefix"
   assert_contains "$command_line" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2"
-  assert_contains "$command_line" "<<< $'"
+  assert_contains "$command_line" "< /tmp/remote-chrome-test-host.bootstrap.sh"
   [[ "$command_line" != *$'\n'* ]] || fail "secure detached command contains a literal newline"
+  [ "${#command_line}" -lt 16384 ] ||
+    fail "secure detached command exceeds tmux's single-command length limit"
 )
 
 test_notification_command_shape_round_trips() (
   local enabled disabled
   enabled="$(chrome_secure_command_line test-host google-chrome-stable chrome \
     chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock \
-    /run/user/1000/remote-chrome-notify-1.sock chrome --new-window)"
+    /run/user/1000/remote-chrome-notify-1.sock chrome \
+    /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   assert_contains "$enabled" "-R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock"
   assert_contains "$enabled" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock chrome"
   [[ "$enabled" != *$'\n'* ]] || fail "notify command line contains a literal newline"
 
   disabled="$(chrome_secure_command_line test-host google-chrome-stable chrome \
-    chrome_libsecret_os_crypt_password_v2 "" "" "")"
+    chrome_libsecret_os_crypt_password_v2 "" "" "" \
+    /tmp/remote-chrome-test-host.bootstrap.sh)"
   [[ "$disabled" != *"-R "* ]] || fail "disabled notify command line unexpectedly forwards a socket"
 )
 
@@ -705,7 +709,8 @@ test_secure_command_shape_recreates_through_reset_parser() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   command_line="$(chrome_secure_command_line test-host google-chrome-stable \
-    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" --new-window)"
+    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
+    /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   [ "${command_line#waypipe --no-gpu ssh test-host}" != "$command_line" ] ||
     fail "generated secure pane command lost its direct Waypipe SSH prefix"
   [[ "$command_line" != *$'\n'* ]] || fail "generated secure pane command contains a literal newline"
@@ -751,9 +756,10 @@ test_secure_command_line_replays_with_exact_arguments() (
     'printf "%s\n" "$*" >"$SECURE_WAYPIPE_ARGS"' \
     'cat >"$SECURE_WAYPIPE_STDIN"' >"$fake_bin/waypipe"
   chmod +x "$fake_bin/waypipe"
+  chrome_secure_bootstrap_script >"$test_dir/bootstrap.sh"
   command_line="$(chrome_secure_command_line test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
-    '--profile-directory=Profile One' '--test=a;b')"
+    "$test_dir/bootstrap.sh" '--profile-directory=Profile One' '--test=a;b')"
   output="$(PATH="$fake_bin:$PATH" SECURE_WAYPIPE_ARGS="$test_dir/args" \
     SECURE_WAYPIPE_STDIN="$test_dir/stdin" bash -c "$command_line" 2>&1)" ||
     fail "replayed secure pane command failed: $output"
@@ -761,6 +767,22 @@ test_secure_command_line_replays_with_exact_arguments() (
   assert_contains "$(cat "$test_dir/args")" "--profile-directory=Profile One"
   assert_contains "$(cat "$test_dir/args")" "--test=a;b"
   assert_contains "$(cat "$test_dir/stdin")" "remote_secure_pid_stat"
+)
+
+test_prepare_bootstrap_script_writes_and_removes_session_file() (
+  local test_dir script_path
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  script_path="$(chrome_prepare_bootstrap_script remote-chrome-test-host)" ||
+    fail "preparing the bootstrap script failed"
+  [ "$script_path" = "$test_dir/remote-chrome-remote-chrome-test-host.bootstrap.sh" ] ||
+    fail "unexpected bootstrap script path: $script_path"
+  [ -f "$script_path" ] || fail "bootstrap script file was not created"
+  assert_contains "$(cat "$script_path")" "remote_secure_pid_stat"
+
+  chrome_remove_bootstrap_script remote-chrome-test-host
+  assert_file_missing "$script_path"
 )
 
 test_tmux_command_option_records_exact_raw_command() (
@@ -834,7 +856,8 @@ test_reset_recreation_restores_canonical_option_for_repeated_reset() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   command_line="$(chrome_secure_command_line test-host google-chrome-stable \
-    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" --new-window)"
+    chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
+    /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   option_value="$command_line"
   need() { :; }
   yk_prepare_for_launch() {
@@ -3322,6 +3345,7 @@ tests=(
   test_reset_restarts_notification_listener
   test_secure_command_shape_recreates_through_reset_parser
   test_secure_command_line_replays_with_exact_arguments
+  test_prepare_bootstrap_script_writes_and_removes_session_file
   test_tmux_command_option_records_exact_raw_command
   test_reset_reads_canonical_option_before_teardown
   test_tmux_command_option_failure_cleans_new_session
