@@ -13,7 +13,7 @@ Bug reports and focused pull requests are welcome.
 
 ## Development
 
-Install ShellCheck, then run:
+Install ShellCheck and tmux, then run:
 
 ```bash
 ./scripts/check
@@ -23,6 +23,9 @@ Changes to command parsing or lifecycle behavior should include a focused test
 in `tests/remote-chrome_test.sh`. Tests must mock privileged and remote
 operations; they must not bind a real USB device, start forwarding, or alter a
 remote host.
+
+The real tmux regression check uses its own socket and an empty configuration;
+it never attaches to or changes the developer's tmux server.
 
 Keep commits small and use an imperative summary such as `fix: clean up a
 failed tunnel`.

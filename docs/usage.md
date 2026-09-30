@@ -38,6 +38,11 @@ managed YubiKey forwarding; pre-1.3 sessions may fall back to a direct pane
 command, while wrapped pane metadata is never decoded. It does not transparently
 resume an old Waypipe stream.
 
+The normal `chrome` and `yubikey` windows can both be open. For stale YubiKey
+forwarding from Starship to Snap, run `remote-chrome reset snap` on Starship;
+this tears down the old forwarding and waits for the new FIDO attachment before
+restarting Chrome. Save in-page work before resetting.
+
 By default, the launcher detects a local YubiKey matching the configured USB
 vendor/product (default `1050:0407`). If one is present, forwarding is expected;
 the local and remote USB/IP module/sudo preflight must pass before tmux or Chrome
@@ -87,6 +92,33 @@ window and forwarding keep running until you stop the whole session:
 ```bash
 remote-chrome stop remote-host
 ```
+
+If you return to Snap while its browser is still remoted from Starship, run
+the same bare stop command on Snap:
+
+```bash
+remote-chrome stop
+```
+
+New launches register incoming sessions on the browser host. Bare `stop`
+makes one SSH stop request per live incoming session, with a two-second limit.
+Accepted display host cleanup finishes independently; the recorded browser
+bootstrap is released locally if necessary. Gone processes and records from
+earlier boots are simply discarded. Tracking does not block launches, run a
+background service, or retry automatically. `status` shows incoming live/stale
+records without modifying them. Display hosts retain their USB/IP recovery
+state when cleanup fails, for a later local `stop`.
+
+Stop and launch once with the updated launcher to enable incoming tracking. The
+explicit form remains available for older untracked sessions:
+
+```bash
+remote-chrome stop snap --from starship
+```
+
+The target SSH name must match the original launch. Omit it to stop all managed
+sessions on Starship, or use `--session NAME` for a custom session. This explicit
+form requires noninteractive SSH and returns failure if source cleanup fails.
 
 `stop` is the explicit teardown that kills the session and tears down forwarding
 together. It also cleans provisional state left by an interrupted setup.

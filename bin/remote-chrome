@@ -9,7 +9,7 @@ usage() {
 Usage:
   $PROGRAM HOST [-- CHROME_ARGS...]
   $PROGRAM launch HOST [-- CHROME_ARGS...]
-  $PROGRAM stop [HOST]
+  $PROGRAM stop [HOST] [--from SOURCE]
   $PROGRAM status [HOST]
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
@@ -30,6 +30,11 @@ Chrome options:
 Reset options:
       --yes                skip reset restart/absent-group confirmations;
                            identity checks and safety refusals still apply
+
+Stop options:
+      without HOST         stop outgoing and tracked incoming sessions
+      --from SOURCE        run cleanup on the forwarding host over SSH;
+                           omit HOST to stop all its managed sessions
 
 General options:
       -h, --help           print help and exit
@@ -182,6 +187,7 @@ notify_starttime=""
 notify_socket_inode=""
 chrome_pid=""
 chrome_starttime=""
+incoming_state=""
 cleanup_done=0
 cleanup_status=0
 
@@ -475,6 +481,7 @@ remote_secure_cleanup() {
     fi
   fi
   cleanup_status="$cleanup_failed"
+  [ -z "$incoming_state" ] || rm -f -- "$incoming_state" || true
   return "$cleanup_status"
 }
 
@@ -549,6 +556,37 @@ else
 fi
 [ "$secret_owner" = "1" ] ||
   remote_secure_fail "no org.freedesktop.secrets owner became available; a KWallet prompt may have been canceled."
+
+# Record only this bootstrap, not arbitrary SSH connections. This advisory
+# record lets a local stop request the originating session's normal cleanup.
+# Failed tracking never blocks a browser launch.
+if [ -n "${REMOTE_CHROME_ORIGIN_TARGET:-}" ]; then
+  incoming_pid="${BASHPID:-$$}"
+  incoming_starttime="$(remote_secure_pid_starttime "$incoming_pid" 2>/dev/null || true)"
+  incoming_peer="${SSH_CONNECTION:-}"
+  incoming_peer="${incoming_peer%% *}"
+  incoming_peer="${incoming_peer:-${REMOTE_CHROME_ORIGIN_NAME:-}}"
+  if [ -n "$incoming_starttime" ]; then
+    incoming_pending="$(mktemp "$runtime_dir/remote-chrome-incoming-XXXXXXXX.tmp" 2>/dev/null || true)"
+    if [ -n "$incoming_pending" ]; then
+      incoming_state="${incoming_pending%.tmp}.state"
+      if ! {
+        printf 'pid\t%s\n' "$incoming_pid"
+        printf 'starttime\t%s\n' "$incoming_starttime"
+        printf 'boot_id\t%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+        printf 'peer\t%s\n' "$incoming_peer"
+        printf 'name\t%s\n' "${REMOTE_CHROME_ORIGIN_NAME:-}"
+        printf 'user\t%s\n' "${REMOTE_CHROME_ORIGIN_USER:-}"
+        printf 'session\t%s\n' "${REMOTE_CHROME_ORIGIN_SESSION:-}"
+        printf 'target\t%s\n' "$REMOTE_CHROME_ORIGIN_TARGET"
+      } >"$incoming_pending" || ! mv -f -- "$incoming_pending" "$incoming_state"; then
+        rm -f -- "$incoming_state" "$incoming_pending" || true
+        incoming_state=""
+        echo "remote-chrome: incoming session tracking unavailable; local stop will not discover this session." >&2
+      fi
+    fi
+  fi
+fi
 
 # --filter with these --talk rules is intentional: Chrome needs the Secret
 # Service for the password store and org.freedesktop.Notifications so web
@@ -769,6 +807,18 @@ chrome_remove_bootstrap_script() {
   rm -f -- "$(chrome_bootstrap_script_path "$session")" 2>/dev/null || true
 }
 
+chrome_origin_args=()
+
+chrome_set_origin_metadata() {
+  local host="$1" session="$2" foreground="$3"
+  [ "$foreground" != "1" ] || session=""
+  chrome_origin_args=(env
+    "REMOTE_CHROME_ORIGIN_TARGET=$host"
+    "REMOTE_CHROME_ORIGIN_SESSION=$session"
+    "REMOTE_CHROME_ORIGIN_USER=$(id -un)"
+    "REMOTE_CHROME_ORIGIN_NAME=$(hostname)")
+}
+
 chrome_secure_command_line() {
   local host="$1"
   local chrome_command="$2"
@@ -789,8 +839,9 @@ chrome_secure_command_line() {
     command_line+=" $quoted"
   fi
   printf -v quoted '%q' "$host"
-  command_line+=" $quoted bash -s --"
-  for argument in "$chrome_command" "$secret_application" "$secret_schema" \
+  command_line+=" $quoted"
+  for argument in "${chrome_origin_args[@]}" bash -s -- \
+    "$chrome_command" "$secret_application" "$secret_schema" \
     "$notify_remote_socket" "$notify_apps" "$@"; do
     printf -v quoted '%q' "$argument"
   command_line+=" $quoted"
@@ -1096,6 +1147,7 @@ chrome_launch() {
   chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
 
   secure_script="$(chrome_secure_bootstrap_script)"
+  chrome_set_origin_metadata "$host" "$session" "$foreground"
   notify_remote_socket=""
   notify_local_socket=""
   notify_apps=""
@@ -1106,7 +1158,7 @@ chrome_launch() {
   if [ -n "$notify_remote_socket" ]; then
     command+=(-R "$notify_remote_socket:$notify_local_socket")
   fi
-  command+=("$host" bash -s -- "$chrome_command" "$chrome_secret_application" \
+  command+=("$host" "${chrome_origin_args[@]}" bash -s -- "$chrome_command" "$chrome_secret_application" \
     "$chrome_secret_schema" "$notify_remote_socket" "$notify_apps" "${chrome_args[@]}")
   if [ "$foreground" = "1" ]; then
     if [ -n "$notify_local_socket" ]; then
@@ -1482,12 +1534,151 @@ notify_start_listener() {
   return 0
 }
 
+chrome_stop_from_source() {
+  local source="$1"
+  local host="$2"
+  local session="$3"
+  local request_only="${4:-0}"
+  local connect_timeout=5
+  local -a stop_args=(stop)
+  local remote_command
+  local -a ssh_command=(ssh)
+  command -v ssh >/dev/null || { echo "Missing cleanup command: ssh" >&2; return 1; }
+  if [ "$request_only" = "1" ]; then
+    command -v timeout >/dev/null || { echo "Missing cleanup command: timeout" >&2; return 1; }
+    # Bound only the best-effort request. Accepted USB/IP cleanup runs on the
+    # display host independently, so a slow detach does not block this desktop.
+    connect_timeout=2
+    ssh_command=(timeout --foreground 2 ssh)
+  fi
+
+  [ -n "$host" ] && stop_args+=("$host")
+  [ -n "$session" ] && stop_args+=(--session "$session")
+  # SSH joins its command arguments into a shell command. Quote each value
+  # once before sending it so host/session names remain literal arguments.
+  remote_command="$(quote_command bash -s -- "$request_only" "${stop_args[@]}")"
+  "${ssh_command[@]}" -o BatchMode=yes -o "ConnectTimeout=$connect_timeout" -o ConnectionAttempts=1 \
+    "$source" "$remote_command" <<'REMOTE_CHROME_SOURCE_STOP'
+set -euo pipefail
+request_only="$1"
+shift
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+launcher="$(command -v remote-chrome || true)"
+if [ -z "$launcher" ] && [ -x "$HOME/.local/bin/remote-chrome" ]; then
+  launcher="$HOME/.local/bin/remote-chrome"
+fi
+if [ -z "$launcher" ]; then
+  echo "remote-chrome is not installed on the forwarding host; install it before using stop --from." >&2
+  exit 1
+fi
+if [ "$request_only" = "1" ]; then
+  # Release the SSH channel immediately, but let the existing cleanup finish.
+  # Failed cleanup keeps its normal USB/IP recovery state for a later stop.
+  nohup "$launcher" "$@" </dev/null >/dev/null 2>&1 &
+else
+  exec "$launcher" "$@"
+fi
+REMOTE_CHROME_SOURCE_STOP
+}
+
+chrome_incoming_live() {
+  local state="$1" pid starttime boot_id process_stat
+  pid="$(notify_state_field "$state" pid)"
+  starttime="$(notify_state_field "$state" starttime)"
+  boot_id="$(notify_state_field "$state" boot_id)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
+  [[ "$starttime" =~ ^[0-9]+$ ]] || return 1
+  [ "$boot_id" = "$(cat /proc/sys/kernel/random/boot_id)" ] || return 1
+  IFS= read -r process_stat 2>/dev/null <"/proc/$pid/stat" || return 1
+  case "${process_stat##*) }" in Z\ *|X\ *) return 1 ;; esac
+  [ "$(notify_pid_starttime "$pid" 2>/dev/null || true)" = "$starttime" ]
+}
+
+chrome_status_incoming() {
+  local state found=0 phase name session
+  echo "Incoming remote-chrome sessions:"
+  for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
+    [ -f "$state" ] && [ -O "$state" ] && [ ! -L "$state" ] || continue
+    found=1
+    phase=stale
+    chrome_incoming_live "$state" && phase=live
+    name="$(notify_state_field "$state" name)"
+    session="$(notify_state_field "$state" session)"
+    printf '  %s: %s (%s)\n' "${name:-$(notify_state_field "$state" peer)}" \
+      "${session:-foreground}" "$phase"
+  done
+  [ "$found" = "1" ] || echo "  none"
+}
+
+chrome_stop_incoming() {
+  local state pid peer name source user session target attempt code=0
+  for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
+    [ -f "$state" ] && [ -O "$state" ] && [ ! -L "$state" ] || continue
+    if ! chrome_incoming_live "$state"; then
+      rm -f -- "$state" || code=1
+      continue
+    fi
+    pid="$(notify_state_field "$state" pid)"
+    peer="$(notify_state_field "$state" peer)"
+    name="$(notify_state_field "$state" name)"
+    source="$peer"
+    # The hostname preserves SSH config and known-hosts entries; the peer IP
+    # is a fallback when the originating launcher did not provide a name.
+    if [[ "$name" =~ ^[[:alnum:]_.:%-]+$ ]] && [[ "$name" != -* ]]; then
+      source="$name"
+    fi
+    user="$(notify_state_field "$state" user)"
+    session="$(notify_state_field "$state" session)"
+    target="$(notify_state_field "$state" target)"
+    if [[ "$source" =~ ^[[:alnum:]_.:%-]+$ ]] && [[ "$source" != -* ]] &&
+      [[ "$user" =~ ^[[:alnum:]_][[:alnum:]_.-]*$ ]] &&
+      [ -n "$session" ] && [ -n "$target" ] && [[ "$target" != -* ]]; then
+      if ! chrome_stop_from_source "$user@$source" "$target" "$session" 1; then
+        echo "Display host cleanup unavailable for $peer; releasing the incoming browser locally." >&2
+      fi
+    fi
+    # Recheck the recorded PID/start time after SSH; a stale record must never
+    # signal a replacement process. TERM runs the bootstrap's owned cleanup.
+    if chrome_incoming_live "$state"; then
+      kill -TERM "$pid" 2>/dev/null || true
+      for ((attempt = 0; attempt < 50; attempt++)); do
+        chrome_incoming_live "$state" || break
+        sleep 0.1
+      done
+    fi
+    if chrome_incoming_live "$state"; then
+      echo "Incoming browser from $peer is still shutting down; retry stop." >&2
+      code=1
+    else
+      rm -f -- "$state" || code=1
+      echo "Released incoming remote-chrome session from $peer."
+    fi
+  done
+  return "$code"
+}
+
 chrome_stop() {
   local host=""
   local session=""
+  local source=""
+  local source_requested=0
+  local code=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --from)
+        [ "$#" -ge 2 ] || die "$1 requires a forwarding host."
+        source="$2"
+        source_requested=1
+        shift 2
+        ;;
+      --from=*)
+        source="${1#*=}"
+        source_requested=1
+        shift
+        ;;
       --session)
         [ "$#" -ge 2 ] || die "$1 requires a session name."
         session="$2"
@@ -1512,6 +1703,13 @@ chrome_stop() {
     esac
   done
 
+  if [ "$source_requested" = "1" ]; then
+    [ -n "$source" ] && [[ "$source" != -* ]] ||
+      die "--from requires an SSH forwarding host (for example starship)."
+    chrome_stop_from_source "$source" "$host" "$session"
+    return
+  fi
+
   if [ -z "$host" ] && [ -z "$session" ]; then
     chrome_stop_all
     return
@@ -1524,20 +1722,29 @@ chrome_stop() {
 
   need tmux
   if tmux has-session -t "$session" 2>/dev/null; then
-    tmux kill-session -t "$session"
-    echo "Stopped tmux session $session."
+    if tmux kill-session -t "$session"; then
+      echo "Stopped tmux session $session."
+      chrome_remove_bootstrap_script "$session"
+    else
+      echo "Could not stop tmux session $session." >&2
+      code=1
+    fi
   else
     echo "tmux session not found: $session" >&2
+    chrome_remove_bootstrap_script "$session"
   fi
-  chrome_remove_bootstrap_script "$session"
 
   notify_set_runtime_paths "$session"
-  notify_stop_listener "$host"
+  notify_stop_listener "$host" || code=1
 
   if [ -n "$host" ]; then
     yk_prepare_for_launch "$host"
-    yk_stop || echo "YubiKey cleanup reported an error; inspect $yk_state_file." >&2
+    if ! yk_stop; then
+      echo "YubiKey cleanup reported an error; inspect $yk_state_file." >&2
+      code=1
+    fi
   fi
+  return "$code"
 }
 
 chrome_managed_sessions() {
@@ -1576,7 +1783,8 @@ chrome_stop_all() {
   if ! yk_stop_all; then
     code=1
   fi
-  notify_stop_all
+  notify_stop_all || code=1
+  chrome_stop_incoming || code=1
   return "$code"
 }
 
@@ -1644,7 +1852,7 @@ chrome_reset_read_pane() {
   chrome_reset_pane_command=""
 
   if ! pane_output="$(tmux list-panes -t "$session:chrome" \
-    -F '#{pane_id}\t#{pane_pid}\t#{pane_start_command}' 2>&1)"; then
+    -F $'#{pane_id}\t#{pane_pid}\t#{pane_start_command}' 2>&1)"; then
     [ -n "$pane_output" ] && printf '%s\n' "$pane_output" >&2
     echo "Could not inspect the exact chrome pane in tmux session $session." >&2
     return 1
@@ -2336,6 +2544,7 @@ chrome_status_all() {
 
   echo "Tool-owned orphan usbipd daemons:"
   yk_status_orphan_usbipd
+  chrome_status_incoming
 
   return "$code"
 }

@@ -354,6 +354,12 @@ To force that reset explicitly after suspend or network loss:
 remote-chrome reset remote-host
 ```
 
+For example, run `remote-chrome reset snap` on Starship when the forwarded
+YubiKey needs reconnecting. Reset supports the normal `chrome` and `yubikey`
+windows together: it cleans up the old USB/IP forwarding, starts it again,
+waits for FIDO readiness, and recreates Chrome. It restarts the browser, so
+save any in-page work first.
+
 `reset` is a managed restart, not transparent Waypipe stream resumption. It
 uses the exact Waypipe SSH reverse socket and remote process group from the
 selected `chrome` pane, warns that unsaved in-page state may be lost, then
@@ -373,6 +379,40 @@ exact attach, status, and stop commands, including a custom session name.
 
 A user systemd service would also work, but tmux keeps this tool dependency-light
 and easy to inspect.
+
+### Return To The Remote Host's Desktop
+
+If Chrome is still remoted from Starship to Snap when you return to Snap,
+opening local links can send them to that existing browser. On Snap, run:
+
+```bash
+remote-chrome stop
+```
+
+New launches leave a private runtime record on the browser host. Bare `stop`
+stops local outgoing sessions and discovers recorded incoming sessions. For
+each live incoming session, it makes one SSH stop request with a two-second
+limit. An accepted request runs the display host's normal cleanup independently.
+It then signals the exact recorded browser bootstrap locally if still needed,
+letting its existing Chrome/proxy cleanup run even if the display host could
+not be reached. Dead records and records from a previous boot are discarded.
+
+Tracking is best effort and never blocks a launch. There is no background
+service or automatic retry. If display host cleanup could not be requested or
+completed, its own USB/IP recovery state remains available for a later `stop`
+there. `status` shows incoming records as live or stale without changing them.
+
+Stop and launch once with the updated launcher to register incoming sessions. For an
+older untracked session, or to explicitly select a display host, use:
+
+```bash
+remote-chrome stop snap --from starship
+```
+
+The target name must match the original launch's SSH name. Omit it to stop
+every managed session on Starship; `--session NAME` selects a custom session.
+This explicit form requires noninteractive SSH to Starship and returns failure
+if SSH or source cleanup fails.
 
 ### Existing Remote Chrome Processes
 
@@ -555,15 +595,17 @@ length-limited, delivered without shell interpolation, and rate-limited.
 
 ## Development
 
-Install ShellCheck and run the repository checks:
+Install ShellCheck and tmux and run the repository checks:
 
 ```bash
-sudo pacman -S --needed shellcheck
+sudo pacman -S --needed shellcheck tmux
 ./scripts/check
 ```
 
 The check script runs Bash syntax validation, ShellCheck, the command-level
 test suite, and `git diff --check`. The same checks run in GitHub Actions.
+The suite includes a real tmux pane-format check on a private socket with an
+empty configuration; SSH and USB/IP operations remain mocked.
 
 ## License
 

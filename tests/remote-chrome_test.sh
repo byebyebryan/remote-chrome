@@ -665,6 +665,8 @@ test_launch_with_notifications_plumbs_relay() (
   events="$(cat "$events_file")"
   assert_contains "$events" "start-listener"
   assert_contains "$events" "-R /tmp/remote-chrome-notify-"
+  assert_contains "$events" "REMOTE_CHROME_ORIGIN_TARGET=test-host"
+  assert_contains "$events" "REMOTE_CHROME_ORIGIN_SESSION=remote-chrome-test-host"
   [[ "$events" != *stop-listener* ]] ||
     fail "successful notify-enabled launch stopped its listener"
 )
@@ -829,6 +831,24 @@ test_reset_reads_canonical_option_before_teardown() (
     fail "reset did not use the canonical tmux command option"
 )
 
+test_reset_reads_real_tmux_chrome_and_yubikey_windows() (
+  local test_dir session="remote-chrome-test-host" command_line expected_pid
+  test_dir="$(mktemp -d)"
+  trap 'command tmux -S "$test_dir/tmux.sock" kill-server >/dev/null 2>&1 || true; rm -rf "$test_dir"' EXIT
+  # An explicit socket and empty configuration keep this real tmux check away
+  # from the developer's server. No browser, SSH, or USB operation is started.
+  tmux() { command tmux -S "$test_dir/tmux.sock" -f /dev/null "$@"; }
+  tmux new-session -d -s "$session" -n yubikey 'sleep 60'
+  tmux new-window -d -t "$session" -n chrome 'sleep 60'
+  command_line="waypipe --no-gpu ssh test-host bash -s -- arg"
+  chrome_tmux_record_command "$session" "$command_line"
+  expected_pid="$(tmux display-message -p -t "$session:chrome" '#{pane_pid}')"
+
+  chrome_reset_read_pane "$session"
+  [ "$chrome_reset_pane_pid" = "$expected_pid" ] || fail "real tmux pane PID was not parsed"
+  [ "$chrome_reset_pane_command" = "$command_line" ] || fail "real tmux canonical command was not read"
+)
+
 test_tmux_command_option_failure_cleans_new_session() (
   local events="" command_line="waypipe --no-gpu ssh test-host bash -s -- arg <<< x" code=0
   tmux() {
@@ -936,6 +956,12 @@ test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
     'exit "${SECRET_TOOL_STATUS:-0}"' >"$fake_bin/secret-tool"
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS $*" >"$SECURE_CHROME_EVENTS"' \
+    'for state in "$XDG_RUNTIME_DIR"/remote-chrome-incoming-*.state; do' \
+    '  [ -f "$state" ] || continue' \
+    '  cp "$state" "$SECURE_INCOMING_RECORD"' \
+    '  stat -c %a "$state" >"${SECURE_INCOMING_RECORD}.mode"' \
+    '  printf "%s\n" "$PPID" >"${SECURE_INCOMING_RECORD}.parent"' \
+    'done' \
     'exit "${CHROME_STATUS:-0}"' >"$fake_bin/fake-chrome"
   printf '%s\n' '#!/usr/bin/env bash' \
     'exit 0' >"$fake_bin/busctl"
@@ -949,6 +975,10 @@ test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
     XDG_RUNTIME_DIR="$test_dir" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     SECURE_EVENTS="$test_dir/events" SECURE_SECRET_EVENTS="$test_dir/secret" \
     SECURE_CHROME_EVENTS="$test_dir/chrome" CHROME_STATUS=7 \
+    SECURE_INCOMING_RECORD="$test_dir/incoming-record" \
+    REMOTE_CHROME_ORIGIN_TARGET=test-host REMOTE_CHROME_ORIGIN_SESSION=remote-chrome-test-host \
+    REMOTE_CHROME_ORIGIN_USER=bryan REMOTE_CHROME_ORIGIN_NAME=display-host \
+    SSH_CONNECTION='127.0.0.1 50000 127.0.0.2 22' \
     bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 "" "" --new-window 2>&1)" || code=$?
   [ "$code" -eq 7 ] || fail "secure bootstrap did not preserve Chrome exit status: $code ($output)"
   assert_contains "$(cat "$test_dir/secret")" "unix:path=$test_dir/remote-chrome-dbus-proxy-"
@@ -957,6 +987,12 @@ test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
   [[ "$(cat "$test_dir/events")" != *started* ]] || fail "pre-existing Secret Service owner was replaced"
   [ -z "$(find "$test_dir" -name 'remote-chrome-dbus-proxy-*.sock' -print -quit)" ] ||
     fail "proxy socket survived existing-owner cleanup"
+  [ "$(notify_state_field "$test_dir/incoming-record" pid)" = "$(cat "$test_dir/incoming-record.parent")" ] ||
+    fail "incoming tracking recorded a subshell instead of the bootstrap"
+  [ "$(notify_state_field "$test_dir/incoming-record" peer)" = 127.0.0.1 ] || fail "incoming peer was not captured"
+  [ "$(notify_state_field "$test_dir/incoming-record" session)" = remote-chrome-test-host ] || fail "incoming session was not captured"
+  [ "$(cat "$test_dir/incoming-record.mode")" = 600 ] || fail "incoming tracking is not private"
+  [ -z "$(find "$test_dir" -name 'remote-chrome-incoming-*.state' -print -quit)" ] || fail "incoming record survived normal exit"
 )
 
 test_secure_bootstrap_cleanup_failure_preserves_replaced_proxy_socket() (
@@ -2842,6 +2878,253 @@ test_cleanup_failed_launch_retains_unreachable_state() (
   assert_contains "$(cat "$yk_state_file")" $'phase\tcleanup-failed'
 )
 
+test_write_incoming_record() {
+  local state="$1" pid="$2"
+  {
+    printf 'pid\t%s\n' "$pid"
+    printf 'starttime\t%s\n' "$(notify_pid_starttime "$pid")"
+    printf 'boot_id\t%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+    printf 'peer\t%s\n' 127.0.0.1
+    printf 'user\t%s\n' bryan
+    printf 'session\t%s\n' remote-chrome-test-host
+    printf 'target\t%s\n' test-host
+  } >"$state"
+}
+
+test_incoming_stale_identity_is_pruned_without_contact_or_signal() (
+  local test_dir pid state
+  test_dir="$(mktemp -d)"
+  command sleep 60 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  state="$test_dir/remote-chrome-incoming-test.state"
+  test_write_incoming_record "$state" "$pid"
+  sed -i 's/^starttime.*/starttime\t0/' "$state"
+  chrome_stop_from_source() { fail "stale incoming record contacted a display host"; }
+  chrome_stop_incoming
+  assert_file_missing "$state"
+  kill -0 "$pid" || fail "stale incoming record signaled a replacement process"
+
+  test_write_incoming_record "$state" "$pid"
+  sed -i 's/^boot_id.*/boot_id\tprevious-boot/' "$state"
+  chrome_stop_incoming
+  assert_file_missing "$state"
+  kill -0 "$pid" || fail "previous-boot record signaled a process"
+)
+
+test_incoming_unreachable_display_host_releases_only_recorded_process() (
+  local test_dir pid unrelated_pid state events="" output
+  test_dir="$(mktemp -d)"
+  command sleep 60 &
+  pid=$!
+  command sleep 60 &
+  unrelated_pid=$!
+  trap 'kill "$pid" "$unrelated_pid" 2>/dev/null || true; wait "$pid" "$unrelated_pid" 2>/dev/null || true; rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  state="$test_dir/remote-chrome-incoming-test.state"
+  test_write_incoming_record "$state" "$pid"
+  chrome_stop_from_source() { events+="$*"; return 255; }
+  chrome_stop_incoming >"$test_dir/output" 2>&1
+  output="$(cat "$test_dir/output")"
+  assert_contains "$events" "bryan@127.0.0.1 test-host remote-chrome-test-host 1"
+  assert_contains "$output" "releasing the incoming browser locally"
+  assert_file_missing "$state"
+  if kill -0 "$pid" 2>/dev/null; then
+    fail "unreachable display host prevented local release"
+  fi
+  kill -0 "$unrelated_pid" || fail "incoming stop terminated an unrelated process"
+)
+
+test_incoming_stop_requests_source_cleanup_and_status_is_read_only() (
+  local test_dir pid state events="" output
+  test_dir="$(mktemp -d)"
+  command sleep 60 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  state="$test_dir/remote-chrome-incoming-test.state"
+  test_write_incoming_record "$state" "$pid"
+  printf 'name\tstarship\n' >>"$state"
+  output="$(chrome_status_incoming)"
+  assert_contains "$output" 'starship:'
+  assert_contains "$output" "remote-chrome-test-host (live)"
+  [ -f "$state" ] || fail "incoming status removed state"
+  kill -0 "$pid" || fail "incoming status signaled a process"
+  chrome_stop_from_source() { events+="$*"; kill -TERM "$pid"; }
+  chrome_managed_sessions() { return 0; }
+  yk_stop_all() { return 0; }
+  notify_stop_all() { return 0; }
+  main stop
+  assert_contains "$events" "bryan@starship test-host remote-chrome-test-host 1"
+  assert_file_missing "$state"
+)
+
+test_stop_from_source_preserves_arguments_and_cleanup_status() (
+  local test_dir fake_bin ssh_args="" code=0
+  local session='a session; echo unexpected'
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir "$fake_bin"
+  cat >"$fake_bin/remote-chrome" <<'FAKE_SOURCE_LAUNCHER'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$SOURCE_STOP_ARGS"
+exit "${SOURCE_STOP_STATUS:-0}"
+FAKE_SOURCE_LAUNCHER
+  chmod +x "$fake_bin/remote-chrome"
+  export SOURCE_STOP_ARGS="$test_dir/args"
+  export SOURCE_STOP_STATUS=0
+  ssh() {
+    ssh_args="$*"
+    local remote_command="${!#}"
+    PATH="$fake_bin:$PATH" bash -c "$remote_command"
+  }
+  tmux() { fail "source stop touched local tmux"; }
+  yk_stop() { fail "source stop touched local USB/IP state"; }
+  notify_stop_listener() { fail "source stop touched local notifications"; }
+
+  main stop snap --from starship --session "$session"
+  assert_contains "$ssh_args" "starship bash -s -- 0 stop"
+  [ "$(cat "$SOURCE_STOP_ARGS")" = "$(printf '%s\n' stop snap --session "$session")" ] ||
+    fail "source stop changed the target or custom session arguments"
+
+  main stop --from=starship
+  [ "$(cat "$SOURCE_STOP_ARGS")" = stop ] || fail "hostless source stop did not request all managed sessions"
+
+  SOURCE_STOP_STATUS=17
+  if main stop snap --from starship; then
+    fail "source cleanup failure was reported as success"
+  else
+    code=$?
+  fi
+  [ "$code" -eq 17 ] || fail "source cleanup status was not propagated: $code"
+)
+
+test_stop_from_source_connection_failure_is_reported() (
+  local code=0 events=""
+  ssh() { events+="ssh "; return 255; }
+  tmux() { fail "failed source SSH touched local tmux"; }
+  if main stop --from starship; then
+    fail "source SSH failure was reported as success"
+  else
+    code=$?
+  fi
+  [ "$code" -eq 255 ] || fail "source SSH status was not propagated"
+  [ "$events" = "ssh " ] || fail "source stop did not attempt SSH"
+)
+
+test_incoming_stop_request_returns_before_source_cleanup_finishes() (
+  local test_dir fake_bin attempt
+  local session='a session; echo unexpected'
+  test_dir="$(mktemp -d)"
+  trap 'if [ -f "$test_dir/pid" ]; then kill "$(cat "$test_dir/pid")" 2>/dev/null || true; fi; rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir "$fake_bin"
+  cat >"$fake_bin/ssh" <<'FAKE_REQUEST_SSH'
+#!/usr/bin/env bash
+exec bash -c "${!#}"
+FAKE_REQUEST_SSH
+  cat >"$fake_bin/remote-chrome" <<'FAKE_SLOW_SOURCE_STOP'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$SOURCE_STOP_PID"
+printf '%s\n' "$@" >"$SOURCE_STOP_ARGS"
+for ((attempt = 0; attempt < 100; attempt++)); do
+  if [ -f "$SOURCE_STOP_RELEASE" ]; then
+    touch "$SOURCE_STOP_DONE"
+    exit 0
+  fi
+  sleep 0.05
+done
+exit 1
+FAKE_SLOW_SOURCE_STOP
+  chmod +x "$fake_bin/ssh" "$fake_bin/remote-chrome"
+  export PATH="$fake_bin:$PATH"
+  export SOURCE_STOP_PID="$test_dir/pid" SOURCE_STOP_ARGS="$test_dir/args"
+  export SOURCE_STOP_RELEASE="$test_dir/release" SOURCE_STOP_DONE="$test_dir/done"
+
+  chrome_stop_from_source starship snap "$session" 1
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    [ -f "$SOURCE_STOP_ARGS" ] && break
+    sleep 0.02
+  done
+  [ -f "$SOURCE_STOP_ARGS" ] || fail "accepted stop request did not start cleanup"
+  [ "$(cat "$SOURCE_STOP_ARGS")" = "$(printf '%s\n' stop snap --session "$session")" ] ||
+    fail "background cleanup changed the target or custom session arguments"
+  assert_file_missing "$SOURCE_STOP_DONE"
+
+  touch "$SOURCE_STOP_RELEASE"
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    [ -f "$SOURCE_STOP_DONE" ] && break
+    sleep 0.02
+  done
+  [ -f "$SOURCE_STOP_DONE" ] || fail "cleanup did not survive the closed SSH channel"
+)
+
+test_incoming_stop_request_bounds_a_stalled_ssh_channel() (
+  local test_dir code=0 started elapsed
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/ssh" <<'FAKE_STALLED_SSH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$SOURCE_SSH_ARGS"
+exec sleep 60
+FAKE_STALLED_SSH
+  chmod +x "$test_dir/bin/ssh"
+  export PATH="$test_dir/bin:$PATH" SOURCE_SSH_ARGS="$test_dir/ssh-args"
+  started="$SECONDS"
+  if chrome_stop_from_source starship snap remote-chrome-snap 1; then
+    fail "stalled SSH stop request unexpectedly succeeded"
+  else
+    code=$?
+  fi
+  elapsed=$((SECONDS - started))
+  [ "$code" -eq 124 ] || fail "stalled request was not timed out: $code"
+  [ "$elapsed" -le 3 ] || fail "stalled request took longer than its two-second budget: $elapsed"
+  assert_contains "$(cat "$SOURCE_SSH_ARGS")" 'ConnectTimeout=2'
+  assert_contains "$(cat "$SOURCE_SSH_ARGS")" 'ConnectionAttempts=1'
+  assert_contains "$(cat "$SOURCE_SSH_ARGS")" 'BatchMode=yes'
+)
+
+test_stop_returns_failure_when_target_cleanup_is_incomplete() (
+  local test_dir events="" code=0 kill_code=0 cleanup_code=1
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      kill-session) events+="kill "; return "$kill_code" ;;
+      *) return 1 ;;
+    esac
+  }
+  notify_stop_listener() { events+="notify-stop "; }
+  yk_stop() { events+="yk-stop "; return "$cleanup_code"; }
+  printf '%s\n' 'recovery evidence' >"$test_dir/control.sock.state"
+  if chrome_stop test-host >"$test_dir/output" 2>&1; then
+    fail "incomplete YubiKey cleanup was reported as success"
+  else
+    code=$?
+  fi
+  [ "$code" -eq 1 ] || fail "incomplete cleanup returned an unexpected status"
+  [ -f "$test_dir/control.sock.state" ] || fail "stop removed recovery evidence"
+  assert_contains "$events" "notify-stop"
+  assert_contains "$events" "yk-stop"
+
+  kill_code=1
+  cleanup_code=0
+  events=""
+  if chrome_stop test-host >"$test_dir/output" 2>&1; then
+    fail "failed tmux teardown was reported as success"
+  fi
+  assert_contains "$events" "yk-stop"
+)
+
 test_reset_help_and_target_selection() (
   local test_dir output code=0
   test_dir="$(mktemp -d)"
@@ -3328,6 +3611,14 @@ tests=(
   test_stop_cleans_yubikey_without_yubikey_window
   test_stop_without_host_stops_only_managed_tmux_sessions
   test_stop_without_host_cleans_all_recorded_yubikey_states
+  test_stop_from_source_preserves_arguments_and_cleanup_status
+  test_stop_from_source_connection_failure_is_reported
+  test_incoming_stop_request_returns_before_source_cleanup_finishes
+  test_incoming_stop_request_bounds_a_stalled_ssh_channel
+  test_stop_returns_failure_when_target_cleanup_is_incomplete
+  test_incoming_stale_identity_is_pruned_without_contact_or_signal
+  test_incoming_unreachable_display_host_releases_only_recorded_process
+  test_incoming_stop_requests_source_cleanup_and_status_is_read_only
   test_remote_preflight_uses_scoped_sudo_command
   test_remote_detach_failure_is_reported
   test_remote_reboot_without_vhci_proves_attachment_absent
@@ -3348,6 +3639,7 @@ tests=(
   test_prepare_bootstrap_script_writes_and_removes_session_file
   test_tmux_command_option_records_exact_raw_command
   test_reset_reads_canonical_option_before_teardown
+  test_reset_reads_real_tmux_chrome_and_yubikey_windows
   test_tmux_command_option_failure_cleans_new_session
   test_reset_recreation_restores_canonical_option_for_repeated_reset
   test_secure_bootstrap_has_signal_and_partial_failure_cleanup
