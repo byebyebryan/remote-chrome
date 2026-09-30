@@ -29,6 +29,8 @@ Local host requirements:
 - `waypipe`
 - `tmux`
 - `python3` and `notify-send` (from `libnotify`) for the notification relay
+- `busctl` (from `systemd`) to detect local notification markup support;
+  without it, relayed bodies use plain text
 - a graphical Wayland session
 
 Remote host requirements:
@@ -136,7 +138,11 @@ windows.
 
 Relayed notifications are informational only: content is forwarded
 (summary/body/urgency/app identity), but clicks, buttons, and inline replies
-are not, HTML is stripped, and remote icon files are not transferred. A live
+are not, and remote icon files are not transferred. Bodies retain `<b>`, `<i>`,
+and `<u>` formatting when the local daemon supports markup; line breaks and
+`<br>` are preserved. Other tags and all attributes are removed, while literal
+text and entities are escaped for display. Summaries stay plain text. If local
+markup support cannot be detected, bodies fall back to plain text. A live
 relay session is probed end to end by `doctor HOST`; per-session activity is
 logged next to the session state in
 `${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
@@ -590,7 +596,8 @@ The notification relay adds a per-session reverse unix socket that carries
 notification records (app name, summary, body, urgency hints) to a local
 listener; no D-Bus access crosses that socket, and it is removed with the
 session. Any same-user process on the remote host can send records to it, so
-relayed notifications are treated as untrusted input: content is stripped and
+relayed notifications are treated as untrusted input: bodies permit only basic
+formatting tags without attributes, other text is sanitized, content is
 length-limited, delivered without shell interpolation, and rate-limited.
 
 ## Development

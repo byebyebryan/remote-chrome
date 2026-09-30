@@ -596,6 +596,107 @@ test_launch_target_accepts_notification_flag() (
   [ "$chrome_launch_target_host" = "test-host" ] || fail "launch target lost the host"
 )
 
+test_notification_listener_preserves_markup_and_plain_text_fallback() (
+  local test_dir fake_bin mode socket log listener_pid=""
+  test_dir="$(mktemp -d)"
+  trap 'if [ -n "$listener_pid" ]; then kill "$listener_pid" 2>/dev/null || true; wait "$listener_pid" 2>/dev/null || true; fi; rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir "$fake_bin"
+  cat >"$fake_bin/busctl" <<'FAKE_NOTIFICATION_CAPABILITIES'
+#!/usr/bin/env bash
+case "$NOTIFY_TEST_MODE" in
+  markup) printf '%s\n' '{"type":"as","data":[["body","body-markup"]]}' ;;
+  plain) printf '%s\n' '{"type":"as","data":[["body"]]}' ;;
+  unavailable) exit 1 ;;
+esac
+FAKE_NOTIFICATION_CAPABILITIES
+  cat >"$fake_bin/notify-send" <<'FAKE_NOTIFICATION_DELIVERY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["NOTIFY_TEST_CAPTURE"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\n")
+FAKE_NOTIFICATION_DELIVERY
+  chmod +x "$fake_bin/busctl" "$fake_bin/notify-send"
+  export PATH="$fake_bin:$PATH"
+  for mode in markup plain unavailable; do
+    export NOTIFY_TEST_MODE="$mode" NOTIFY_TEST_CAPTURE="$test_dir/$mode.jsonl"
+    socket="$test_dir/$mode.sock"
+    log="$test_dir/$mode.log"
+    command bash "$repo_root/bin/remote-chrome" _notify-listener "$socket" "$log" &
+    listener_pid=$!
+    python3 - "$socket" "$NOTIFY_TEST_CAPTURE" "$mode" <<'VERIFY_NOTIFICATION_DELIVERY'
+import json
+import socket
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+socket_path, capture_path, mode = sys.argv[1:]
+markup = mode == "markup"
+cases = [
+    ("<b>Notice</b>", '<b title="ignored">Bold</b> <i>italic</i> <u>underline</u><br/>next\nlast &amp; &#169;',
+     "Notice", "<b>Bold</b> <i>italic</i> <u>underline</u><br/>next<br/>last &amp; ©",
+     "Bold italic underline\nnext\nlast & ©"),
+    ("Literal", "&lt;b&gt;literal&lt;/b&gt; &amp; &lt; 2", "Literal",
+     "&lt;b&gt;literal&lt;/b&gt; &amp; &lt; 2", "<b>literal</b> & < 2"),
+    ("Unsupported", '<span style="color:red">Color</span> <a href="https://example.invalid">link</a><img src="/tmp/unread">',
+     "Unsupported", "Color link", "Color link"),
+    ("Mismatched", "<b><i>nested</b> rest</i>", "Mismatched",
+     "<b><i>nested</i></b> rest", "nested rest"),
+    ("Truncated", "<b>" + "x" * 8192 + "</b>", "Truncated", None, None),
+    ("", "<i>Body only</i>", "Body only", "<i>Body only</i>", "Body only"),
+    ("Nested", "<b>" * 2000 + "text" + "</b>" * 2000, "Nested", None, "text"),
+    ("Entities", "<u>" + "&amp;" * 8192 + "</u>", "Entities", None, None),
+    ("No body", "", "No body", "", ""),
+]
+deadline = time.monotonic() + 5
+while not Path(socket_path).is_socket():
+    if time.monotonic() >= deadline:
+        raise AssertionError("notification listener did not create its isolated socket")
+    time.sleep(0.02)
+for summary, body, *_ in cases:
+    record = {"app_name": "Chrome", "summary": summary, "body": body, "urgency": 2}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(socket_path)
+        client.sendall(json.dumps(record).encode() + b"\n")
+deadline = time.monotonic() + 5
+while True:
+    path = Path(capture_path)
+    lines = path.read_text().splitlines() if path.exists() else []
+    if len(lines) == len(cases):
+        break
+    if time.monotonic() >= deadline:
+        raise AssertionError(f"only {len(lines)} notifications were delivered in {mode} mode")
+    time.sleep(0.02)
+for args, case in zip(map(json.loads, lines), cases):
+    _, _, expected_summary, rich, plain = case
+    assert args[:2] == ["--app-name=Chrome", "--urgency=critical"], args
+    if not case[1]:
+        assert args[2:] == [expected_summary], args
+        continue
+    assert args[-2] == expected_summary, args
+    body = args[-1]
+    expected = rich if markup else plain
+    if expected is not None:
+        if markup:
+            expected = "<b></b>" + expected
+        assert body == expected, (mode, case[0], body, expected)
+    assert len(body) <= 4096, (mode, case[0], len(body))
+    if markup:
+        ET.fromstring(f"<body>{body}</body>")
+    elif case[0] in {"Truncated", "Entities"}:
+        assert len(body) == 4096, (mode, case[0], len(body))
+VERIFY_NOTIFICATION_DELIVERY
+    kill "$listener_pid"
+    wait "$listener_pid"
+    listener_pid=""
+    assert_file_missing "$socket"
+  done
+)
+
 test_notify_stop_listener_reaps_recorded_process() (
   local test_dir state_file socket log pid starttime
   test_dir="$(mktemp -d)"
@@ -3631,6 +3732,7 @@ tests=(
   test_secure_bootstrap_encodes_minimal_proxy_policy
   test_notification_command_shape_round_trips
   test_launch_target_accepts_notification_flag
+  test_notification_listener_preserves_markup_and_plain_text_fallback
   test_notify_stop_listener_reaps_recorded_process
   test_launch_with_notifications_plumbs_relay
   test_notify_launch_failure_stops_listener

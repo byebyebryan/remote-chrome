@@ -237,8 +237,13 @@ quotes values correctly, but the foreground argument path cannot carry a space
 inside one value.
 
 Relayed notifications are informational: summary, body, urgency, and app
-identity are forwarded, but clicks, buttons, inline replies, HTML markup, and
-remote icon files are not. Notification forwarding failures are advisory and
+identity are forwarded, but clicks, buttons, inline replies, and remote icon
+files are not. Bodies preserve `<b>`, `<i>`, and `<u>` when the local daemon
+advertises markup support, along with line breaks and `<br>`. Other tags and
+all attributes are removed; literal text and entities are escaped for display.
+Summaries remain plain text. Capability detection uses local `busctl`; bodies
+fall back to plain text if markup support is unavailable or cannot be detected.
+Notification forwarding failures are advisory and
 never block or change a launch; local popups simply stop. `stop`, `reset`, and
 `stop` without a host clean up every recorded listener, local socket, remote
 socket, and state file. `doctor HOST` performs a round-trip probe when a live

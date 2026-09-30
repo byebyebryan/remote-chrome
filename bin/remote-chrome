@@ -5153,6 +5153,7 @@ _yubikey_run_main() {
 
 _notify_listener_main() {
   exec python3 - "$@" <<'REMOTE_CHROME_NOTIFY_LISTENER'
+import html
 import json
 import os
 import re
@@ -5161,6 +5162,7 @@ import socket
 import subprocess
 import sys
 import time
+from html.parser import HTMLParser
 
 MAX_SUMMARY = 512
 MAX_BODY = 4096
@@ -5180,6 +5182,99 @@ ENTITIES = (
     ("&amp;", "&"),
 )
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+class NotificationBody(HTMLParser):
+    def __init__(self, markup, limit):
+        super().__init__(convert_charrefs=True)
+        self.markup = markup
+        self.remaining = limit
+        self.closing_size = 0
+        self.parts = []
+        self.tags = []
+        self.full = False
+        if markup:
+            # Declare markup even for literal-only bodies. Some daemons would
+            # otherwise decode escaped tags again or guess Markdown formatting.
+            self.append("<b></b>")
+
+    def append(self, value):
+        if self.full or len(value) > self.remaining - self.closing_size:
+            self.full = True
+            return False
+        self.parts.append(value)
+        self.remaining -= len(value)
+        return True
+
+    def handle_starttag(self, tag, _attrs):
+        if self.full:
+            return
+        if tag == "br":
+            self.handle_data("\n")
+        elif self.markup and tag in {"b", "i", "u"}:
+            closing_size = len(tag) + 3
+            self.closing_size += closing_size
+            if self.append(f"<{tag}>"):
+                self.tags.append(tag)
+            else:
+                self.closing_size -= closing_size
+
+    def handle_endtag(self, tag):
+        if self.full or tag not in self.tags:
+            return
+        while self.tags:
+            current = self.tags.pop()
+            closing = f"</{current}>"
+            self.closing_size -= len(closing)
+            self.append(closing)
+            if current == tag:
+                break
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_data(self, data):
+        if self.full:
+            return
+        for character in data:
+            if self.markup:
+                value = "<br/>" if character == "\n" else html.escape(character, quote=False)
+            else:
+                value = character
+            if not self.append(value):
+                break
+
+    def finish(self):
+        # Space for these closing tags was reserved before emitting each opener.
+        while self.tags:
+            self.parts.append(f"</{self.tags.pop()}>")
+        return "".join(self.parts)
+
+
+def clean_body(value, markup):
+    if not isinstance(value, str):
+        return ""
+    parser = NotificationBody(markup, MAX_BODY)
+    parser.feed(value)
+    parser.close()
+    return parser.finish()
+
+
+def supports_body_markup():
+    try:
+        result = subprocess.run(
+            ["busctl", "--user", "--json=short", "call",
+             "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+             "org.freedesktop.Notifications", "GetCapabilities"],
+            check=False, timeout=2, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return False
+        response = json.loads(result.stdout)
+        return response.get("type") == "as" and "body-markup" in response["data"][0]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return False
 
 
 def log_line(log_path, message):
@@ -5210,10 +5305,13 @@ def clean_name(value, limit):
     return SAFE_NAME.sub("-", value)[:limit].strip("-")
 
 
-def deliver(record, log_path):
+def deliver(record, log_path, body_markup):
     summary = clean_text(record.get("summary"), MAX_SUMMARY)
-    body = clean_text(record.get("body"), MAX_BODY)
-    if not summary and not body:
+    plain_body = clean_body(record.get("body"), False)
+    body = ""
+    if plain_body.strip():
+        body = clean_body(record.get("body"), True) if body_markup else plain_body
+    if not summary and not plain_body.strip():
         return
     app_name = clean_text(record.get("app_name"), MAX_APP) or "remote-chrome"
     urgency = URGENCY.get(record.get("urgency"), "normal")
@@ -5222,8 +5320,8 @@ def deliver(record, log_path):
     command = ["notify-send", f"--app-name={app_name}", f"--urgency={urgency}"]
     if desktop_entry:
         command.append(f"--hint=string:desktop-entry:{desktop_entry}")
-    command.append(summary or body)
-    if summary and body:
+    command.append(summary or plain_body[:MAX_SUMMARY])
+    if body:
         command.append(body)
     try:
         result = subprocess.run(
@@ -5243,7 +5341,7 @@ def deliver(record, log_path):
         log_line(log_path, f"delivery-failed\tstatus {result.returncode}")
 
 
-def handle_connection(connection, recent, log_path):
+def handle_connection(connection, recent, log_path, body_markup):
     buffer = b""
     connection.settimeout(5)
     try:
@@ -5270,7 +5368,7 @@ def handle_connection(connection, recent, log_path):
             log_line(log_path, "rate-limited")
             continue
         recent.append(now)
-        deliver(record, log_path)
+        deliver(record, log_path, body_markup)
 
 
 def main(argv):
@@ -5314,7 +5412,8 @@ def main(argv):
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    log_line(log_path, f"started\tpid {os.getpid()}")
+    body_markup = supports_body_markup()
+    log_line(log_path, f"started\tpid {os.getpid()}\tbody-markup {int(body_markup)}")
     recent = []
     try:
         while True:
@@ -5323,7 +5422,7 @@ def main(argv):
             except InterruptedError:
                 continue
             with connection:
-                handle_connection(connection, recent, log_path)
+                handle_connection(connection, recent, log_path, body_markup)
     finally:
         server.close()
         try:
