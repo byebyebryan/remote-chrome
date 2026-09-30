@@ -1600,7 +1600,7 @@ chrome_status_incoming() {
   local state found=0 phase name session
   echo "Incoming remote-chrome sessions:"
   for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
-    [ -f "$state" ] && [ -O "$state" ] && [ ! -L "$state" ] || continue
+    [[ -f "$state" && -O "$state" && ! -L "$state" ]] || continue
     found=1
     phase=stale
     chrome_incoming_live "$state" && phase=live
@@ -1615,7 +1615,7 @@ chrome_status_incoming() {
 chrome_stop_incoming() {
   local state pid peer name source user session target attempt code=0
   for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
-    [ -f "$state" ] && [ -O "$state" ] && [ ! -L "$state" ] || continue
+    [[ -f "$state" && -O "$state" && ! -L "$state" ]] || continue
     if ! chrome_incoming_live "$state"; then
       rm -f -- "$state" || code=1
       continue
@@ -1704,8 +1704,9 @@ chrome_stop() {
   done
 
   if [ "$source_requested" = "1" ]; then
-    [ -n "$source" ] && [[ "$source" != -* ]] ||
+    if [ -z "$source" ] || [[ "$source" == -* ]]; then
       die "--from requires an SSH forwarding host (for example starship)."
+    fi
     chrome_stop_from_source "$source" "$host" "$session"
     return
   fi
@@ -1851,8 +1852,10 @@ chrome_reset_read_pane() {
   local canonical_command=""
   chrome_reset_pane_command=""
 
+  # tmux can replace control characters in formats with underscores. Use a
+  # printable separator; the final read variable retains command separators.
   if ! pane_output="$(tmux list-panes -t "$session:chrome" \
-    -F $'#{pane_id}\t#{pane_pid}\t#{pane_start_command}' 2>&1)"; then
+    -F '#{pane_id}|#{pane_pid}|#{pane_start_command}' 2>&1)"; then
     [ -n "$pane_output" ] && printf '%s\n' "$pane_output" >&2
     echo "Could not inspect the exact chrome pane in tmux session $session." >&2
     return 1
@@ -1861,7 +1864,7 @@ chrome_reset_read_pane() {
     [ -n "$pane_line" ] || continue
     line_count=$((line_count + 1))
     [ "$line_count" -eq 1 ] || break
-    IFS=$'\t' read -r chrome_reset_pane_id chrome_reset_pane_pid \
+    IFS='|' read -r chrome_reset_pane_id chrome_reset_pane_pid \
       pane_start_command <<<"$pane_line"
   done <<<"$pane_output"
   if [ "$line_count" -ne 1 ] ||

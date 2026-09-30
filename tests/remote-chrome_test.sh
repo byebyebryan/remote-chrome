@@ -727,7 +727,7 @@ test_secure_command_shape_recreates_through_reset_parser() (
   tmux() {
     case "$1" in
       has-session) return 0 ;;
-      list-panes) printf '%s\t%s\t%s\n' '%0' 4242 "$command_line" ;;
+      list-panes) printf '%s|%s|%s\n' '%0' 4242 "$command_line" ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill-session " ;;
       new-session) events+="new-session:$* " ;;
@@ -814,7 +814,7 @@ test_reset_reads_canonical_option_before_teardown() (
   tmux() {
     case "$1" in
       list-panes)
-        printf '%s\t%s\t%s\n' '%0' 4242 'bash -c wrapped-command'
+        printf '%s|%s|%s\n' '%0' 4242 'bash -c wrapped-command'
         ;;
       show-options)
         [ "$3" = "-t" ] || return 1
@@ -837,7 +837,9 @@ test_reset_reads_real_tmux_chrome_and_yubikey_windows() (
   trap 'command tmux -S "$test_dir/tmux.sock" kill-server >/dev/null 2>&1 || true; rm -rf "$test_dir"' EXIT
   # An explicit socket and empty configuration keep this real tmux check away
   # from the developer's server. No browser, SSH, or USB operation is started.
-  tmux() { command tmux -S "$test_dir/tmux.sock" -f /dev/null "$@"; }
+  # A non-UTF-8 locale reproduces tmux's control-character sanitizing, which
+  # is common in SSH shells even when the local desktop uses UTF-8.
+  tmux() { LC_ALL=C LANG=C LC_CTYPE=C command tmux -S "$test_dir/tmux.sock" -f /dev/null "$@"; }
   tmux new-session -d -s "$session" -n yubikey 'sleep 60'
   tmux new-window -d -t "$session" -n chrome 'sleep 60'
   command_line="waypipe --no-gpu ssh test-host bash -s -- arg"
@@ -889,7 +891,7 @@ test_reset_recreation_restores_canonical_option_for_repeated_reset() (
   tmux() {
     case "$1" in
       has-session) [ "$session_alive" -eq 1 ] ;;
-      list-panes) printf '%s\t%s\t%s\n' '%0' 4242 'bash -c wrapped-command' ;;
+      list-panes) printf '%s|%s|%s\n' '%0' 4242 'bash -c wrapped-command' ;;
       show-options) printf '%s\n' "$option_value" ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) session_alive=0 ;;
@@ -3194,7 +3196,7 @@ test_reset_confirmation_and_yes_scope() (
   tmux() {
     case "$1" in
       has-session) return 0 ;;
-      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill-session "; return 0 ;;
       new-session) events+="new-session:$* "; return 0 ;;
@@ -3325,7 +3327,7 @@ test_reset_restarts_notification_listener() (
   tmux() {
     case "$1" in
       has-session) return 0 ;;
-      list-panes) printf '%s\t%s\t%s\n' '%0' 4242 "$command_line" ;;
+      list-panes) printf '%s|%s|%s\n' '%0' 4242 "$command_line" ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill-session " ;;
       new-session) events+="new-session " ;;
@@ -3434,7 +3436,7 @@ test_reset_post_stop_identity_check_preserves_tmux_on_unrelated_chrome() (
   tmux() {
     case "$1" in
       has-session) return 0 ;;
-      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill-session " ; return 0 ;;
       new-session) events+="new-session " ; return 0 ;;
@@ -3488,7 +3490,7 @@ test_reset_recreates_when_session_exits_after_remote_stop() (
       has-session)
         [ "$session_alive" -eq 1 ]
         ;;
-      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill-session " ; return 0 ;;
       new-session) events+="new-session:$* " ; return 0 ;;
@@ -3534,7 +3536,7 @@ test_reset_remote_failure_keeps_tmux_and_absent_group_recreates_command() (
   tmux() {
     case "$1" in
       has-session) return 0 ;;
-      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill "; return 0 ;;
       new-session) events+="new:$* "; return 0 ;;
@@ -3574,7 +3576,7 @@ test_reset_yubikey_and_chrome_only_recreation_sequence() (
   tmux() {
     case "$1" in
       has-session) return 0 ;;
-      list-panes) printf '%s\n' $'%0\t4242\twaypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
       list-windows) printf '%s\n' chrome yubikey ;;
       kill-session) events+="kill "; return 0 ;;
       new-session) events+="new:$* "; return 0 ;;
