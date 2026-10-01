@@ -129,6 +129,8 @@ together. It also cleans provisional state left by an interrupted setup.
 When the remote host rebooted and no longer has a `vhci_hcd` import controller,
 the missing controller proves that its old attachment is already gone, allowing
 the recovery ledger to be reconciled before the next launch.
+Attachment checks and cleanup match the exact loopback server, configured
+USB/IP port, and bus ID, preserving imports from other servers or ports.
 Run `remote-chrome stop` with no host to stop every default managed tmux session
 (`remote-chrome-*` by default) and every YubiKey forwarding using the default
 runtime state path. It leaves an exact-name `remote-chrome` session and
@@ -155,8 +157,10 @@ provisional locks, and standard-runtime orphan `usbipd` PID files.
 `status remote-host` performs read-only checks for current tmux windows,
 recorded USB/IP ownership, the owned `usbipd` process, SSH control socket, and
 remote YubiKey readiness. It returns nonzero with actionable output when the
-session is stale or degraded. `status` without a host remains the managed-state
-overview. `doctor remote-host` checks local display and
+session is stale or degraded. Failed readiness output reports the current
+probe result; the stored recovery ledger remains unchanged.
+`status` without a host remains the managed-state overview.
+`doctor remote-host` checks local display and
 commands, detached SSH plus remote Waypipe/Chrome and secure-session
 dependencies, and USB/IP module prerequisites without loading modules, looking
 up a wallet secret, unlocking a wallet, or changing USB/IP state. When a
@@ -253,8 +257,9 @@ Notification forwarding failures are advisory and
 never block or change a launch. Malformed notification records are discarded
 individually so later valid notifications still arrive. `stop`, `reset`, and
 `stop` without a host clean up every recorded listener, local socket, remote
-socket, and state file. `doctor HOST` performs a round-trip probe when a live
-relay session is present. Per-session activity is recorded in
+socket, and state file. If listener startup cannot save its state, it stops the
+new listener and removes its local socket. `doctor HOST` performs a round-trip
+probe when a live relay session is present. Per-session activity is recorded in
 `${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
 
 Cleanup attempts every applicable resource in order. If remote detach, tunnel

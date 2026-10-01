@@ -1434,17 +1434,10 @@ notify_remove_remote_socket() {
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "rm -f -- $quoted" >/dev/null 2>&1 || true
 }
 
-notify_stop_state_file() {
-  local state_file="$1"
-  local host="$2"
-  local listener_pid listener_starttime local_socket remote_socket attempt current_starttime
-
-  [ -f "$state_file" ] || return 0
-  [ -n "$host" ] || host="$(notify_state_field "$state_file" host)"
-  listener_pid="$(notify_state_field "$state_file" listener_pid)"
-  listener_starttime="$(notify_state_field "$state_file" listener_starttime)"
-  local_socket="$(notify_state_field "$state_file" local_socket)"
-  remote_socket="$(notify_state_field "$state_file" remote_socket)"
+notify_stop_process() {
+  local listener_pid="$1"
+  local listener_starttime="$2"
+  local attempt current_starttime
 
   if [ -n "$listener_pid" ] && kill -0 "$listener_pid" 2>/dev/null; then
     current_starttime="$(notify_pid_starttime "$listener_pid" 2>/dev/null || true)"
@@ -1452,15 +1445,40 @@ notify_stop_state_file() {
       kill "$listener_pid" 2>/dev/null || true
       for ((attempt = 0; attempt < 20; attempt++)); do
         kill -0 "$listener_pid" 2>/dev/null || break
+        current_starttime="$(notify_pid_starttime "$listener_pid" 2>/dev/null || true)"
+        [ "$current_starttime" = "$listener_starttime" ] || return 0
         sleep 0.1
       done
       if kill -0 "$listener_pid" 2>/dev/null; then
-        kill -KILL "$listener_pid" 2>/dev/null || true
+        current_starttime="$(notify_pid_starttime "$listener_pid" 2>/dev/null || true)"
+        if [ "$current_starttime" = "$listener_starttime" ]; then
+          kill -KILL "$listener_pid" 2>/dev/null || return 0
+        else
+          return 0
+        fi
       fi
+      # Reap a startup child when called by its parent; loaded listeners may
+      # belong to another shell, in which case wait simply fails.
+      wait "$listener_pid" 2>/dev/null || true
     else
       echo "remote-chrome notify: listener PID $listener_pid identity changed; preserving the replacement process." >&2
     fi
   fi
+  return 0
+}
+
+notify_stop_state_file() {
+  local state_file="$1"
+  local host="$2"
+  local listener_pid listener_starttime local_socket remote_socket
+
+  [ -f "$state_file" ] || return 0
+  [ -n "$host" ] || host="$(notify_state_field "$state_file" host)"
+  listener_pid="$(notify_state_field "$state_file" listener_pid)"
+  listener_starttime="$(notify_state_field "$state_file" listener_starttime)"
+  local_socket="$(notify_state_field "$state_file" local_socket)"
+  remote_socket="$(notify_state_field "$state_file" remote_socket)"
+  notify_stop_process "$listener_pid" "$listener_starttime"
 
   if [ -n "$local_socket" ]; then
     rm -f -- "$local_socket" 2>/dev/null || true
@@ -1514,7 +1532,7 @@ notify_start_listener() {
     sleep 0.1
   done
   if [ ! -S "$notify_local_socket" ]; then
-    kill "$pid" 2>/dev/null || true
+    notify_stop_process "$pid" "$starttime"
     echo "remote-chrome notify: listener did not create $notify_local_socket (see $notify_log_file); notifications are not forwarded." >&2
     return 1
   fi
@@ -1529,9 +1547,12 @@ notify_start_listener() {
       printf 'session\t%s\n' "$notify_session"
       printf 'host\t%s\n' "$notify_host"
     } >"${notify_state_file}.tmp"
-  ) || ! mv -f -- "${notify_state_file}.tmp" "$notify_state_file"; then
+  ) || ! mv -fT -- "${notify_state_file}.tmp" "$notify_state_file"; then
     rm -f -- "${notify_state_file}.tmp" 2>/dev/null || true
-    notify_stop_listener "${notify_host:-}"
+    # State was never committed, so roll back using the identity captured when
+    # spawning the child instead of trying to reload a missing state file.
+    notify_stop_process "$pid" "$starttime"
+    rm -f -- "$notify_local_socket" "$notify_log_file" 2>/dev/null || true
     echo "remote-chrome notify: could not record listener state in $notify_state_file; notifications are not forwarded." >&2
     return 1
   fi
@@ -2681,7 +2702,7 @@ chrome_status_current() {
     fi
 
     if [ "$yk_attach_state" != "none" ] || [ "$yk_phase" = "ready" ]; then
-      if (yk_remote_probe_readiness); then
+      if yk_remote_probe_readiness; then
         echo "status: remote YubiKey readiness probe passed."
       else
         echo "status: degraded: remote YubiKey readiness probe failed (${yk_readiness:-not-ready})." >&2
@@ -4011,8 +4032,9 @@ yk_open_tunnel() {
 
 yk_remote_detach_busid() {
   local busid="$1"
-  yk_ssh 'bash -s' -- "$busid" <<'REMOTE_SCRIPT'
+  yk_ssh 'bash -s' -- "$busid" "$yk_usbip_port" <<'REMOTE_SCRIPT'
 busid="$1"
+usbip_port="$2"
 
 platform_devices=/sys/bus/platform/devices
 if [ ! -d "$platform_devices" ]; then
@@ -4032,20 +4054,17 @@ if ! port_output="$(timeout 5 sudo -n usbip port 2>&1)"; then
 fi
 
 ports="$(printf '%s\n' "$port_output" |
-  awk -v wanted="$busid" '
+  awk -v wanted="usbip://127.0.0.1:$usbip_port/$busid" '
     /^Port [0-9]+:/ {
       port = $2
       sub(":", "", port)
     }
     {
-      following = ""
-      marker = "/" wanted
-      position = index($0, marker)
-      if (position > 0) {
-        following = substr($0, position + length(marker), 1)
-      }
-      if (position > 0 && (following == "" || following ~ /[[:space:]]/) && port != "") {
-        print port
+      for (field = 1; field <= NF; field++) {
+        if ($field == wanted && port != "") {
+          print port
+          break
+        }
       }
     }
   ')"
@@ -4066,8 +4085,9 @@ yk_remote_probe_attachment() {
   local busid="$1"
   local output=""
 
-  if ! output="$(yk_ssh 'bash -s' -- "$busid" 2>&1 <<'REMOTE_SCRIPT'
+  if ! output="$(yk_ssh 'bash -s' -- "$busid" "$yk_usbip_port" 2>&1 <<'REMOTE_SCRIPT'
 busid="$1"
+usbip_port="$2"
 
 platform_devices=/sys/bus/platform/devices
 if [ ! -d "$platform_devices" ]; then
@@ -4087,21 +4107,17 @@ if ! port_output="$(timeout 5 sudo -n usbip port 2>&1)"; then
 fi
 
 ports="$(printf '%s\n' "$port_output" |
-  awk -v wanted="$busid" '
+  awk -v wanted="usbip://127.0.0.1:$usbip_port/$busid" '
     /^Port [0-9]+:/ {
       port = $2
       sub(":", "", port)
     }
     {
-      marker = "/" wanted
-      position = index($0, marker)
-      if (position > 0) {
-        following = substr($0, position + length(marker), 1)
-      } else {
-        following = ""
-      }
-      if (position > 0 && (following == "" || following ~ /[[:space:]]/) && port != "") {
-        print port
+      for (field = 1; field <= NF; field++) {
+        if ($field == wanted && port != "") {
+          print port
+          break
+        }
       }
     }
   ')"

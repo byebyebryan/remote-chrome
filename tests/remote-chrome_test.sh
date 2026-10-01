@@ -416,6 +416,57 @@ test_remote_detach_failure_is_reported() (
   assert_contains "$output" "Could not detach remote USB/IP port 00 for busid 5-1.2.2."
 )
 
+test_remote_attachment_cleanup_matches_exact_export_endpoint() (
+  local test_dir fake_bin platform_dir remote_script probe_code
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  platform_dir="$test_dir/platform-devices"
+  mkdir -p "$fake_bin" "$platform_dir/vhci_hcd.0"
+  export REMOTE_CHROME_TEST_DETACHES="$test_dir/detaches"
+  cat >"$fake_bin/sudo" <<'FAKE_SUDO'
+#!/usr/bin/env bash
+case "$*" in
+  '-n usbip port')
+    printf '%s\n' \
+      'Port 00: <Port in Use>' '       7-1 -> usbip://127.0.0.1:3240/5-1.2.2' \
+      'Port 01: <Port in Use>' '       7-2 -> usbip://192.0.2.5:3240/5-1.2.2' \
+      'Port 02: <Port in Use>' '       7-3 -> usbip://127.0.0.1:4242/5-1.2.2' \
+      'Port 03: <Port in Use>' '       7-4 -> usbip://127.0.0.1:3240/5-1.2.20'
+    ;;
+  '-n usbip detach -p 00'|'-n usbip detach -p 01'|'-n usbip detach -p 02'|'-n usbip detach -p 03')
+    printf '%s\n' "$5" >>"$REMOTE_CHROME_TEST_DETACHES"
+    ;;
+  *) exit 97 ;;
+esac
+FAKE_SUDO
+  chmod +x "$fake_bin/sudo"
+  yk_ssh() {
+    [ "$1" = 'bash -s' ] || fail "unexpected remote command: $1"
+    shift
+    remote_script="$(command cat)"
+    remote_script="${remote_script//\/sys\/bus\/platform\/devices/$platform_dir}"
+    PATH="$fake_bin:$PATH" bash -s "$@" <<<"$remote_script"
+  }
+
+  yk_usbip_port=3240
+  yk_remote_probe_attachment 5-1.2.2 || fail "exact default-port import was not found"
+  yk_remote_detach_busid 5-1.2.2
+  [ "$(cat "$REMOTE_CHROME_TEST_DETACHES")" = 00 ] || fail "cleanup detached another export"
+  : >"$REMOTE_CHROME_TEST_DETACHES"
+  yk_usbip_port=4242
+  yk_remote_probe_attachment 5-1.2.2 || fail "exact custom-port import was not found"
+  yk_remote_detach_busid 5-1.2.2
+  [ "$(cat "$REMOTE_CHROME_TEST_DETACHES")" = 02 ] || fail "custom-port cleanup detached another export"
+  : >"$REMOTE_CHROME_TEST_DETACHES"
+  yk_usbip_port=5242
+  probe_code=0
+  yk_remote_probe_attachment 5-1.2.2 || probe_code=$?
+  [ "$probe_code" -eq 1 ] || fail "another export was mistaken for the managed attachment"
+  yk_remote_detach_busid 5-1.2.2
+  [ ! -s "$REMOTE_CHROME_TEST_DETACHES" ] || fail "cleanup detached an unrelated import"
+)
+
 test_remote_reboot_without_vhci_proves_attachment_absent() (
   local test_dir fake_bin platform_dir remote_script probe_code=0
   test_dir="$(mktemp -d)"
@@ -855,6 +906,79 @@ test_notify_stop_listener_reaps_recorded_process() (
 
   notify_state_file="$test_dir/absent.state"
   notify_stop_listener || fail "stop without state did not succeed"
+)
+
+test_notify_state_failure_reaps_startup_listener() (
+  local test_dir fake_bin failure pid="" code
+  test_dir="$(mktemp -d)"
+  trap 'if [ -f "$test_dir/pid" ]; then pid="$(cat "$test_dir/pid")"; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir "$fake_bin"
+  # Capability discovery is isolated from the desktop D-Bus daemon.
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$fake_bin/busctl"
+  cat >"$test_dir/listener-wrapper" <<'LISTENER_WRAPPER'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$REMOTE_CHROME_TEST_NOTIFY_DIR/pid"
+exec "$REMOTE_CHROME_TEST_NOTIFY_LAUNCHER" "$@"
+LISTENER_WRAPPER
+  chmod +x "$fake_bin/busctl" "$test_dir/listener-wrapper"
+  export PATH="$fake_bin:$PATH"
+  export REMOTE_CHROME_TEST_NOTIFY_DIR="$test_dir"
+  export REMOTE_CHROME_TEST_NOTIFY_LAUNCHER="$repo_root/bin/remote-chrome"
+  script_path() { printf '%s\n' "$test_dir/listener-wrapper"; }
+  notify_remove_remote_socket() { fail "uncommitted listener touched the remote host"; }
+  notify_remote_socket=""
+  notify_apps=chrome
+  notify_session=isolated-test
+  notify_host=""
+
+  for failure in write rename; do
+    notify_state_file="$test_dir/$failure.state"
+    notify_log_file="${notify_state_file}.log"
+    notify_local_socket="$test_dir/$failure.sock"
+    if [ "$failure" = write ]; then
+      mkdir "${notify_state_file}.tmp"
+    else
+      mkdir "$notify_state_file"
+    fi
+    code=0
+    notify_start_listener >"$test_dir/output" 2>&1 || code=$?
+    [ "$code" -eq 1 ] || fail "$failure failure was not reported"
+    assert_contains "$(cat "$test_dir/output")" "could not record listener state"
+    pid="$(cat "$test_dir/pid")"
+    if kill -0 "$pid" 2>/dev/null; then
+      fail "listener survived $failure failure"
+    fi
+    if [ "$failure" = write ]; then
+      assert_file_missing "$notify_state_file"
+    else
+      [ -d "$notify_state_file" ] || fail "startup removed a pre-existing directory"
+    fi
+    assert_file_missing "$notify_local_socket"
+    assert_file_missing "$notify_log_file"
+    if [ "$failure" = rename ]; then
+      assert_file_missing "${notify_state_file}.tmp"
+    fi
+  done
+)
+
+test_notify_stop_preserves_reused_pid_during_wait() (
+  local test_dir events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  notify_pid_starttime() {
+    if [ -f "$test_dir/replaced" ]; then printf 'new\n'; else printf 'old\n'; fi
+  }
+  kill() {
+    case "$*" in
+      '-0 4242') return 0 ;;
+      '4242') events+="TERM "; : >"$test_dir/replaced" ;;
+      '-KILL 4242') fail "signaled a reused PID" ;;
+      *) fail "unexpected signal: $*" ;;
+    esac
+  }
+  notify_stop_process 4242 old
+  [ "$events" = 'TERM ' ] || fail "original listener was not stopped"
 )
 
 test_launch_with_notifications_plumbs_relay() (
@@ -2740,6 +2864,43 @@ test_status_degrades_cleanup_failed_phase() (
   assert_contains "$output" "owned usbipd running and listening"
 )
 
+test_status_reports_fresh_readiness_without_changing_ledger() (
+  local test_dir output code probe_result
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_prepare_for_launch test-host
+  yk_phase=ready
+  yk_readiness=verified-fido
+  yk_write_state
+  cp "$yk_state_file" "$test_dir/original-state"
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-windows) printf '%s\n' chrome ;;
+      *) fail "unexpected tmux command: $*" ;;
+    esac
+  }
+  yk_remote_probe_readiness() {
+    yk_readiness="$probe_result"
+    [ "$probe_result" = verified-fido ]
+  }
+  for probe_result in fido2-unconfirmed verified-fido; do
+    code=0
+    chrome_status test-host >"$test_dir/output" 2>&1 || code=$?
+    output="$(cat "$test_dir/output")"
+    if [ "$probe_result" = fido2-unconfirmed ]; then
+      [ "$code" -eq 1 ] || fail "failed readiness reported healthy"
+      assert_contains "$output" 'readiness probe failed (fido2-unconfirmed)'
+      [[ "$output" != *'readiness probe failed (verified-fido)'* ]] || fail "status printed stale readiness"
+    else
+      [ "$code" -eq 0 ] || fail "healthy readiness reported degraded"
+      assert_contains "$output" 'readiness probe passed'
+    fi
+    cmp -s "$yk_state_file" "$test_dir/original-state" || fail "status rewrote the recovery ledger"
+  done
+)
+
 test_stop_provisional_invalid_pid_file_preserves_evidence() (
   local test_dir events="" output code=0
   test_dir="$(mktemp -d)"
@@ -4043,6 +4204,7 @@ tests=(
   test_incoming_stop_requests_source_cleanup_and_status_is_read_only
   test_remote_preflight_uses_scoped_sudo_command
   test_remote_detach_failure_is_reported
+  test_remote_attachment_cleanup_matches_exact_export_endpoint
   test_remote_reboot_without_vhci_proves_attachment_absent
   test_custom_chrome_command_is_in_process_pattern
   test_chrome_command_rejects_shell_syntax
@@ -4053,6 +4215,8 @@ tests=(
   test_launch_target_accepts_notification_flag
   test_notification_listener_preserves_markup_and_plain_text_fallback
   test_notify_stop_listener_reaps_recorded_process
+  test_notify_state_failure_reaps_startup_listener
+  test_notify_stop_preserves_reused_pid_during_wait
   test_launch_with_notifications_plumbs_relay
   test_notify_launch_failure_stops_listener
   test_reset_parser_skips_ssh_options_before_host
@@ -4130,6 +4294,7 @@ tests=(
   test_doctor_invalid_chrome_command_is_aggregated
   test_load_rejects_invalid_bind_state
   test_status_degrades_cleanup_failed_phase
+  test_status_reports_fresh_readiness_without_changing_ledger
   test_stop_provisional_invalid_pid_file_preserves_evidence
   test_stop_state_pid_file_mismatch_preserves_evidence
   test_stop_pid_file_replacement_before_rm_preserves_evidence
