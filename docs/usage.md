@@ -258,7 +258,10 @@ never block or change a launch. Malformed notification records are discarded
 individually so later valid notifications still arrive. `stop`, `reset`, and
 `stop` without a host clean up every recorded listener, local socket, remote
 socket, and state file. If listener startup cannot save its state, it stops the
-new listener and removes its local socket. `doctor HOST` performs a round-trip
+new listener and removes its local socket. Remote notification socket cleanup
+is best effort: its SSH request has a two-second deadline, with one extra
+second for forced termination if needed, and teardown continues on failure.
+`doctor HOST` performs a round-trip
 probe when a live relay session is present. Per-session activity is recorded in
 `${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
 

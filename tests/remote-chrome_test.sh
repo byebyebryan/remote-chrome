@@ -908,6 +908,72 @@ test_notify_stop_listener_reaps_recorded_process() (
   notify_stop_listener || fail "stop without state did not succeed"
 )
 
+test_notify_cleanup_bounds_ssh_and_continues_stop() (
+  local test_dir mode started elapsed output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/ssh" <<'FAKE_NOTIFICATION_CLEANUP_SSH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$REMOTE_CHROME_TEST_NOTIFY_SSH_ARGS"
+printf 'notification-ssh\n' >>"$REMOTE_CHROME_TEST_NOTIFY_EVENTS"
+# Cleanup must not consume the caller's input stream.
+if IFS= read -r input; then
+  printf 'caller-input-consumed\n' >>"$REMOTE_CHROME_TEST_NOTIFY_EVENTS"
+  exit 97
+fi
+if [ "$REMOTE_CHROME_TEST_NOTIFY_SSH_MODE" = stalled ]; then
+  exec sleep 60
+fi
+exit 17
+FAKE_NOTIFICATION_CLEANUP_SSH
+  chmod +x "$test_dir/bin/ssh"
+  export PATH="$test_dir/bin:$PATH" XDG_RUNTIME_DIR="$test_dir"
+  export REMOTE_CHROME_TEST_NOTIFY_SSH_ARGS="$test_dir/ssh-args"
+  export REMOTE_CHROME_TEST_NOTIFY_EVENTS="$test_dir/events"
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      kill-session) printf 'tmux-stop\n' >>"$REMOTE_CHROME_TEST_NOTIFY_EVENTS" ;;
+      *) fail "unexpected tmux command: $*" ;;
+    esac
+  }
+  chrome_remove_bootstrap_script() { :; }
+  yk_prepare_for_launch() { :; }
+  yk_stop() { printf 'yubikey-stop\n' >>"$REMOTE_CHROME_TEST_NOTIFY_EVENTS"; }
+
+  for mode in failed stalled; do
+    export REMOTE_CHROME_TEST_NOTIFY_SSH_MODE="$mode"
+    notify_set_runtime_paths remote-chrome-test-host
+    {
+      printf 'host\t%s\n' test-host
+      printf 'local_socket\t%s\n' "$test_dir/listener.sock"
+      printf 'remote_socket\t%s\n' /tmp/isolated-notification-cleanup.sock
+    } >"$notify_state_file"
+    : >"$notify_log_file"
+    : >"$test_dir/listener.sock"
+    : >"$REMOTE_CHROME_TEST_NOTIFY_EVENTS"
+    started="$SECONDS"
+    chrome_stop test-host >"$test_dir/output" 2>&1 <<<"caller input" ||
+      fail "$mode notification cleanup prevented stop"
+    elapsed=$((SECONDS - started))
+    [ "$elapsed" -le 4 ] || fail "notification cleanup exceeded its deadline: $elapsed"
+    if [ "$mode" = stalled ]; then
+      [ "$elapsed" -ge 1 ] || fail "stalled fixture returned before exercising the deadline"
+    fi
+    output="$(cat "$REMOTE_CHROME_TEST_NOTIFY_EVENTS")"
+    [ "$output" = "$(printf '%s\n' tmux-stop notification-ssh yubikey-stop)" ] ||
+      fail "stop did not continue through YubiKey cleanup: $output"
+    assert_file_missing "$notify_state_file"
+    assert_file_missing "$notify_log_file"
+    assert_file_missing "$test_dir/listener.sock"
+    assert_contains "$(cat "$REMOTE_CHROME_TEST_NOTIFY_SSH_ARGS")" 'BatchMode=yes'
+    assert_contains "$(cat "$REMOTE_CHROME_TEST_NOTIFY_SSH_ARGS")" 'ConnectTimeout=2'
+    assert_contains "$(cat "$REMOTE_CHROME_TEST_NOTIFY_SSH_ARGS")" 'ConnectionAttempts=1'
+  done
+)
+
 test_notify_state_failure_reaps_startup_listener() (
   local test_dir fake_bin failure pid="" code
   test_dir="$(mktemp -d)"
@@ -4215,6 +4281,7 @@ tests=(
   test_launch_target_accepts_notification_flag
   test_notification_listener_preserves_markup_and_plain_text_fallback
   test_notify_stop_listener_reaps_recorded_process
+  test_notify_cleanup_bounds_ssh_and_continues_stop
   test_notify_state_failure_reaps_startup_listener
   test_notify_stop_preserves_reused_pid_during_wait
   test_launch_with_notifications_plumbs_relay

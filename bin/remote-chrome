@@ -1431,7 +1431,11 @@ notify_remove_remote_socket() {
   [ -n "$host" ] || return 0
   [ -n "$socket_path" ] || return 0
   printf -v quoted '%q' "$socket_path"
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "rm -f -- $quoted" >/dev/null 2>&1 || true
+  # Socket removal is advisory. Bound the whole request so a stalled peer
+  # cannot prevent the remaining session and USB/IP cleanup from running.
+  timeout --kill-after=1 2 ssh -o BatchMode=yes -o ConnectTimeout=2 \
+    -o ConnectionAttempts=1 "$host" "rm -f -- $quoted" \
+    </dev/null >/dev/null 2>&1 || true
 }
 
 notify_stop_process() {
