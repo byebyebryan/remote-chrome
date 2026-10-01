@@ -324,11 +324,12 @@ remote-chrome stop remote-host
 windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, and remote
 YubiKey readiness. It returns nonzero and identifies the failing check when a
 resource is stale or unreachable. `status` without a host is the managed-state
-overview. `doctor HOST` is a preflight-only diagnostic
+overview. `doctor HOST` checks prerequisites
 for local display/commands, detached SSH, remote Waypipe/Chrome plus the
 secure-session dependencies, and USB/IP module prerequisites; it never loads
 modules, performs a Secret Service lookup, unlocks a wallet, or changes USB/IP
-state.
+state. When a notification relay is live, it also sends a visible probe
+notification and checks its delivery through the local daemon.
 
 Pass extra Chrome arguments after `--`:
 
@@ -378,6 +379,11 @@ safety refusals still apply). `remote-chrome reset` without a host selects the
 sole default managed session, and asks for a host or `--session NAME` when
 several exist. The bare `remote-chrome HOST` form passes `--yes` automatically
 only after it has found that exact managed tmux session.
+
+New sessions record their YubiKey mode, so reset preserves `--no-yubikey`,
+automatic detection, or required forwarding. Recorded forwarding state also
+restores the USB device ID and port. Older sessions without mode metadata keep
+the legacy automatic detection behavior.
 
 When run from inside tmux, `attach` switches the current client instead of
 trying to create a nested tmux client. A successful detached launch prints the
@@ -555,6 +561,11 @@ REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT=30
 REMOTE_CHROME_YUBIKEY_READY_GRACE=5
 ```
 
+A non-default `REMOTE_CHROME_USBIP_PORT` or `--yubikey-port PORT` is used by
+the daemon, SSH tunnel, and remote USB/IP clients. Scoped remote sudo rules
+must also permit `usbip --tcp-port PORT attach` for that port; the default
+port keeps the existing `usbip attach` command.
+
 Set `REMOTE_CHROME_STOP_USBIPD=0` to leave a tool-started daemon running after
 cleanup.
 
@@ -611,8 +622,9 @@ sudo pacman -S --needed shellcheck tmux
 
 The check script runs Bash syntax validation, ShellCheck, the command-level
 test suite, and `git diff --check`. The same checks run in GitHub Actions.
-The suite includes a real tmux pane-format check on a private socket with an
-empty configuration; SSH and USB/IP operations remain mocked.
+The suite checks real tmux pane formats and exact session/window targeting on
+private sockets with empty configurations. Notification tests use isolated
+listeners and mock desktop delivery; SSH and USB/IP operations remain mocked.
 
 ## License
 

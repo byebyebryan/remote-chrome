@@ -857,13 +857,17 @@ chrome_secure_command_line() {
 }
 
 chrome_tmux_command_option="@remote-chrome-command"
+chrome_tmux_yubikey_option="@remote-chrome-yubikey-mode"
+chrome_yubikey_mode="auto"
 
 chrome_tmux_record_command() {
   local session="$1"
   local command_line="$2"
 
-  if ! tmux set-option -t "$session" "$chrome_tmux_command_option" \
-    "$command_line" >/dev/null 2>&1; then
+  if ! tmux set-option -t "=$session:" "$chrome_tmux_command_option" \
+    "$command_line" >/dev/null 2>&1 ||
+    ! tmux set-option -t "=$session:" "$chrome_tmux_yubikey_option" \
+    "$chrome_yubikey_mode" >/dev/null 2>&1; then
     echo "Could not record the canonical Chrome command in tmux session $session." >&2
     return 1
   fi
@@ -878,7 +882,7 @@ chrome_tmux_create_chrome_session() {
     return 1
   fi
   if ! chrome_tmux_record_command "$session" "$command_line"; then
-    tmux kill-session -t "$session" >/dev/null 2>&1 ||
+    tmux kill-session -t "=$session" >/dev/null 2>&1 ||
       echo "Could not remove tmux session $session after canonical command recording failed." >&2
     return 1
   fi
@@ -965,7 +969,7 @@ chrome_ensure() {
   fi
 
   need tmux
-  if tmux has-session -t "$chrome_launch_target_session" 2>/dev/null; then
+  if tmux has-session -t "=$chrome_launch_target_session" 2>/dev/null; then
     echo "Managed tmux session $chrome_launch_target_session already exists; resetting the remote Chrome/Waypipe stream." >&2
     chrome_reset "$chrome_launch_target_host" --session "$chrome_launch_target_session" --yes
     return
@@ -1086,6 +1090,7 @@ chrome_launch() {
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
   chrome_validate_password_store_args "${chrome_args[@]}"
   chrome_secret_identity "$chrome_command" || exit 1
+  chrome_yubikey_mode="$yubikey_mode"
 
   need ssh
   need waypipe
@@ -1117,7 +1122,7 @@ chrome_launch() {
   # launch is a duplicate and must abort without touching the browser.
   if [ "$foreground" != "1" ]; then
     need tmux
-    if tmux has-session -t "$session" 2>/dev/null; then
+    if tmux has-session -t "=$session" 2>/dev/null; then
       die "tmux session already exists: $session"
     fi
   fi
@@ -1722,8 +1727,8 @@ chrome_stop() {
   }
 
   need tmux
-  if tmux has-session -t "$session" 2>/dev/null; then
-    if tmux kill-session -t "$session"; then
+  if tmux has-session -t "=$session" 2>/dev/null; then
+    if tmux kill-session -t "=$session"; then
       echo "Stopped tmux session $session."
       chrome_remove_bootstrap_script "$session"
     else
@@ -1767,7 +1772,7 @@ chrome_stop_all() {
   need tmux
   while IFS= read -r session; do
     [ -n "$session" ] || continue
-    if tmux kill-session -t "$session"; then
+    if tmux kill-session -t "=$session"; then
       echo "Stopped tmux session $session."
       chrome_remove_bootstrap_script "$session"
       stopped_sessions=$((stopped_sessions + 1))
@@ -1825,13 +1830,13 @@ chrome_attach() {
   }
 
   need tmux
-  tmux has-session -t "$session" 2>/dev/null ||
+  tmux has-session -t "=$session" 2>/dev/null ||
     die "tmux session not found: $session"
 
   if [ -n "${TMUX:-}" ]; then
-    tmux switch-client -t "$session"
+    tmux switch-client -t "=$session"
   else
-    tmux attach-session -t "$session"
+    tmux attach-session -t "=$session"
   fi
 }
 
@@ -1850,11 +1855,13 @@ chrome_reset_read_pane() {
   local pane_line
   local pane_start_command=""
   local canonical_command=""
+  local yubikey_mode=""
   chrome_reset_pane_command=""
+  chrome_yubikey_mode="auto"
 
   # tmux can replace control characters in formats with underscores. Use a
   # printable separator; the final read variable retains command separators.
-  if ! pane_output="$(tmux list-panes -t "$session:chrome" \
+  if ! pane_output="$(tmux list-panes -t "=$session:=chrome" \
     -F '#{pane_id}|#{pane_pid}|#{pane_start_command}' 2>&1)"; then
     [ -n "$pane_output" ] && printf '%s\n' "$pane_output" >&2
     echo "Could not inspect the exact chrome pane in tmux session $session." >&2
@@ -1875,7 +1882,7 @@ chrome_reset_read_pane() {
     return 1
   fi
 
-  if canonical_command="$(tmux show-options -qv -t "$session" \
+  if canonical_command="$(tmux show-options -qv -t "=$session:" \
     "$chrome_tmux_command_option" 2>/dev/null)" && [ -n "$canonical_command" ]; then
     chrome_reset_pane_command="$canonical_command"
   elif [[ "$pane_start_command" == waypipe[[:space:]]--no-gpu[[:space:]]ssh[[:space:]]* ]]; then
@@ -1886,6 +1893,19 @@ chrome_reset_read_pane() {
     echo "The $session:chrome pane has no canonical remote-chrome command option; refusing reset." >&2
     return 1
   fi
+  if ! yubikey_mode="$(tmux show-options -qv -t "=$session:" \
+    "$chrome_tmux_yubikey_option" 2>/dev/null)"; then
+    echo "Could not read YubiKey mode for tmux session $session; refusing reset." >&2
+    return 1
+  fi
+  case "$yubikey_mode" in
+    "") ;; # Older sessions did not record the mode; retain legacy auto behavior.
+    auto|force|off) chrome_yubikey_mode="$yubikey_mode" ;;
+    *)
+      echo "Invalid recorded YubiKey mode for tmux session $session; refusing reset." >&2
+      return 1
+      ;;
+  esac
   return 0
 }
 
@@ -2378,7 +2398,7 @@ chrome_reset() {
 
   need ssh
   need ps
-  tmux has-session -t "$session" 2>/dev/null ||
+  tmux has-session -t "=$session" 2>/dev/null ||
     die "tmux session not found: $session"
   chrome_reset_read_pane "$session" || return 1
   chrome_reset_parse_pane_host "$chrome_reset_pane_command" || return 1
@@ -2397,7 +2417,7 @@ chrome_reset() {
 
   yk_prepare_for_launch "$host"
   [ -e "$yk_state_file" ] && yk_state_present=1
-  if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null |
+  if tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null |
     grep -qx yubikey; then
     yk_window_present=1
   fi
@@ -2437,14 +2457,14 @@ chrome_reset() {
       ;;
   esac
 
-  if session_probe_output="$(tmux has-session -t "$session" 2>&1)"; then
+  if session_probe_output="$(tmux has-session -t "=$session" 2>&1)"; then
     session_probe_code=0
   else
     session_probe_code=$?
   fi
   case "$session_probe_code" in
     0)
-      if tmux kill-session -t "$session" 2>/dev/null; then
+      if tmux kill-session -t "=$session" 2>/dev/null; then
         echo "Removed managed tmux session $session after remote Waypipe teardown." >&2
       else
         echo "Remote Waypipe teardown succeeded, but could not remove tmux session $session." >&2
@@ -2471,8 +2491,11 @@ chrome_reset() {
       echo "YubiKey cleanup remains incomplete; retry $PROGRAM stop $host before resetting." >&2
       return 1
     }
-    yk_needed=1
-  elif yk_local_candidate_exists; then
+    if [ "$chrome_yubikey_mode" != "off" ]; then
+      yk_needed=1
+    fi
+  elif [ "$chrome_yubikey_mode" = "force" ] ||
+    { [ "$chrome_yubikey_mode" = "auto" ] && yk_local_candidate_exists; }; then
     yk_needed=1
   fi
 
@@ -2519,7 +2542,7 @@ chrome_status_all() {
     [ -n "$session" ] || continue
     found_sessions=1
     printf '  %s\n' "$session"
-    if ! tmux list-windows -t "$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null; then
+    if ! tmux list-windows -t "=$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null; then
       echo "    windows unavailable (session may have exited)" >&2
       code=1
     fi
@@ -2602,9 +2625,9 @@ chrome_status_current() {
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
   need tmux
 
-  if tmux has-session -t "$session" 2>/dev/null; then
+  if tmux has-session -t "=$session" 2>/dev/null; then
     echo "status: tmux session running: $session"
-    windows="$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null || true)"
+    windows="$(tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null || true)"
     if [ -n "$windows" ]; then
       printf '%s\n' "$windows" | sed 's/^/status: window: /'
     else
@@ -3084,6 +3107,7 @@ yk_write_state() {
 
   if ! {
     printf 'remote\t%s\n' "$yk_remote"
+    printf 'usb_id\t%s\n' "$yk_usb_id"
     printf 'attempt_token\t%s\n' "$yk_attempt_token"
     printf 'phase\t%s\n' "$yk_phase"
     printf 'readiness\t%s\n' "$yk_readiness"
@@ -3117,6 +3141,7 @@ yk_load_state() {
   local value
   local state_remote=""
   local state_usbip_port=""
+  local state_usb_id=""
   local state_pid_file=""
   local bind_state_present=0
   local modern_state=0
@@ -3125,6 +3150,7 @@ yk_load_state() {
   while IFS=$'\t' read -r key value; do
     case "$key" in
       remote) state_remote="$value" ;;
+      usb_id) state_usb_id="$value" ;;
       attempt_token) modern_state=1; yk_attempt_token="$value" ;;
       phase) modern_state=1; yk_phase="$value" ;;
       readiness) modern_state=1; yk_readiness="$value" ;;
@@ -3143,6 +3169,13 @@ yk_load_state() {
   if [ "$state_remote" != "$yk_remote" ]; then
     echo "YubiKey state belongs to $state_remote, not $yk_remote: $yk_state_file" >&2
     return 2
+  fi
+  if [ -n "$state_usb_id" ]; then
+    if [[ ! "$state_usb_id" =~ ^[[:xdigit:]]{1,4}:[[:xdigit:]]{1,4}$ ]]; then
+      echo "YubiKey state has an invalid USB id: $yk_state_file" >&2
+      return 2
+    fi
+    yk_usb_id="$state_usb_id"
   fi
   if [ -n "$state_usbip_port" ]; then
     if [[ ! "$state_usbip_port" =~ ^[0-9]+$ ]] ||
@@ -3580,9 +3613,9 @@ doctor_notifications() {
   apps="$(notify_state_field "$state_file" apps)"
   probe_app="${apps%%,*}"
   [ "$probe_app" = "*" ] && probe_app="chrome"
-  marker="remote-chrome doctor probe ${SECONDS}.${RANDOM}"
+  marker="remote-chrome doctor probe ${BASHPID:-$$}.${SECONDS}.${RANDOM}"
   if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-    "busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications Notify susssasa{sv}i $(printf '%q' "$probe_app") 0 '' $(printf '%q' "remote-chrome doctor") $(printf '%q' "$marker") 0 0 5000" >/dev/null 2>&1; then
+    "busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications Notify susssasa{sv}i $(printf '%q' "$probe_app") 0 '' $(printf '%q' "$marker") $(printf '%q' 'Checking remote notification delivery') 0 0 5000" >/dev/null 2>&1; then
     echo "doctor: FAIL: remote notification probe failed; notifications will not be forwarded." >&2
     return 1
   fi
@@ -4638,7 +4671,7 @@ chrome_detached_cleanup() {
   [ "$chrome_detached_cleanup_done" = "0" ] || return 0
   chrome_detached_cleanup_done=1
   if [ -n "$chrome_detached_session" ]; then
-    tmux kill-session -t "$chrome_detached_session" >/dev/null 2>&1 || true
+    tmux kill-session -t "=$chrome_detached_session" >/dev/null 2>&1 || true
     chrome_remove_bootstrap_script "$chrome_detached_session"
   fi
   if [ "$chrome_detached_yk_owned" = "1" ]; then
@@ -4689,10 +4722,10 @@ chrome_wait_for_yubikey_window() {
           ;;
       esac
     fi
-    if ! tmux has-session -t "$session" 2>/dev/null; then
+    if ! tmux has-session -t "=$session" 2>/dev/null; then
       break
     fi
-    pane_state="$(tmux list-panes -t "$session:yubikey" -F '#{pane_dead}' 2>/dev/null || true)"
+    pane_state="$(tmux list-panes -t "=$session:=yubikey" -F '#{pane_dead}' 2>/dev/null || true)"
     if [[ "$pane_state" == *1* ]]; then
       break
     fi
@@ -4707,7 +4740,7 @@ chrome_wait_for_yubikey_window() {
     sleep 1
   done
 
-  pane_output="$(tmux capture-pane -p -t "$session:yubikey" 2>&1 || true)"
+  pane_output="$(tmux capture-pane -p -t "=$session:=yubikey" 2>&1 || true)"
   if [ -n "$pane_output" ]; then
     echo "YubiKey bootstrap pane output:" >&2
     printf '%s\n' "$pane_output" >&2
@@ -4733,7 +4766,8 @@ chrome_launch_detached_with_yubikey() {
 
   self="$(script_path)"
   chrome_detached_yk_token="${BASHPID:-$$}.${RANDOM}.${SECONDS}"
-  local yk_command=(env "REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN=$chrome_detached_yk_token" "$self" _yubikey-run "$host" "$@")
+  local yk_command=(env "REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN=$chrome_detached_yk_token" "$self" _yubikey-run "$host" \
+    --usb-id "$yk_usb_id" --port "$yk_usbip_port" "$@")
   yk_command_line="$(quote_command "${yk_command[@]}")"
   chrome_detached_session="$session"
   chrome_detached_cleanup_done=0
@@ -4754,7 +4788,7 @@ chrome_launch_detached_with_yubikey() {
     trap - INT TERM HUP
     return 1
   fi
-  tmux set-option -w -t "$session:yubikey" remain-on-exit failed >/dev/null 2>&1 || true
+  tmux set-option -w -t "=$session:=yubikey" remain-on-exit failed >/dev/null 2>&1 || true
 
   if ! chrome_wait_for_yubikey_window "$host" "$session"; then
     chrome_detached_cleanup
@@ -4762,7 +4796,7 @@ chrome_launch_detached_with_yubikey() {
     return 1
   fi
 
-  if ! tmux new-window -d -t "$session" -n chrome bash -c "$chrome_command_line"; then
+  if ! tmux new-window -d -t "=$session" -n chrome bash -c "$chrome_command_line"; then
     echo "Could not create the remote Chrome tmux window after YubiKey readiness." >&2
     chrome_detached_cleanup
     trap - INT TERM HUP
@@ -4798,6 +4832,12 @@ yk_start_impl() {
 
   local busid
   local usbip_timeout="${REMOTE_CHROME_USBIP_TIMEOUT:-5}"
+  local client_port_option=""
+  # Preserve the default scoped sudo command; custom ports need the USB/IP
+  # client's global option as well as the daemon and SSH reverse forward.
+  if [ "$yk_usbip_port" != "3240" ]; then
+    client_port_option=" --tcp-port $yk_usbip_port"
+  fi
   [[ "$usbip_timeout" =~ ^[0-9]+$ ]] || usbip_timeout=5
   [ "$usbip_timeout" -gt 0 ] || usbip_timeout=1
   busid="$(yk_first_busid)"
@@ -4828,7 +4868,7 @@ yk_start_impl() {
   yk_phase="tunnel-ready"
   yk_write_state || return $?
 
-  if ! yk_ssh "timeout $usbip_timeout usbip list -r 127.0.0.1 | grep -q '$busid:'"; then
+  if ! yk_ssh "timeout $usbip_timeout usbip$client_port_option list -r 127.0.0.1 | grep -q '$busid:'"; then
     echo "Remote host cannot see exported busid $busid through the SSH tunnel." >&2
     return 1
   fi
@@ -4836,7 +4876,7 @@ yk_start_impl() {
   yk_attach_state="attempting"
   yk_phase="attach-starting"
   yk_write_state || return $?
-  if ! yk_ssh "timeout $usbip_timeout sudo -n usbip attach -r 127.0.0.1 -b '$busid'"; then
+  if ! yk_ssh "timeout $usbip_timeout sudo -n usbip$client_port_option attach -r 127.0.0.1 -b '$busid'"; then
     echo "Could not attach remote YubiKey busid $busid." >&2
     return 1
   fi
@@ -5320,6 +5360,7 @@ def deliver(record, log_path, body_markup):
     command = ["notify-send", f"--app-name={app_name}", f"--urgency={urgency}"]
     if desktop_entry:
         command.append(f"--hint=string:desktop-entry:{desktop_entry}")
+    command.append("--")
     command.append(summary or plain_body[:MAX_SUMMARY])
     if body:
         command.append(body)
@@ -5358,7 +5399,7 @@ def handle_connection(connection, recent, log_path, body_markup):
     for line in buffer.splitlines():
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(record, dict):
             continue
@@ -5368,7 +5409,12 @@ def handle_connection(connection, recent, log_path, body_markup):
             log_line(log_path, "rate-limited")
             continue
         recent.append(now)
-        deliver(record, log_path, body_markup)
+        try:
+            deliver(record, log_path, body_markup)
+        except (TypeError, ValueError, RecursionError) as error:
+            # Each record is untrusted. Invalid hints, NULs, invalid Unicode,
+            # or excessive nesting must not terminate a session's listener.
+            log_line(log_path, f"invalid-record-dropped\t{type(error).__name__}")
 
 
 def main(argv):

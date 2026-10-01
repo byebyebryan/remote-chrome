@@ -43,6 +43,10 @@ forwarding from Starship to Snap, run `remote-chrome reset snap` on Starship;
 this tears down the old forwarding and waits for the new FIDO attachment before
 restarting Chrome. Save in-page work before resetting.
 
+New sessions retain their YubiKey mode across reset, including `--no-yubikey`.
+Forwarding state preserves the configured USB ID and port for the restarted
+child. Older sessions without mode metadata retain automatic detection.
+
 By default, the launcher detects a local YubiKey matching the configured USB
 vendor/product (default `1050:0407`). If one is present, forwarding is expected;
 the local and remote USB/IP module/sudo preflight must pass before tmux or Chrome
@@ -135,6 +139,8 @@ Remote forwarding requires passwordless scoped sudo for `modprobe vhci-hcd`,
 records only to root. The local and remote `timeout` command (from coreutils)
 is also required when forwarding, so every remote USB/IP operation remains
 bounded; Chrome-only launches do not require the USB/IP or timeout prerequisites.
+For a non-default `--yubikey-port PORT` or `REMOTE_CHROME_USBIP_PORT`, the remote
+sudo rule must permit `usbip --tcp-port PORT attach` as well.
 
 The child forwarding process waits up to 15 seconds after attach by default.
 Detached mode gives the parent an additional 5-second readiness grace period
@@ -244,7 +250,8 @@ all attributes are removed; literal text and entities are escaped for display.
 Summaries remain plain text. Capability detection uses local `busctl`; bodies
 fall back to plain text if markup support is unavailable or cannot be detected.
 Notification forwarding failures are advisory and
-never block or change a launch; local popups simply stop. `stop`, `reset`, and
+never block or change a launch. Malformed notification records are discarded
+individually so later valid notifications still arrive. `stop`, `reset`, and
 `stop` without a host clean up every recorded listener, local socket, remote
 socket, and state file. `doctor HOST` performs a round-trip probe when a live
 relay session is present. Per-session activity is recorded in

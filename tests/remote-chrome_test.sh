@@ -325,12 +325,12 @@ test_stop_without_host_stops_only_managed_tmux_sessions() (
 
   chrome_stop
 
-  assert_contains "$events" "kill:remote-chrome-host-one"
-  assert_contains "$events" "kill:remote-chrome-host-two"
+  assert_contains "$events" "kill:=remote-chrome-host-one"
+  assert_contains "$events" "kill:=remote-chrome-host-two"
   assert_contains "$events" "yubikey-all"
-  [[ "$events" != *"kill:remote-chrome "* ]] ||
+  [[ "$events" != *"kill:=remote-chrome "* ]] ||
     fail "global stop killed the exact-prefix non-managed tmux session"
-  [[ "$events" != *"kill:unrelated-session"* ]] ||
+  [[ "$events" != *"kill:=unrelated-session"* ]] ||
     fail "global stop killed an unrelated tmux session"
 )
 
@@ -674,8 +674,9 @@ while True:
 for args, case in zip(map(json.loads, lines), cases):
     _, _, expected_summary, rich, plain = case
     assert args[:2] == ["--app-name=Chrome", "--urgency=critical"], args
+    assert args[2] == "--", args
     if not case[1]:
-        assert args[2:] == [expected_summary], args
+        assert args[3:] == [expected_summary], args
         continue
     assert args[-2] == expected_summary, args
     body = args[-1]
@@ -695,6 +696,129 @@ VERIFY_NOTIFICATION_DELIVERY
     listener_pid=""
     assert_file_missing "$socket"
   done
+)
+
+test_notification_listener_isolates_bad_records_and_doctor_checks_delivery() (
+  local test_dir
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  python3 - "$repo_root" "$test_dir" <<'VERIFY_NOTIFICATION_RESILIENCE'
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+repo, root = map(Path, sys.argv[1:])
+fake_bin = root / "bin"
+fake_bin.mkdir()
+socket_path = root / "listener.sock"
+state = root / "remote-chrome-notify-fixture.state"
+log = Path(str(state) + ".log")
+capture = root / "delivered.jsonl"
+failure = root / "fail-delivery"
+fixtures = {
+    "busctl": '''#!/usr/bin/env python3
+print('{"type":"as","data":[["body-markup"]]}')
+''',
+    "notify-send": '''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+if Path(os.environ["NOTIFY_FAILURE"]).exists():
+    sys.exit(1)
+with open(os.environ["NOTIFY_CAPTURE"], "a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+''',
+    "ssh": '''#!/usr/bin/env python3
+import json, os, shlex, socket, sys
+args = shlex.split(sys.argv[-1])
+assert args[:3] == ["busctl", "--user", "call"], args
+assert args[6] == "Notify", args
+record = {"app_name": args[8], "summary": args[11], "body": args[12]}
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.connect(os.environ["NOTIFY_SOCKET"])
+    client.sendall(json.dumps(record).encode() + b"\\n")
+''',
+}
+for name, content in fixtures.items():
+    path = fake_bin / name
+    path.write_text(content)
+    path.chmod(0o700)
+env = os.environ | {
+    "PATH": str(fake_bin) + ":" + os.environ["PATH"],
+    "XDG_RUNTIME_DIR": str(root),
+    "NOTIFY_SOCKET": str(socket_path),
+    "NOTIFY_CAPTURE": str(capture),
+    "NOTIFY_FAILURE": str(failure),
+}
+listener = subprocess.Popen(
+    ["bash", str(repo / "bin/remote-chrome"), "_notify-listener", str(socket_path), str(log)],
+    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+
+def wait_for(predicate, label):
+    deadline = time.monotonic() + 5
+    while not predicate():
+        assert listener.poll() is None, f"listener exited: {log.read_text()}"
+        assert time.monotonic() < deadline, label
+        time.sleep(0.02)
+
+def send(blob):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(str(socket_path))
+        client.sendall(blob + b"\n")
+
+def deliveries():
+    return [json.loads(line) for line in capture.read_text().splitlines()] if capture.exists() else []
+
+def doctor():
+    return subprocess.run(
+        ["bash", "-c", 'source "$1"; doctor_notifications test-host',
+         "fixture", str(repo / "bin/remote-chrome")],
+        env=env, capture_output=True, text=True, timeout=8,
+    )
+
+try:
+    wait_for(lambda: socket_path.is_socket() and log.exists() and "started" in log.read_text(), "socket not ready")
+    # Excessively nested JSON is rejected before reaching the delivery handler.
+    send(b"[" * 2000 + b"0" + b"]" * 2000)
+    bad_records = [
+        {"summary": "bad urgency", "urgency": []},
+        {"summary": "bad body", "body": "before\x00after"},
+        {"summary": "bad Unicode", "body": "\ud800"},
+    ]
+    for index, record in enumerate(bad_records, 1):
+        send(json.dumps(record).encode())
+        send(json.dumps({"summary": f"healthy {index}", "body": "<b>still works</b>"}).encode())
+        wait_for(lambda: len(deliveries()) == index, "valid record lost after malformed input")
+        assert deliveries()[-1][-2:] == [f"healthy {index}", "<b></b><b>still works</b>"]
+    assert log.read_text().count("invalid-record-dropped") == len(bad_records)
+    send(json.dumps({"summary": "--help"}).encode())
+    wait_for(lambda: len(deliveries()) == 4, "option-like summary not delivered")
+    assert deliveries()[-1][-2:] == ["--", "--help"]
+
+    starttime = Path(f"/proc/{listener.pid}/stat").read_text().rsplit(") ", 1)[1].split()[19]
+    state.write_text(f"listener_pid\t{listener.pid}\nlistener_starttime\t{starttime}\nhost\ttest-host\napps\tchrome\n")
+    result = doctor()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "notification round-trip" in result.stdout
+    assert deliveries()[-1][-2].startswith("remote-chrome doctor probe ")
+    # An old successful probe must not hide a subsequent delivery failure.
+    time.sleep(1.05)
+    failure.touch()
+    result = doctor()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "never delivered locally" in result.stderr
+    assert "delivery-failed" in log.read_text()
+    assert listener.poll() is None
+finally:
+    if listener.poll() is None:
+        listener.terminate()
+    listener.wait(timeout=3)
+assert not socket_path.exists()
+VERIFY_NOTIFICATION_RESILIENCE
 )
 
 test_notify_stop_listener_reaps_recorded_process() (
@@ -895,8 +1019,12 @@ test_tmux_command_option_records_exact_raw_command() (
     case "$1" in
       set-option)
         [ "$2" = "-t" ] || return 1
-        [ "$4" = "$chrome_tmux_command_option" ] || return 1
-        recorded_command="$5"
+        [ "$3" = "=remote-chrome-test-host:" ] || return 1
+        case "$4" in
+          "$chrome_tmux_command_option") recorded_command="$5" ;;
+          "$chrome_tmux_yubikey_option") [ "$5" = "auto" ] || return 1 ;;
+          *) return 1 ;;
+        esac
         return 0
         ;;
       *) return 1 ;;
@@ -919,8 +1047,11 @@ test_reset_reads_canonical_option_before_teardown() (
         ;;
       show-options)
         [ "$3" = "-t" ] || return 1
-        [ "$5" = "$chrome_tmux_command_option" ] || return 1
-        printf '%s\n' "$command_line"
+        case "$5" in
+          "$chrome_tmux_command_option") printf '%s\n' "$command_line" ;;
+          "$chrome_tmux_yubikey_option") : ;;
+          *) return 1 ;;
+        esac
         ;;
       *) return 1 ;;
     esac
@@ -950,6 +1081,47 @@ test_reset_reads_real_tmux_chrome_and_yubikey_windows() (
   chrome_reset_read_pane "$session"
   [ "$chrome_reset_pane_pid" = "$expected_pid" ] || fail "real tmux pane PID was not parsed"
   [ "$chrome_reset_pane_command" = "$command_line" ] || fail "real tmux canonical command was not read"
+)
+
+test_tmux_targets_require_exact_sessions_and_windows() (
+  local test_dir output events=""
+  test_dir="$(mktemp -d)"
+  trap 'command tmux -S "$test_dir/tmux.sock" kill-server >/dev/null 2>&1 || true; rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  tmux() { command tmux -S "$test_dir/tmux.sock" -f /dev/null "$@"; }
+  tmux new-session -d -s remote-chrome-snapshot -n chromatic 'exec sleep 60'
+  yk_prepare_for_launch() { :; }
+  yk_stop() { :; }
+  yk_load_state() { return 1; }
+  notify_stop_listener() { :; }
+
+  chrome_stop snap >/dev/null 2>&1
+  tmux has-session -t '=remote-chrome-snapshot' || fail "stop snap killed snapshot"
+  if (chrome_attach snap) >"$test_dir/attach" 2>&1; then
+    fail "attach snap selected snapshot"
+  fi
+  if (chrome_reset snap --yes) >"$test_dir/reset" 2>&1; then
+    fail "reset snap selected snapshot"
+  fi
+  if chrome_status_current snap remote-chrome-snap >"$test_dir/status" 2>&1; then
+    fail "status snap reported snapshot as healthy"
+  fi
+  assert_contains "$(cat "$test_dir/status")" "session is not running"
+  chrome_launch() { events+="launch:$1 "; }
+  chrome_ensure snap
+  assert_contains "$events" "launch:snap"
+
+  if chrome_reset_read_pane remote-chrome-snapshot >"$test_dir/pane" 2>&1; then
+    fail "reset matched chromatic instead of the missing chrome window"
+  fi
+  chrome_tmux_record_command remote-chrome-snapshot 'waypipe --no-gpu ssh snapshot bash -s -- x'
+  tmux rename-window -t '=remote-chrome-snapshot:=chromatic' chrome
+  chrome_reset_read_pane remote-chrome-snapshot
+  tmux has-session -t '=remote-chrome-snapshot' || fail "matching checks killed snapshot"
+  chrome_stop snapshot >/dev/null 2>&1
+  if tmux has-session -t '=remote-chrome-snapshot' 2>/dev/null; then
+    fail "exact stop did not stop snapshot"
+  fi
 )
 
 test_tmux_command_option_failure_cleans_new_session() (
@@ -993,13 +1165,17 @@ test_reset_recreation_restores_canonical_option_for_repeated_reset() (
     case "$1" in
       has-session) [ "$session_alive" -eq 1 ] ;;
       list-panes) printf '%s|%s|%s\n' '%0' 4242 'bash -c wrapped-command' ;;
-      show-options) printf '%s\n' "$option_value" ;;
+      show-options)
+        [ "$5" != "$chrome_tmux_command_option" ] || printf '%s\n' "$option_value"
+        ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) session_alive=0 ;;
       new-session) session_alive=1 ; events+="new-session:$* " ;;
       set-option)
-        option_value="$5"
-        set_count=$((set_count + 1))
+        if [ "$4" = "$chrome_tmux_command_option" ]; then
+          option_value="$5"
+          set_count=$((set_count + 1))
+        fi
         events+="set-option "
         ;;
       *) return 1 ;;
@@ -1641,12 +1817,12 @@ test_attach_uses_tmux_context_appropriate_action() (
 
   unset TMUX
   chrome_attach test-host
-  assert_contains "$events" "attach:remote-chrome-test-host"
+  assert_contains "$events" "attach:=remote-chrome-test-host"
 
   events=""
   TMUX="/tmp/tmux-test/default,1,0"
   chrome_attach test-host
-  assert_contains "$events" "switch:remote-chrome-test-host"
+  assert_contains "$events" "switch:=remote-chrome-test-host"
 )
 
 test_subcommands_accept_help() (
@@ -3663,6 +3839,144 @@ test_reset_remote_failure_keeps_tmux_and_absent_group_recreates_command() (
   assert_contains "$events" "new:"
 )
 
+test_reset_preserves_explicit_yubikey_opt_out() (
+  local test_dir alive=0 canonical="" mode="" events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  REMOTE_CHROME_NOTIFICATIONS=0
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { :; }
+  tmux() {
+    case "$1" in
+      has-session) [ "$alive" = 1 ] ;;
+      new-session) alive=1 ;;
+      set-option)
+        case "$4" in
+          "$chrome_tmux_command_option") canonical="$5" ;;
+          "$chrome_tmux_yubikey_option") mode="$5" ;;
+          *) return 97 ;;
+        esac
+        ;;
+      show-options)
+        case "$5" in
+          "$chrome_tmux_command_option") printf '%s\n' "$canonical" ;;
+          "$chrome_tmux_yubikey_option") printf '%s\n' "$mode" ;;
+          *) return 97 ;;
+        esac
+        ;;
+      list-panes) printf '%s\n' '%0|4242|bash -c frozen-command' ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) alive=0 ;;
+      *) return 97 ;;
+    esac
+  }
+  yk_local_candidate_exists() { events+="key-detection "; return 0; }
+  yk_preflight_for_forwarding() { fail "opt-out reset ran forwarding preflight"; }
+  chrome_launch_detached_with_yubikey() { fail "opt-out reset started forwarding"; }
+  chrome_reset_find_local_ssh() { chrome_reset_remote_socket="$test_dir/waypipe.sock"; }
+  chrome_reset_remote_identity() { return 1; }
+
+  chrome_launch test-host --no-yubikey >/dev/null
+  [ "$mode" = off ] || fail "launch did not record the YubiKey opt-out"
+  chrome_reset test-host --yes >/dev/null 2>&1
+  chrome_reset test-host --yes >/dev/null 2>&1
+  [ "$mode" = off ] || fail "repeated reset forgot the YubiKey opt-out"
+  [ -z "$events" ] || fail "opt-out reset detected an attached key"
+  mode=invalid
+  if chrome_reset test-host --yes >"$test_dir/invalid" 2>&1; then
+    fail "reset accepted invalid launch metadata"
+  fi
+  [ "$alive" = 1 ] || fail "invalid metadata reset killed the session"
+)
+
+test_yubikey_custom_settings_survive_state_and_detached_restart() (
+  local test_dir fake_launcher child_args
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket="$test_dir/control.sock"
+  yk_prepare_for_launch test-host --usb-id 1050:0402 --port 3300
+  yk_write_state
+  yk_usb_id=1050:0407
+  yk_usbip_port=3240
+  yk_load_state
+  [ "$yk_usb_id" = 1050:0402 ] || fail "state lost the configured USB id"
+  [ "$yk_usbip_port" = 3300 ] || fail "state lost the configured port"
+  rm -- "$yk_state_file"
+
+  fake_launcher="$test_dir/fake-launcher"
+  export YUBIKEY_TEST_ARGS="$test_dir/child-args"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" >"$YUBIKEY_TEST_ARGS"' >"$fake_launcher"
+  chmod +x "$fake_launcher"
+  script_path() { printf '%s\n' "$fake_launcher"; }
+  chrome_wait_for_yubikey_window() { :; }
+  tmux() {
+    case "$1" in
+      new-session) bash -c "$7" ;;
+      new-window|set-option) : ;;
+      *) return 97 ;;
+    esac
+  }
+  chrome_launch_detached_with_yubikey test-host remote-chrome-test-host 'unused fixture command'
+  child_args="$(cat "$YUBIKEY_TEST_ARGS")"
+  [ "$child_args" = $'_yubikey-run\ntest-host\n--usb-id\n1050:0402\n--port\n3300' ] ||
+    fail "detached restart lost configured forwarding settings: $child_args"
+  printf 'remote\ttest-host\nusb_id\tinvalid\n' >"$yk_state_file"
+  if yk_load_state >"$test_dir/invalid" 2>&1; then
+    fail "state accepted an invalid USB id"
+  fi
+)
+
+test_yubikey_remote_clients_use_configured_port() (
+  local test_dir port
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/usbip" <<'FAKE_USBIP_CLIENT'
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["USBIP_TEST_ARGS"], "a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\n")
+if "list" in sys.argv:
+    print("5-1.2.2:")
+FAKE_USBIP_CLIENT
+  cat >"$test_dir/bin/sudo" <<'FAKE_USBIP_SUDO'
+#!/usr/bin/env bash
+[ "$1" = -n ] || exit 97
+shift
+[ "$1" = usbip ] || exit 97
+exec "$@"
+FAKE_USBIP_SUDO
+  chmod +x "$test_dir/bin/usbip" "$test_dir/bin/sudo"
+  export PATH="$test_dir/bin:$PATH"
+  yk_ensure_local_ready() { :; }
+  yk_ensure_remote_ready() { :; }
+  yk_write_state() { :; }
+  yk_first_busid() { printf '5-1.2.2\n'; }
+  yk_local_busid_bound() { return 1; }
+  sudo() { [ "$*" = 'usbip bind -b 5-1.2.2' ]; }
+  yk_open_tunnel() { :; }
+  yk_ssh() { bash -c "$*"; }
+  yk_wait_remote_ready() { yk_readiness=verified-fido; }
+  for port in 3240 3300; do
+    yk_usbip_port="$port"
+    export USBIP_TEST_ARGS="$test_dir/$port.jsonl"
+    yk_start_impl >/dev/null
+    python3 - "$USBIP_TEST_ARGS" "$port" <<'VERIFY_USBIP_PORT'
+import json, sys
+from pathlib import Path
+commands = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+prefix = [] if sys.argv[2] == "3240" else ["--tcp-port", sys.argv[2]]
+assert commands == [
+    prefix + ["list", "-r", "127.0.0.1"],
+    prefix + ["attach", "-r", "127.0.0.1", "-b", "5-1.2.2"],
+], commands
+VERIFY_USBIP_PORT
+  done
+)
+
 test_reset_yubikey_and_chrome_only_recreation_sequence() (
   local test_dir events="" command_line="waypipe --no-gpu ssh test-host google-chrome-stable --new-window"
   test_dir="$(mktemp -d)"
@@ -3704,6 +4018,11 @@ test_reset_yubikey_and_chrome_only_recreation_sequence() (
 )
 
 tests=(
+  test_tmux_targets_require_exact_sessions_and_windows
+  test_notification_listener_isolates_bad_records_and_doctor_checks_delivery
+  test_reset_preserves_explicit_yubikey_opt_out
+  test_yubikey_custom_settings_survive_state_and_detached_restart
+  test_yubikey_remote_clients_use_configured_port
   test_start_rolls_back_partial_setup
   test_second_start_cannot_clean_existing_attempt
   test_stop_removes_orphan_attempt_lock_without_state
