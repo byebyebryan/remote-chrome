@@ -1,0 +1,243 @@
+Headless remote-chrome notifications: feasibility study
+2026-10-02 | Snap -> private test environment | production HEAD 9c9256f
+
+Implementation roadmap update: roadmap.txt supersedes the initial release
+scope and effort estimate below. Its first milestone resolves the actions
+capability contract with a real callback path. The experiments here remain
+evidence of compatibility, not proof of full protocol conformance.
+
+Decision
+
+Proceed with a narrowly scoped fallback notification endpoint for the usual
+single Starship-to-Snap session. Target the org.freedesktop.Notifications
+D-Bus contract and capability negotiation. The tested browser selected the
+native backend, and the unchanged forwarder/listener produced the expected
+local notification arguments, including supported markup. The missing
+endpoint is a practical fix for headless native notifications.
+
+The main implementation cost is ownership and cleanup. A fallback on Snap's
+normal user bus owns a session-wide service name. Quickshell does not preempt
+it automatically. The initial design should use the existing office handoff:
+run remote-chrome stop on Snap before using Snap's desktop, releasing the
+fallback together with the incoming remote session. Seamless coexistence with
+a newly started desktop requires additional design and acceptance testing.
+
+Budget approximately one working day for a bounded implementation, lifecycle
+tests, documentation, and real Snap/Starship acceptance. This is an engineering
+estimate, not a measured delivery time. Transparent desktop takeover, multiple
+simultaneous headless sessions, and interactive notification callbacks should
+be estimated separately.
+
+Compatibility boundary
+
+Implement the standard service/object/interface, method signatures, returned
+notification IDs, close/replacement semantics, and supported signals. Use
+GetCapabilities and successful protocol calls to establish readiness. Retain
+browser/server versions as diagnostic and experiment metadata; do not pin
+Chrome or branch behavior on its version number.
+
+The core methods and capability negotiation are present in the published
+2010 specification and remain in the current specification. That supports
+expecting a stable compatibility boundary, without assuming that every
+browser's choice of required optional capabilities is fixed forever. Keep
+protocol-level checks independent of a particular Chrome release, plus a
+real-browser interoperability check using whichever supported Chrome is
+installed. Unknown optional hints/capabilities should not break the service.
+The body/actions requirement observed below describes the tested client's
+native-backend selection; it is not a universal minimum imposed by the spec.
+
+Current live diagnosis
+
+Snap's normal user bus and Chrome's existing filtered proxy both had no owner
+for org.freedesktop.Notifications. The installed Plasma activation service
+executes plasma_waitforname; journal evidence showed it timing out because
+no notification service appeared. The current relay observes Notify calls;
+it cannot provide the missing service itself. The Starship listener was alive
+with markup enabled, but its log contained only the startup entry.
+
+Being headless is not inherently incompatible with native notifications. A
+notification service must implement the required D-Bus interface; it need not
+draw a window. Chrome uses its own notification windows when no acceptable
+native backend initializes. Exposing the name through xdg-dbus-proxy alone
+does not create that backend. The README/usage statements that the existing
+proxy permission prevents fallback need qualification when implementing this
+fix: an available, compatible service is also required.
+
+Experiment setup
+
+- Google Chrome 154.0.8037.97 on Snap.
+- Source launcher SHA-256:
+  bb604a453ec77f49bc219d121d2d368897dedd68fc3bd6304e8ac3c4191765cf
+- Private D-Bus socket under a newly created study-only /tmp directory, with
+  no service activation directories or systemd activation configured.
+- KWin virtual Wayland compositor on its own socket and isolated XDG paths.
+- Disposable Chrome profiles and a localhost-only HTML page. Notifications
+  were created through the actual Web Notification API after granting the
+  disposable origin permission through local Chrome DevTools Protocol.
+- An xdg-dbus-proxy using the production allowlist for Secrets and
+  Notifications. The portal remained unavailable in this isolated bus.
+- A minimal Python D-Bus endpoint, guarded to accept only study-private bus
+  addresses. It implements GetCapabilities, GetServerInformation, Notify,
+  CloseNotification, and notification/action signals.
+- The exact embedded production forwarder, extracted without modification.
+- The production _notify-listener, with capture-only notify-send and a fake
+  local capability response. This records the exact command arguments that
+  would be sent to the local daemon without displaying a real notification.
+- Installed Quickshell with a minimal, offscreen NotificationServer config,
+  for desktop ownership/handoff tests. The full DMS configuration was not run.
+
+Observed results
+
+1. An endpoint advertising body and body-markup, but no actions, was queried
+   and rejected by Chrome: the webpage received show, but there was no native
+   Notify call. Chromium's exact-version source also requires both body and
+   actions before selecting this native backend.
+
+2. With no notification owner, a fresh Chrome instance made no native Notify
+   call. Starting the endpoint afterward did not repair that running instance:
+   a second notification still produced no endpoint call during the bounded
+   observation, and the endpoint received no capability/server-info queries.
+   Plan to start and verify the service before starting Chrome. Initial
+   deployment will require restarting the managed Chrome session once.
+
+3. An endpoint advertising body, actions, and body-markup worked through the
+   filtered proxy. Chrome called GetCapabilities and GetServerInformation,
+   then Notify with app name Google Chrome, summary/body, a notification ID,
+   and default/settings actions. No real desktop was required.
+
+4. The unchanged relay captured that native notification and passed these
+   body arguments to its capture-only notify-send:
+
+   <b></b>127.0.0.1:33801<br/><br/>Native body &amp; &lt;format&gt; test
+
+   The existing sanitizer preserved a separate D-Bus markup fixture:
+
+   <b></b><b>Bold</b> <i>Italic</i> <u>Underline</u><br/>A &amp; B
+
+   Chrome escapes markup-like text supplied as a webpage notification body;
+   the markup fixture establishes support for protocol-provided formatting.
+   This does not mean arbitrary HTML from a website becomes rich HTML.
+
+5. A manual ActionInvoked signal reached the actual webpage click handler,
+   and closing the Web Notification reached CloseNotification on the endpoint.
+   These prove endpoint compatibility. They do not make the existing relay
+   clickable: it drops action information and has no return channel or local
+   notification-ID mapping. Remote replacements, expiry, and local dismissal
+   synchronization are also outside the current informational relay.
+
+6. ALLOW_REPLACEMENT | DO_NOT_QUEUE (RequestName flags 5) did not steal an
+   existing service. A second endpoint received NAME_EXISTS and exited. It
+   never became owner after the incumbent exited, proving it was not queued.
+
+7. Quickshell started while the fallback owned the name, reported that it
+   would retry after unregistration, and did not preempt it. After fallback
+   exit, Quickshell became owner in approximately 40 ms. Starting another
+   fallback while Quickshell owned the name preserved that owner.
+
+8. A Chrome instance that initially selected native notifications remained
+   running through fallback exit and Quickshell takeover. A subsequent Web
+   Notification was relayed successfully through the new notification owner.
+   Outstanding notification IDs/callbacks across that transition were not
+   tested; preserving every existing notification would need more work.
+
+9. All explicitly spawned test processes exited. A process-list check found
+   no remaining study Chrome/compositor/endpoint processes. The production
+   Snap Chrome/bootstrap/proxy/forwarder PIDs and Starship tmux Chrome pane
+   remained present with their original identities. The real Snap user bus
+   still had no notification owner, and Starship's real listener log did not
+   gain study deliveries. No production launcher/configuration was changed,
+   no live browser was restarted, and nothing was committed or deployed.
+
+Recommended implementation boundary
+
+Start a small fallback only when notifications are enabled and no suitable
+notification service exists. Acquire the standard name atomically, without
+replacement or queueing; complete capability/server-info readiness before
+Chrome starts. Reuse an existing real desktop daemon without owning or
+stopping it. Recognize a managed fallback already in use, rather than blindly
+treating it as an independent desktop service: initially refuse an ambiguous
+second headless session instead of introducing shared-helper lifetime rules.
+
+Tie the fallback to the exact managed bootstrap lifecycle, using the existing
+PID/start-time/socket ownership discipline. Every launch failure, ordinary
+exit, signal, reset, and incoming stop must release only the owned helper.
+Use bounded local readiness checks; a healthy helper should become ready in
+well under a second. Report unavailable dependencies or readiness clearly,
+and retain the existing secure Secret Service startup requirements.
+
+Implement notification IDs, replacement/close handling, and bounded expiry
+state according to the notification protocol. Advertise only capabilities
+implemented at that endpoint. The experiment's actions requirement does not
+establish end-to-end click support. See roadmap.txt for the callback work
+needed before releasing a helper that advertises that capability.
+
+The dependency fit is good on Snap: python-dbus and python-gobject are already
+installed. They would be additional remote-host prerequisites elsewhere;
+plain Python alone cannot export this service using the existing dependencies.
+
+Before accepting the production fix, validate an actual managed launch using
+gnome-libsecret and the real profile, native notification delivery through
+the real SSH reverse socket to Starship's DMS, reset/stop cleanup, Chrome
+failure rollback, no-notifications behavior, an existing desktop daemon, and
+the office incoming-stop handoff. Correct the existing documentation's
+unconditional native-backend claims.
+
+Limits and alternatives
+
+The experiment replaced the SSH segment with a private local Unix socket and
+captured notify-send arguments. It proves Chrome/backend compatibility and
+reuse of the existing relay/formatter, not a fresh SSH/Waypipe transport test
+or visual DMS acceptance. The earlier live transport inspection is supporting
+evidence only. The test Chrome used --password-store=basic with disposable
+profiles; production Safe Storage, wallet unlocking, FIDO, and reboot recovery
+were not exercised or altered by this study.
+
+A user-bus fallback is session-wide, so non-Chrome applications also see it.
+While Snap is headless this can be acceptable, but it must exit before normal
+desktop notification use. Simply setting ALLOW_REPLACEMENT does not solve
+this because Quickshell does not request replacement. Detecting desktop
+requests and yielding, or sharing one daemon across multiple managed sessions,
+introduces additional lifecycle/routing cases. The current passive monitors
+also observe all matching Chrome notifications on the same user bus; this
+study does not establish routing isolation between simultaneous sessions.
+
+A Chrome-private bus would avoid taking the global Notifications name, but
+would require a complete Secret Service bridge, including session objects,
+paths, and signals, or another supported bus-routing mechanism. The current
+xdg-dbus-proxy allowlist filters one upstream bus; it does not combine two
+buses by service name. Changing that boundary is disproportionate to the
+informational-notification fix and is not recommended for the first version.
+
+Reproduction and evidence
+
+Run from the repository root on a host with the dependencies listed above:
+
+  rtk proxy python3 docs/studies/headless-notifications/study.py
+
+The script creates a unique private /tmp directory, prints observations,
+records results.json and logs there, and cleans up its owned processes on
+success or failure. It retains only disposable scratch files for inspection.
+The successful run's evidence is saved in the study directory as an
+uncommitted results.json artifact. These fixtures are study tools, not the
+proposed production service or a replacement for launcher regression tests.
+
+Primary references
+
+Desktop Notifications protocol: capabilities, methods, IDs, and signals
+https://specifications.freedesktop.org/notification/latest-single/
+
+Published 2010 specification and its core protocol methods
+https://specifications.freedesktop.org/notification/1.2/
+https://specifications.freedesktop.org/notification/1.2/protocol.html
+
+Tested browser's native notification initialization (reproduction evidence)
+https://chromium.googlesource.com/chromium/src/+/refs/tags/154.0.8037.97/chrome/browser/notifications/notification_platform_bridge_linux.cc
+
+D-Bus RequestName flags and queue/ownership semantics
+https://dbus.freedesktop.org/doc/dbus-specification.html
+
+Quickshell notification server registration and unregistration retry
+https://raw.githubusercontent.com/quickshell-mirror/quickshell/master/src/services/notifications/server.cpp
+
+Python D-Bus service objects, methods/signals, and GLib loop
+https://dbus.freedesktop.org/doc/dbus-python/tutorial.html

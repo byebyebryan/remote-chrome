@@ -1,0 +1,305 @@
+Headless notifications: implementation roadmap
+2026-10-02 | planning only | based on report.txt and results.json
+
+Outcome and compatibility boundary
+
+When Starship runs remote-chrome snap and Snap has no notification daemon,
+managed Chrome should use a native notification endpoint. Notifications should
+appear through Starship's desktop with the existing safe formatting. Running
+remote-chrome stop on Snap should release that endpoint together with the
+incoming session so Snap's desktop can own notifications at the office.
+
+Compatibility follows org.freedesktop.Notifications and negotiated capabilities.
+Browser versions are experiment metadata. No Chrome version pin, version gate,
+or version-dependent implementation branch is proposed.
+
+The feasibility study established browser/backend compatibility and formatter
+reuse. It did not establish production lifecycle correctness, real Starship
+visual acceptance, or a complete standard-compliant forwarding service.
+
+One refinement changes the minimum release scope: the tested browser requires
+actions to select native notifications, while the specification defines that
+capability as providing actions to the user. Exporting a signal or accepting
+an action list alone is not sufficient. The current relay drops actions and
+has no callback path. A faithful v1 therefore includes basic action forwarding
+for helper-backed notifications, subject to the first milestone's experiment.
+Do not ship an informational sink that falsely advertises actions.
+
+Default decisions
+
+- One owned fallback endpoint per managed headless session, on the normal
+  remote user bus. One simultaneous managed fallback per user bus for v1.
+- Reuse an existing compatible real notification daemon. Preserve its owner
+  and lifecycle. Its existing passive forwarding path remains informational;
+  action callbacks in v1 belong to the new helper-backed path.
+- Acquire the name atomically without replacing or queueing behind an owner.
+  A managed fallback already in use is an explicit busy condition, not an
+  invitation to silently share it or assume it is an independent daemon.
+- Keep the filtered Chrome bus and secure Secret Service lookup. The endpoint
+  does not require a complete desktop, permanent daemon, or private-bus
+  Secret Service bridge.
+- Use the current incoming-stop command for office handoff. Automatic desktop
+  takeover and shared helper lifetimes are later options.
+- Keep current commands and notification enable/disable controls. No new
+  mandatory command syntax is needed.
+- Setup/runtime failures are visible in diagnostics. Do not silently restart
+  Chrome to repair notifications. Disabling notifications remains available.
+- No offline notification replay, icon-file transfer, inline replies, or
+  persistence capability in the first release.
+
+Behavior by situation
+
+Notifications disabled       Start no fallback; preserve current disabled mode.
+Compatible desktop owner     Reuse it; never record it as an owned helper.
+No owner, capable listener   Start and verify the exact session-owned fallback.
+Another managed fallback     Reject a second enabled managed session clearly.
+Setup/bindings unavailable   Warn, clean partial helper state, launch securely
+                            with notification mode reported unavailable.
+Relay fails after startup    Report degraded delivery; bound failures and state;
+                            no replay or automatic browser restart.
+Office incoming stop        Stop the tracked session and release only its helper.
+
+The ordinary setup-failure policy and the second-session ownership conflict
+are deliberately distinct. A busy managed fallback must not be disguised as
+an independent desktop daemon that the new session can reuse safely.
+
+Architecture
+
+Owned-helper mode:
+
+  Snap Chrome
+      -> filtered D-Bus proxy
+      -> Snap session-owned notification endpoint
+      <-> existing reverse SSH Unix socket, with bidirectional session messages
+      <-> Starship listener and existing sanitizer
+      <-> Starship notification daemon
+
+The helper owns source notification IDs and maps them to the listener's local
+IDs. Local action/close events return through the same connection to the
+helper, which emits the appropriate D-Bus signals for Chrome. There is no
+additional SSH connection per notification or callback.
+
+Prefer a direct local D-Bus client for the interactive path: it can obtain
+local IDs, replace/close notifications, and receive actions without keeping
+one notify-send --wait process alive per notification. Keep the existing
+sanitizer as the shared rendering boundary and retain compatibility with
+the old informational records.
+
+Existing-daemon mode:
+
+  Snap Chrome -> existing Snap daemon
+  existing passive monitor -> current reverse socket -> Starship listener
+
+Only one producer runs for each session: do not run a passive Notify monitor
+and the owned helper's direct producer together, which would duplicate
+deliveries. Supporting simultaneous sessions observing one real desktop bus
+remains a separate routing problem; v1 does not claim to solve it.
+
+Milestone 0: close the remaining contract/transport gap
+Indicative effort: half a day. Required before production implementation.
+
+Extend the isolated fixture with a real action round trip through the listener
+and a private destination notification daemon. Use a source endpoint, private
+destination bus, and disposable browser; do not exercise the live desktop.
+
+Demonstrate a user action at the destination returning as ActionInvoked to
+the actual Web Notification handler. Also demonstrate replacement, source
+close, destination dismissal, and expiry mapping. The study's manual
+TriggerAction method is not the release acceptance path.
+
+Probe destination GetCapabilities before the helper claims readiness. Define
+which capabilities can truthfully be advertised and what happens when the
+destination lacks actions. Native mode should be reported unavailable rather
+than faking that capability. Confirm that the selected local D-Bus client can
+observe actions while using the same formatting logic.
+
+Gate: a standard-faithful minimum path works with the supported desktop.
+If the destination UI/client cannot provide it, revise scope and estimate
+before claiming the endpoint is production-ready. Retain the successful
+content-only experiment as feasibility evidence, not full conformance.
+
+Milestone 1: implement the endpoint and relay contract
+Indicative effort: half to one day after milestone 0.
+
+Implement the standard notification methods and supported signals, with
+explicit signatures and capabilities. Maintain IDs and valid replacement,
+close, and expiry behavior; bound active state without silently reusing IDs.
+Handle malformed arguments and unknown optional hints predictably. Return
+clear errors for requests that cannot be accepted.
+
+Define a small relay schema with message kind, session identity, helper
+generation, source ID, allowed action keys, and sanitized notification data.
+Keep source/local ID maps scoped to that session and generation. Reject
+unknown IDs, actions not offered by the notification, and stale callbacks
+after reset. Use bounded records, queues, and active-notification capacity.
+
+Use one persistent bidirectional connection for owned-helper mode. D-Bus
+dispatch must remain responsive while socket I/O runs separately. Bound
+connect/write/reconnect work; do not retain an unbounded backlog or replay
+expired notifications after reconnect. Record transport degradation once
+and recovery separately, without flooding logs.
+
+Keep the local listener compatible with current one-way records. Add the
+interactive local D-Bus path, reuse existing formatting/sanitization, and
+route destination events back to the correct helper. Derive helper
+capabilities from implemented features and destination support. Inline reply,
+images, persistence, and cross-compositor activation tokens remain separate
+features; do not advertise them.
+
+Gate: private-bus protocol tests and real disposable-browser interoperability
+pass without relying on a particular browser version number.
+
+Milestone 2: integrate ownership, startup, and cleanup
+Indicative effort: half to one day; can overlap with milestone 1 work.
+
+Integrate as an embedded Python helper in the single-file launcher, following
+the existing bootstrap/forwarder packaging style. Write only private runtime
+artifacts. Dependency checks are mode-specific: the new source/destination
+D-Bus paths require Python D-Bus and GLib bindings; existing disabled or
+legacy paths should not gain unnecessary requirements.
+
+Startup sequence:
+  1. Prepare the local listener and reverse socket using the current flow.
+  2. Keep the secure Secret Service checks and filtered proxy policy.
+  3. Inspect notification ownership without triggering stale daemon activation.
+  4. Reuse a compatible desktop daemon, or atomically claim an owned fallback.
+  5. Establish helper/listener capabilities and complete protocol readiness.
+  6. Start Chrome only after the selected notification path is ready, or after
+     clearly reporting unavailable native notification setup under the chosen
+     best-effort launch policy.
+
+Name acquisition resolves races; a prior owner check is only advisory. If a
+desktop daemon wins, re-probe that daemon without claiming ownership of it.
+If another managed fallback wins, refuse the competing helper session with
+clear guidance to stop the old session. Do not add shared-daemon leases in v1.
+
+Use the existing PID/start-time/parent ownership discipline for the helper,
+and exact ownership for its runtime artifacts. Add it to the bootstrap cleanup
+ledger immediately after spawn. Cleanup is idempotent on launch rollback,
+Chrome exit, INT/TERM/HUP, reset, and incoming stop. Preserve unrelated owners
+and reused PIDs. Retain evidence when an identity is ambiguous.
+
+Local readiness should normally complete in well under a second, with a
+short overall deadline; propose two seconds, adjusted only by measured test
+evidence. There is no 15-second desktop wait. Runtime transport failures
+must not block the D-Bus main loop or stop/reset cleanup.
+
+Notifications remain an auxiliary feature: if owned setup fails, clean its
+resources, emit an actionable warning, and preserve the secure browser
+launch behavior. The native-readiness state must not claim success. After
+recovery, an explicit managed reset may be needed because the browser may
+have already selected fallback. A competing managed fallback is a distinct
+ownership conflict and should not be silently reused.
+
+Gate: cleanup matrix passes; no pre-existing daemon or unrelated process is
+terminated; office incoming-stop releases the owned notification name.
+
+Milestone 3: diagnostics, regression coverage, and documentation
+Indicative effort: half a day.
+
+Status should distinguish the selected backend (existing daemon, owned
+fallback, disabled, or unavailable), helper identity/ownership, transport
+health, negotiated capabilities, and recent delivery failures. Status must
+remain read-only. Doctor may probe a live managed path according to its
+existing visible-probe behavior; command availability is not delivery proof.
+
+Add meaningful checks at two levels:
+
+- Private-bus protocol/integration tests: methods, signatures, supported
+  capabilities, IDs, replacements, closes, expiry, actions, stale events,
+  peer disconnect, bounded state, and name-acquisition races.
+- Launcher tests: existing-owner reuse, fallback startup, missing bindings,
+  readiness failure, Chrome failure, repeated cleanup, reset, incoming stop,
+  changed PID identity, and --no-notifications behavior. Exercise the real
+  generated bootstrap, not only string-presence assertions.
+
+Keep the current isolated tmux/runtime test defaults. Run the fast contract
+tests in CI with Python D-Bus/GLib and a private bus; run disposable graphical
+browser acceptance on Snap using the installed browser. Record its version
+as evidence. Browser acceptance does not replace contract tests.
+
+Update README.md and docs/usage.md: native mode needs a compatible endpoint;
+allowing a name through the proxy is insufficient. Describe mode-specific
+dependencies, helper-backed actions, informational existing-daemon forwarding,
+single-fallback scope, the office stop workflow, and recovery/reset behavior.
+
+Gate: ./scripts/check and new private-bus checks pass with aggregate exit codes,
+and documentation describes only behavior demonstrated by those checks.
+
+Milestone 4: controlled host acceptance and release
+Indicative effort: half a day, including review and CI.
+
+On real hosts validate:
+
+- Starship -> headless Snap: actual managed launch, real secure storage/profile,
+  native content, safe rich formatting, a user action reaching Chrome, and
+  close/replacement/dismissal behavior through the real reverse SSH socket.
+- Snap -> office desktop: incoming stop removes the exact helper and releases
+  the service name; DMS/Quickshell can own it and ordinary local notifications
+  work. No assumption that ALLOW_REPLACEMENT makes Quickshell preempt it.
+- Desktop already running: reuse its service without stopping it; current
+  informational forwarding behavior is preserved and documented.
+- Disabled notifications and broken forwarding: correct diagnostics, bounded
+  cleanup, no hidden helper ownership, and working browser/link handoff.
+- Reset: one controlled browser restart activates the new path, subsequent
+  stop/reset leave no owned helper/listener/socket artifacts. Confirm no
+  regression to existing secure-session or YubiKey ownership behavior.
+
+Review the final patch and stage only intended source, test, documentation,
+and study artifacts. Commit, push, observe CI, and sync/deploy the exact
+commit on Snap and Starship when implementation/release is requested.
+Verify installed resolution and hashes on both hosts. Keep checkout/installed
+state separate from whether the active session is running the new bootstrap.
+
+Rollback uses the previous known-good commit and a controlled reset/stop of
+the exact new session. Verify helper name/artifact release and installed
+hashes. Do not leave the new service behind after rolling the launcher back.
+
+Gate: both-host installed checks, CI, real DMS acceptance, and office handoff
+pass. A clean Git worktree alone is insufficient release acceptance.
+
+Later roadmap, only when there is a demonstrated need
+
+1. Automatic office handoff: investigate a desktop-start hook that invokes
+   the existing incoming-stop workflow. Make its session-closing effect
+   explicit. Transparent yielding while Chrome remains active is a separate
+   design, including pending IDs/actions across daemon changes.
+2. Multiple headless sessions: introduce deliberate routing isolation and
+   shared-helper lifetime rules only if required. Passive bus monitors and
+   per-session leases alone do not prove correct destination routing.
+3. Richer interaction/presentation: inline replies, images/icons, persistence,
+   or activation behavior require separate capability negotiation, transport
+   limits, and desktop acceptance.
+
+Files expected to change during implementation
+
+bin/remote-chrome                 endpoint, listener, bootstrap, diagnostics
+tests/remote-chrome_test.sh        launch/ownership/cleanup regression coverage
+tests/*notifications*.py          proposed private-bus contract/relay tests
+scripts/check                    required new check invocation/dependencies
+.github/workflows/ci.yml          private-bus test prerequisites
+README.md and docs/usage.md       guarantees, requirements, handoff, recovery
+docs/studies/headless-notifications/*  evidence and release-boundary record
+
+No production files have been edited for this roadmap. The existing study
+scripts remain experimental tools; they are not installed services.
+
+Estimate and next implementation checkpoint
+
+Allow roughly two to four working days for milestones 0-4, including a minimal
+faithful action path, lifecycle regression coverage, and real-host acceptance.
+This supersedes the study's initial one-day informational-sink estimate. The
+first half-day checkpoint should confirm destination action support and the
+minimal bidirectional transport so the remaining estimate can be tightened.
+Later roadmap items are not prerequisites for the single-session release.
+
+Primary references
+
+Notification methods, capabilities, IDs, and signals:
+https://specifications.freedesktop.org/notification/latest-single/
+
+Quickshell service registration and retry after unregistration:
+https://raw.githubusercontent.com/quickshell-mirror/quickshell/master/src/services/notifications/server.cpp
+
+Local evidence and implementation authority:
+report.txt and results.json in this directory; bin/remote-chrome and its tests.

@@ -1,0 +1,182 @@
+{
+  "scratch": "/tmp/remote-chrome-notification-study-36tivq3k",
+  "checks": {
+    "body_only_permission": "granted",
+    "body_only_web_events": [
+      "show"
+    ],
+    "body_only_native_calls": [],
+    "body_only_capabilities_queried": true,
+    "no_owner_permission": "granted",
+    "no_owner_web_events": [
+      "show"
+    ],
+    "no_owner_native_calls": [],
+    "late_endpoint_native_calls": [],
+    "late_endpoint_protocol_queries": [
+      {
+        "event": "request_name",
+        "result": 1,
+        "unique_name": ":1.9"
+      }
+    ],
+    "full_permission": "granted",
+    "full_web_events": [
+      "show"
+    ],
+    "full_native_calls": [
+      {
+        "event": "notify",
+        "app": "Google Chrome",
+        "summary": "study native notification",
+        "body": "127.0.0.1:33801\n\nNative body &amp; &lt;format&gt; test",
+        "actions": [
+          "default",
+          "Activate",
+          "settings",
+          "Settings"
+        ],
+        "id": 1,
+        "sender": ":1.14"
+      }
+    ],
+    "full_action_rpc_status": 0,
+    "full_action_reached_chrome": true,
+    "full_close_reached_endpoint": true,
+    "existing_relay_native_delivery": [
+      [
+        "--app-name=Google Chrome",
+        "--urgency=normal",
+        "--hint=string:desktop-entry:google-chrome",
+        "--",
+        "study native notification",
+        "<b></b>127.0.0.1:33801<br/><br/>Native body &amp; &lt;format&gt; test"
+      ]
+    ],
+    "markup_fixture_rpc_status": 0,
+    "existing_relay_markup_delivery": [
+      "--app-name=Google Chrome",
+      "--urgency=normal",
+      "--",
+      "study markup",
+      "<b></b><b>Bold</b> <i>Italic</i> <u>Underline</u><br/>A &amp; B"
+    ],
+    "second_endpoint_refused": {
+      "status": 10,
+      "events": [
+        {
+          "event": "request_name",
+          "result": 3,
+          "unique_name": ":1.17"
+        }
+      ],
+      "owner_unchanged": true
+    },
+    "quickshell_cannot_preempt_fallback": true,
+    "quickshell_acquired_after_fallback_exit": {
+      "new_owner": ":1.19",
+      "seconds": 0.04,
+      "owner_changed": true
+    },
+    "existing_desktop_preserved": {
+      "status": 10,
+      "owner_unchanged": true
+    },
+    "refused_endpoint_was_not_queued": true,
+    "handoff_permission": "granted",
+    "handoff_web_events": [
+      "show"
+    ],
+    "handoff_native_calls": [
+      {
+        "event": "notify",
+        "app": "Google Chrome",
+        "summary": "study handoff initial",
+        "body": "127.0.0.1:33801\n\nNative body &amp; &lt;format&gt; test",
+        "actions": [
+          "default",
+          "Activate",
+          "settings",
+          "Settings"
+        ],
+        "id": 1,
+        "sender": ":1.29"
+      }
+    ],
+    "handoff_action_rpc_status": 0,
+    "handoff_action_reached_chrome": true,
+    "handoff_close_reached_endpoint": true,
+    "running_chrome_survived_desktop_handoff": [
+      [
+        "--app-name=Google Chrome",
+        "--urgency=normal",
+        "--hint=string:desktop-entry:google-chrome",
+        "--",
+        "study desktop handoff",
+        "<b></b>127.0.0.1:33801<br/><br/>Same browser after ownership changed"
+      ]
+    ]
+  },
+  "chrome": "Google Chrome 154.0.8037.97",
+  "launcher_sha256": "bb604a453ec77f49bc219d121d2d368897dedd68fc3bd6304e8ac3c4191765cf",
+  "endpoint_events": [
+    {
+      "event": "request_name",
+      "result": 1,
+      "unique_name": ":1.10"
+    },
+    {
+      "event": "capabilities"
+    },
+    {
+      "event": "server_information"
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "summary": "study native notification",
+      "body": "127.0.0.1:33801\n\nNative body &amp; &lt;format&gt; test",
+      "actions": [
+        "default",
+        "Activate",
+        "settings",
+        "Settings"
+      ],
+      "id": 1,
+      "sender": ":1.14"
+    },
+    {
+      "event": "action",
+      "id": 1,
+      "action": "default"
+    },
+    {
+      "event": "close",
+      "id": 1
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "summary": "study markup",
+      "body": "<b>Bold</b> <i>Italic</i> <u>Underline</u><br/>A &amp; B",
+      "actions": [],
+      "id": 2,
+      "sender": ":1.16"
+    }
+  ],
+  "owned_processes_exited": true,
+  "study_date": "2026-10-02",
+  "production_commit": "9c9256f14790dd15ec30540c7dca060be7adf9ac",
+  "live_session_preserved": {
+    "snap_bootstrap_pid": 2784,
+    "snap_proxy_pid": 2812,
+    "snap_forwarder_pid": 2822,
+    "snap_monitor_pid": 2831,
+    "snap_chrome_pid": 2901,
+    "starship_pane_id": "%3",
+    "starship_pane_pid": 14277,
+    "starship_pane_dead": false,
+    "snap_normal_notification_owner": false,
+    "starship_listener_study_deliveries": 0
+  }
+}
