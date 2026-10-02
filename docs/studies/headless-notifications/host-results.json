@@ -1,0 +1,369 @@
+{
+  "date": "2026-10-02",
+  "tested_feature_commit": "5c3c66348c737faa573015c530044ac44115d4de",
+  "browser_action": {
+    "root": "/tmp/remote-chrome-host-acceptance-fwp45rti",
+    "session": "remote-chrome-acceptance-fwp45rti",
+    "origin": "http://127.0.0.1:34465",
+    "display_host": "starship",
+    "browser_host": "100.70.82.105",
+    "events": [
+      {
+        "time": 1790980479.8921916,
+        "event": "launch",
+        "code": 0,
+        "stdout": "YubiKey forwarding disabled by --no-yubikey.\nStarted remote Chrome on 100.70.82.105 in tmux session remote-chrome-acceptance-fwp45rti.\nAttach: remote-chrome attach 100.70.82.105 --session remote-chrome-acceptance-fwp45rti\nStatus: remote-chrome status 100.70.82.105 --session remote-chrome-acceptance-fwp45rti\nStop: remote-chrome stop 100.70.82.105 --session remote-chrome-acceptance-fwp45rti\n",
+        "stderr": ""
+      },
+      {
+        "time": 1790980480.9521317,
+        "event": "ready",
+        "root": "/tmp/remote-chrome-host-acceptance-fwp45rti",
+        "session": "remote-chrome-acceptance-fwp45rti",
+        "origin": "http://127.0.0.1:34465"
+      },
+      {
+        "time": 1790980532.8180747,
+        "event": "web-events",
+        "values": []
+      },
+      {
+        "time": 1790980532.8196728,
+        "event": "notification-created",
+        "summary": "remote-chrome acceptance fwp45rti"
+      },
+      {
+        "time": 1790980545.246287,
+        "event": "web-events",
+        "values": []
+      },
+      {
+        "time": 1790980789.4447315,
+        "event": "web-events",
+        "values": [
+          "onclick",
+          "onclose"
+        ]
+      },
+      {
+        "time": 1790980817.7728403,
+        "event": "reset",
+        "code": 1,
+        "stdout": "",
+        "stderr": "Remote waypipe server matched socket /tmp/waypipe-server-jDiPpMTwov.sock (pid=669888 pgid=669888).\nRemote Chrome process(es) remain while the exact waypipe server is absent; refusing to delegate reset.\nRemote Waypipe teardown did not leave a cleanly absent server; preserving the existing tmux session.\n"
+      },
+      {
+        "time": 1790980818.426212,
+        "event": "stop",
+        "code": 0,
+        "stdout": "No managed YubiKey forwarding state for 100.70.82.105.\n",
+        "stderr": "tmux session not found: remote-chrome-acceptance-fwp45rti\n"
+      }
+    ]
+  },
+  "safe_markup": {
+    "source_id": 1,
+    "destination_id": 142,
+    "summary": "remote-chrome markup acceptance 5akgzifp",
+    "input": "<b>Bold</b> <i>Italic</i> <u>Underline</u> &amp; safe text",
+    "visual_result": "bold italic underline and decoded ampersand visible in native DMS popup",
+    "source_close_exit": 0
+  },
+  "office_handoff": {
+    "root": "/tmp/remote-chrome-office-acceptance-el7da6eu",
+    "session": "remote-chrome-acceptance-5akgzifp",
+    "checks": [
+      {
+        "name": "selected_helper",
+        "value": {
+          "pid": 686528,
+          "owner": ":1.20574"
+        }
+      },
+      {
+        "name": "desktop_waits_for_release",
+        "value": true
+      },
+      {
+        "name": "bare_stop",
+        "value": {
+          "code": 0,
+          "stdout": "No managed remote-chrome tmux sessions found.\nNo managed YubiKey forwarding states found.\nReleased incoming remote-chrome session from 100.84.31.64.\n",
+          "stderr": "",
+          "seconds": 0.483
+        }
+      },
+      {
+        "name": "quickshell_acquired_normal_bus",
+        "value": {
+          "owner": ":1.20698",
+          "pid": 690253
+        }
+      },
+      {
+        "name": "ordinary_local_notification",
+        "value": true
+      },
+      {
+        "name": "incoming_record_removed",
+        "value": true
+      },
+      {
+        "name": "test_desktop_released_normal_bus",
+        "value": true
+      }
+    ]
+  },
+  "office_scope": "real Snap user bus; disposable virtual compositor and notification-only Quickshell; bare stop sees only an owned copy of the selected incoming record",
+  "original_browser_processes_preserved": [
+    {
+      "pid": 2784,
+      "comm": "bash",
+      "birth": "12858"
+    },
+    {
+      "pid": 2812,
+      "comm": "xdg-dbus-proxy",
+      "birth": "12876"
+    },
+    {
+      "pid": 2822,
+      "comm": "python3",
+      "birth": "12877"
+    },
+    {
+      "pid": 2831,
+      "comm": "busctl",
+      "birth": "12879"
+    },
+    {
+      "pid": 2901,
+      "comm": "chrome",
+      "birth": "13342"
+    }
+  ],
+  "post_refinement_status": {
+    "commit": "8b38de6f0971e6e8d7761a538a087c78f1121ee4",
+    "helper_before_reset": 754297,
+    "helper_after_reset": 755374,
+    "destination_listener_after_reset": 540064,
+    "backend": "helper",
+    "capabilities": [
+      "actions",
+      "body",
+      "body-markup"
+    ],
+    "ownership": "verified",
+    "status_exit": 0,
+    "post_reset_notification": {
+      "source_id": 1,
+      "destination_id": 162,
+      "web_events": [
+        "onclose"
+      ]
+    },
+    "original_starship_pane": {
+      "id": "%3",
+      "pid": 14277,
+      "dead": false
+    }
+  },
+  "interrupted_cleanup_before_fix": {
+    "office": {
+      "root": "/tmp/remote-chrome-office-acceptance-9hdu0mmb",
+      "session": "remote-chrome-acceptance-hk_3zn9j",
+      "checks": [
+        {
+          "name": "selected_helper",
+          "value": {
+            "pid": 755374,
+            "owner": ":1.22304"
+          }
+        },
+        {
+          "name": "desktop_waits_for_release",
+          "value": true
+        },
+        {
+          "name": "bare_stop",
+          "value": {
+            "code": 0,
+            "stdout": "No managed remote-chrome tmux sessions found.\nNo managed YubiKey forwarding states found.\nReleased incoming remote-chrome session from 100.84.31.64.\n",
+            "stderr": "",
+            "seconds": 0.398
+          }
+        },
+        {
+          "name": "quickshell_acquired_normal_bus",
+          "value": {
+            "owner": ":1.22372",
+            "pid": 758002
+          }
+        },
+        {
+          "name": "ordinary_local_notification",
+          "value": true
+        },
+        {
+          "name": "incoming_record_removed",
+          "value": false
+        },
+        {
+          "name": "test_desktop_released_normal_bus",
+          "value": true
+        }
+      ]
+    },
+    "bootstrap_pid": 755343,
+    "remaining_artifacts": [
+      "remote-chrome-incoming-z4xhnu5o.state",
+      "remote-chrome-notify-status-755343.state",
+      "remote-chrome-notify-forwarder-755343.py",
+      "remote-chrome-notify-helper-755343.log",
+      "remote-chrome-dbus-proxy-755343.sock"
+    ],
+    "helper_log": "notify-endpoint: ready caps=actions,body,body-markup\nnotify-endpoint: transport unavailable: listener-disconnected\n",
+    "recovery": "verified test session, no live bootstrap PID, owned nonsymlink artifacts removed exactly"
+  },
+  "post_signal_fix": {
+    "commit": "d1553de9e5e46ee2be850c67733b5195288aeba4",
+    "managed_reset": {
+      "root": "/tmp/remote-chrome-host-acceptance-irhe10tk",
+      "session": "remote-chrome-acceptance-irhe10tk",
+      "origin": "http://127.0.0.1:35105",
+      "display_host": "starship",
+      "browser_host": "100.70.82.105",
+      "events": [
+        {
+          "time": 1790982945.4376276,
+          "event": "launch",
+          "code": 0,
+          "stdout": "YubiKey forwarding disabled by --no-yubikey.\nStarted remote Chrome on 100.70.82.105 in tmux session remote-chrome-acceptance-irhe10tk.\nAttach: remote-chrome attach 100.70.82.105 --session remote-chrome-acceptance-irhe10tk\nStatus: remote-chrome status 100.70.82.105 --session remote-chrome-acceptance-irhe10tk\nStop: remote-chrome stop 100.70.82.105 --session remote-chrome-acceptance-irhe10tk\n",
+          "stderr": ""
+        },
+        {
+          "time": 1790982946.5026712,
+          "event": "ready",
+          "root": "/tmp/remote-chrome-host-acceptance-irhe10tk",
+          "session": "remote-chrome-acceptance-irhe10tk",
+          "origin": "http://127.0.0.1:35105"
+        },
+        {
+          "time": 1790982980.9397,
+          "event": "reset",
+          "code": 0,
+          "stdout": "Attach: remote-chrome attach 100.70.82.105 --session remote-chrome-acceptance-irhe10tk\nStatus: remote-chrome status 100.70.82.105 --session remote-chrome-acceptance-irhe10tk\nStop: remote-chrome stop 100.70.82.105 --session remote-chrome-acceptance-irhe10tk\n",
+          "stderr": "Remote waypipe server matched socket /tmp/waypipe-server-imIDTvp1Z6.sock (pid=783770 pgid=783770).\nManaged tmux session remote-chrome-acceptance-irhe10tk already exited after remote Waypipe teardown; continuing with recreation.\nReset 100.70.82.105 by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost.\n"
+        },
+        {
+          "time": 1790982981.7979796,
+          "event": "reset-ready"
+        },
+        {
+          "time": 1790983027.773187,
+          "event": "cleanup-failed",
+          "errors": [
+            "could not verify session ownership for cleanup"
+          ]
+        }
+      ]
+    },
+    "office": {
+      "root": "/tmp/remote-chrome-office-acceptance-ifrc4md_",
+      "session": "remote-chrome-acceptance-irhe10tk",
+      "checks": [
+        {
+          "name": "selected_helper",
+          "value": {
+            "pid": 785180,
+            "owner": ":1.22693"
+          }
+        },
+        {
+          "name": "desktop_waits_for_release",
+          "value": true
+        },
+        {
+          "name": "bare_stop",
+          "value": {
+            "code": 0,
+            "stdout": "No managed remote-chrome tmux sessions found.\nNo managed YubiKey forwarding states found.\nReleased incoming remote-chrome session from 100.84.31.64.\n",
+            "stderr": "",
+            "seconds": 0.5
+          }
+        },
+        {
+          "name": "quickshell_acquired_normal_bus",
+          "value": {
+            "owner": ":1.22732",
+            "pid": 788776
+          }
+        },
+        {
+          "name": "ordinary_local_notification",
+          "value": true
+        },
+        {
+          "name": "incoming_record_removed",
+          "value": true
+        },
+        {
+          "name": "owned_source_artifacts_removed",
+          "value": true
+        },
+        {
+          "name": "test_desktop_released_normal_bus",
+          "value": true
+        }
+      ]
+    },
+    "required_checks": {
+      "snap": {
+        "shell": 141,
+        "protocol": 7,
+        "secure_bootstrap": 16,
+        "exit": 0
+      },
+      "starship": {
+        "shell": 141,
+        "protocol": 7,
+        "secure_bootstrap": 16,
+        "exit": 0
+      }
+    },
+    "ci": {
+      "run": 37076684219,
+      "conclusion": "success"
+    }
+  },
+  "final_acceptance_harness_cleanup": {
+    "root": "/tmp/remote-chrome-host-acceptance-b_u3w5jf",
+    "session": "remote-chrome-acceptance-b_u3w5jf",
+    "origin": "http://127.0.0.1:32983",
+    "display_host": "starship",
+    "browser_host": "100.70.82.105",
+    "events": [
+      {
+        "time": 1790983072.1695938,
+        "event": "launch",
+        "code": 0,
+        "stdout": "YubiKey forwarding disabled by --no-yubikey.\nStarted remote Chrome on 100.70.82.105 in tmux session remote-chrome-acceptance-b_u3w5jf.\nAttach: remote-chrome attach 100.70.82.105 --session remote-chrome-acceptance-b_u3w5jf\nStatus: remote-chrome status 100.70.82.105 --session remote-chrome-acceptance-b_u3w5jf\nStop: remote-chrome stop 100.70.82.105 --session remote-chrome-acceptance-b_u3w5jf\n",
+        "stderr": ""
+      },
+      {
+        "time": 1790983073.2104046,
+        "event": "ready",
+        "root": "/tmp/remote-chrome-host-acceptance-b_u3w5jf",
+        "session": "remote-chrome-acceptance-b_u3w5jf",
+        "origin": "http://127.0.0.1:32983"
+      },
+      {
+        "time": 1790983132.7952664,
+        "event": "stop",
+        "code": 0,
+        "stdout": "Stopped tmux session remote-chrome-acceptance-b_u3w5jf.\nNo managed YubiKey forwarding state for 100.70.82.105.\n",
+        "stderr": ""
+      }
+    ]
+  }
+}

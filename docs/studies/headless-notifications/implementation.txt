@@ -1,0 +1,154 @@
+Headless notifications: implementation and host acceptance
+2026-10-02
+
+Implemented release boundary
+
+The owned headless endpoint implements org.freedesktop.Notifications and
+negotiates body, actions, and optional body-markup with the destination daemon.
+Compatibility uses this contract; the installed Chrome version is evidence,
+not a version gate. The service is embedded in the single-file launcher.
+
+Native source notifications and destination action/close signals use the
+existing reverse SSH Unix socket. Source and destination IDs are mapped per
+session/generation. The existing sanitizer retains safe bold, italic,
+underline, line breaks, and escaped text. Queues, records, notification state,
+setup waits, and disconnect cleanup are bounded.
+
+The endpoint does not replace a real desktop owner. Only one managed headless
+fallback may own a user bus. A competing managed fallback fails explicitly;
+ordinary missing dependencies/setup failures warn and preserve secure Chrome
+launch. Existing-daemon passive forwarding remains informational. Inline
+reply, persistence, images, activation tokens, offline replay, multiple
+fallback sessions, and automatic office takeover remain outside this release.
+
+Ownership and diagnostics
+
+Bootstrap cleanup validates helper PID/birth/parent and runtime artifact
+identity. Rollback, browser exit, TERM/HUP, stop, incoming stop, and reset
+release owned resources while preserving other owners. Disconnect releases
+the source name without automatically restarting Chrome. Destination cleanup
+closes only mapped notifications; an in-flight delivery has a bounded drain.
+
+Status reads the selected backend, helper identity and actual bus ownership,
+capabilities, and recent relay failures. It sends no notifications. An older
+running bootstrap is reported as unreported, with an explicit reset needed.
+Doctor retains its visible probe and requires a delivered log record.
+
+Validation
+
+Milestone 0 (ff5ae7f): an actual disposable browser received onclick after an
+action traveled through the experimental bidirectional relay. Replacement,
+close, dismissal, expiry, and safe formatting passed on private buses.
+
+Production implementation (5c3c663): ./scripts/check exited zero on Snap and
+Starship with 140 shell checks, 7 endpoint/listener protocol tests, and 15
+generated secure-bootstrap tests. GitHub Actions run 37072368578 passed.
+The bootstrap suite uses real private D-Bus/proxy processes and a fake browser;
+the protocol suite includes actual endpoint/listener processes. USB/IP/SSH
+operations in CI remain mocked. External PyGObject deprecation warnings on
+Python 3.14 are not test failures.
+
+Real-host evidence is in host-results.json. The installed launcher started a
+fresh disposable profile through the real secure-storage bootstrap, filtered
+bus proxy, Waypipe, and reverse SSH socket from Starship to headless Snap.
+No existing profile was read or modified.
+
+- Starship's actual DMS displayed the Chrome notification as a native popup.
+  Clicking the verified test popup returned action=default for source ID 1 /
+  destination ID 136; the page reported onclick and onclose. This checks the
+  browser callback, beyond merely exporting an action signal.
+- A separate standard Notify call through the same managed path visibly
+  rendered bold, italic, underline, and an escaped ampersand in DMS. Its source
+  CloseNotification call succeeded. Browser Web Notification bodies are plain
+  text; HTML rendering was checked with a native D-Bus notification payload.
+- Office handoff used Snap's normal user bus. A notification-only Quickshell
+  fixture on a disposable virtual compositor waited behind the actual helper.
+  Installed bare remote-chrome stop saw an owned copy of only the selected
+  test incoming record, stopped it in 0.483 seconds, and requested exact
+  Starship session cleanup. Quickshell acquired the normal notification name,
+  and a normal notify-send notification arrived. Both real/copied incoming
+  records disappeared; fixture shutdown left the normal bus name unowned.
+  This proves the ownership/handoff contract without stopping the other live
+  incoming session. It does not reproduce a full physical office DMS session.
+
+The original Starship pane (%3, PID 14277), Snap bootstrap (2784), proxy (2812),
+forwarder (2822), monitor (2831), and Chrome (2901) remained alive throughout.
+Its old bootstrap still needs a deliberate reset to select the new endpoint.
+Its stored YubiKey lease was not changed; current status reports an absent
+USB/IP bind and unconfirmed FIDO, so this is not a fresh hardware acceptance.
+
+Acceptance issues retained as evidence
+
+The first browser harness could initialize its event array before the page
+finished navigating. It was corrected to wait for the exact localhost origin,
+document title, and complete readiness; the second run recorded the callback.
+
+A disposable reset alongside the original Chrome exposed an overly broad
+post-stop check: it refused recreation because another browser remained,
+despite terminating the exact selected Waypipe group. host-results.json
+retains that failed reset rather than treating it as a pass. The release
+refinement verifies captured browser identities before permitting a known
+preexisting browser to remain. Initial missing-server/unknown-browser cases
+continue to fail closed.
+
+Reset refinement (8b38de6): the controlled managed restart succeeded alongside
+the original browser. Helper PID changed from 754297 to 755374; status verified
+the new owner and capabilities. A post-reset native notification reached DMS
+as source ID 1 / destination ID 162, and source close reached the page as
+onclose. The identity-ledger regression covers escaped, new, reused, missing,
+and same-session browser identities, plus preexisting roots sharing the group.
+
+A repeated real office handoff then exposed overlapping termination signals:
+the helper released its name, but a second signal interrupted bootstrap cleanup
+and left owned files. d1553de ignores further termination signals during the
+bounded cleanup ledger. Its deterministic regression sends HUP while Chrome's
+TERM cleanup is still pending, and verifies the original exit status and all
+owned resource removal. The old failed run and exact owned-artifact recovery
+remain in host-results.json.
+
+Final production validation: ./scripts/check exited zero on both hosts with
+141 shell checks, 7 protocol tests, and 16 secure-bootstrap tests (164 total).
+GitHub Actions run 37076684219 passed d1553de. A fresh real managed reset passed,
+followed by office incoming stop in 0.5 seconds, normal-bus Quickshell takeover,
+ordinary local delivery, removal of both incoming records and all owned source
+artifacts, and notification name release when the fixture exited.
+
+The acceptance tool also corrected Zsh's =target expansion by sending its
+generated commands through Bash. Its cleanup checks actual session presence
+and the exact disposable profile command, guards each cleanup stage, and fails
+when cleanup cannot be verified. These are acceptance-harness changes, not
+additional production services.
+
+Reproducing controlled acceptance
+
+host_acceptance.py runs on the browser host and accepts notify, events, close,
+reset, and stop on stdin. It uses the installed launcher, a fresh private
+profile, localhost debugging, and a unique managed tmux session. Use an SSH
+target with no existing host-keyed YubiKey recovery state. Even --no-yubikey
+launches must not share that cleanup key with an existing hardware session.
+
+office_acceptance.py takes that disposable session's name. It refuses an
+unexpected normal notification owner or outgoing managed sessions, isolates
+the incoming-record selection, and cleans only its own virtual compositor
+and Quickshell processes. It is an explicit acceptance tool, not a service.
+
+acceptance_pointer.c is an optional actuator for a compositor advertising the
+standard wlr virtual pointer interface. Build it with wayland-scanner client
+header/private code generated from wlr-virtual-pointer-unstable-v1.xml and
+pkg-config wayland-client flags. Before each invocation, inspect a fresh
+screenshot and verify the test popup's bounds on the selected output. The
+accepted Starship output was 5120x1440 at scale 1. No foreign popup or desktop
+configuration was changed. None of these tools is installed by the launcher.
+
+Release activation and rollback
+
+Checkouts and installed symlinks can be current while an active bootstrap is
+old. The existing browser was deliberately preserved. On Starship, a
+controlled remote-chrome reset snap activates the new endpoint; it restarts
+Chrome and may lose unsaved page state. On Snap at the office, remote-chrome
+stop closes tracked incoming sessions and releases their owned endpoint.
+
+Rollback uses the prior known-good commit 9c9256f and exact controlled cleanup
+of any new session before restoring installed artifacts. Do not leave a new
+owned service running while reverting its launcher. There is no browser-version
+pin to adjust.

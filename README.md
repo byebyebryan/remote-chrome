@@ -29,8 +29,8 @@ Local host requirements:
 - `waypipe`
 - `tmux`
 - `python3` and `notify-send` (from `libnotify`) for the notification relay
-- Python D-Bus and GLib bindings (`python-dbus`, `python-gobject` on Arch;
-  `python3-dbus`, `python3-gi` on Debian) for interactive notifications
+- Optional Python D-Bus and GLib bindings (`python-dbus`, `python-gobject` on Arch;
+  `python3-dbus`, `python3-gi` on Debian) enable interactive notifications
 - `busctl` (from `systemd`) to detect local notification markup support;
   without it, relayed bodies use plain text
 - a graphical Wayland session
@@ -44,7 +44,7 @@ Remote host requirements:
 - `ksecretd` (from the remote desktop's Secret Service/KWallet package)
 - `busctl` (from `systemd`)
 - `python3` for the notification relay
-- Python D-Bus and GLib bindings for the headless notification endpoint
+- Optional Python D-Bus and GLib bindings enable the headless notification endpoint
 - `google-chrome-stable`
 
 The launcher starts Chrome with:
@@ -645,6 +645,8 @@ private sockets with empty configurations. Notification tests exercise real
 private D-Bus daemons, endpoint/listener processes, and the generated secure
 bootstrap with a disposable notification fixture and fake browser. SSH and
 USB/IP operations remain mocked; graphical host acceptance is recorded separately.
+The [headless notification acceptance record](docs/studies/headless-notifications/implementation.txt)
+describes the real-host checks and their scope.
 
 ## License
 
