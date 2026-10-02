@@ -281,7 +281,8 @@ scripts/check                    required new check invocation/dependencies
 README.md and docs/usage.md       guarantees, requirements, handoff, recovery
 docs/studies/headless-notifications/*  evidence and release-boundary record
 
-No production files have been edited for this roadmap. The existing study
+This roadmap records the design approved before production implementation.
+Implementation and host acceptance evidence are recorded separately. The study
 scripts remain experimental tools; they are not installed services.
 
 Estimate and next implementation checkpoint

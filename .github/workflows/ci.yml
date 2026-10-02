@@ -17,7 +17,7 @@ jobs:
       - name: Install check dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes shellcheck tmux
+          sudo apt-get install --yes shellcheck tmux python3 python3-dbus python3-gi dbus-daemon xdg-dbus-proxy
 
       - name: Run checks
         run: ./scripts/check

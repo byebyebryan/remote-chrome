@@ -2353,7 +2353,7 @@ test_occupied_remote_port_preserves_existing_chrome() (
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
-  assert_contains "$output" "1.3.3"
+  assert_contains "$output" "1.4.0"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )

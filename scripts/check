@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-for development_command in shellcheck tmux; do
+for development_command in shellcheck tmux python3 dbus-daemon xdg-dbus-proxy; do
   command -v "$development_command" >/dev/null || {
     echo "Missing required development command: $development_command" >&2
     exit 1
   }
 done
+python3 -c 'import dbus; import gi' || {
+  echo "Missing notification-test bindings: install python-dbus/python-gobject (Arch) or python3-dbus/python3-gi (Debian/Ubuntu)." >&2
+  exit 1
+}
 
 bash -n bin/remote-chrome tests/remote-chrome_test.sh scripts/check
 shellcheck bin/remote-chrome tests/remote-chrome_test.sh scripts/check
 bash tests/remote-chrome_test.sh
+python3 tests/headless_notifications_test.py
+python3 tests/secure_notifications_test.py
 git diff --check

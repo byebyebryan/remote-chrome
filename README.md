@@ -29,6 +29,8 @@ Local host requirements:
 - `waypipe`
 - `tmux`
 - `python3` and `notify-send` (from `libnotify`) for the notification relay
+- Python D-Bus and GLib bindings (`python-dbus`, `python-gobject` on Arch;
+  `python3-dbus`, `python3-gi` on Debian) for interactive notifications
 - `busctl` (from `systemd`) to detect local notification markup support;
   without it, relayed bodies use plain text
 - a graphical Wayland session
@@ -42,6 +44,7 @@ Remote host requirements:
 - `ksecretd` (from the remote desktop's Secret Service/KWallet package)
 - `busctl` (from `systemd`)
 - `python3` for the notification relay
+- Python D-Bus and GLib bindings for the headless notification endpoint
 - `google-chrome-stable`
 
 The launcher starts Chrome with:
@@ -116,14 +119,18 @@ explicit mapping.
 
 ### Remote Notifications
 
-Allowing `org.freedesktop.Notifications` through the proxy means Chrome sends
-web notifications to the remote daemon instead of drawing its own toplevel
-windows (which a tiling compositor renders as tiled windows). On top of that,
-every launch with notifications enabled also opens a per-session `ssh -R`
-unix socket. A small embedded forwarder on the remote host watches
-`org.freedesktop.Notifications` and writes one JSON record per notification to
-that socket; a local listener re-emits them through this machine's
-notification daemon. This is enabled by default.
+Notifications are enabled by default and travel through a per-session `ssh -R`
+unix socket to this machine's notification daemon. Chrome needs a compatible
+notification service behind its filtered D-Bus proxy; permitting the name
+alone does not enable native notifications.
+
+If the remote user bus already has a notification daemon, the launcher
+preserves it and uses the existing informational relay. If no daemon owns the
+name, the launcher starts a session-owned endpoint before Chrome. This endpoint
+negotiates body and action support with the local daemon and relays default
+clicks, offered buttons, replacements, and closes in both directions. It never
+steals a service name. Only one headless endpoint can be active per remote user
+bus; a second managed launch must stop the first session or disable notifications.
 
 ```bash
 remote-chrome remote-host --no-notifications   # keep remote notifications off this machine
@@ -132,13 +139,16 @@ export REMOTE_CHROME_NOTIFICATION_APPS=chrome,chromium  # substring allowlist, d
 ```
 
 Allowlist terms are comma-separated, case-insensitive substrings and must not
-contain spaces. `--no-notifications` disables only the relay. The proxy
-permission stays in place, so Chrome never falls back to its own notification
-windows.
+contain spaces. `--no-notifications` disables the relay and session-owned
+endpoint. The proxy permission stays in place; if the remote bus has no
+compatible daemon, Chrome may use its own notification windows. Missing
+bindings, unsupported local capabilities, or a broken socket produce a warning
+while allowing the secure browser launch to continue.
 
-Relayed notifications are informational only: content is forwarded
-(summary/body/urgency/app identity), but clicks, buttons, and inline replies
-are not, and remote icon files are not transferred. Bodies retain `<b>`, `<i>`,
+Forwarding from an existing remote daemon is informational: clicks and buttons
+are not routed back. The session-owned headless endpoint supports them when
+the local daemon advertises actions. Inline replies and remote icon files are
+not transferred. Bodies retain `<b>`, `<i>`,
 and `<u>` formatting when the local daemon supports markup; line breaks and
 `<br>` are preserved. Other tags and all attributes are removed, while literal
 text and entities are escaped for display. Summaries stay plain text. If local
@@ -146,6 +156,12 @@ markup support cannot be detected, bodies fall back to plain text. A live
 relay session is probed end to end by `doctor HOST`; per-session activity is
 logged next to the session state in
 `${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
+
+Run `remote-chrome stop` on the browser host at office handoff to stop incoming
+sessions and release an owned endpoint. A desktop notification daemon can then
+acquire the name. After upgrading an already running session, `remote-chrome
+reset` restarts Chrome with the new bootstrap; Chrome does not reliably retry
+native notification setup after choosing its fallback.
 
 ### YubiKey Forwarding
 
@@ -321,9 +337,11 @@ remote-chrome stop remote-host
 ```
 
 `status HOST` performs read-only checks for the current tmux
-windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, and remote
-YubiKey readiness. It returns nonzero and identifies the failing check when a
-resource is stale or unreachable. `status` without a host is the managed-state
+windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, remote
+YubiKey readiness, and notification listener/helper ownership. Notification
+status reports the selected backend, capabilities, lost transport, and recent
+delivery failures. It sends no notifications. It returns nonzero and identifies
+the failing check when a resource is stale or unreachable. `status` without a host is the managed-state
 overview. `doctor HOST` checks prerequisites
 for local display/commands, detached SSH, remote Waypipe/Chrome plus the
 secure-session dependencies, and USB/IP module prerequisites; it never loads
@@ -604,8 +622,8 @@ process group is reset, only proxy/ksecretd resources owned by that bootstrap
 are cleaned.
 
 The notification relay adds a per-session reverse unix socket that carries
-notification records (app name, summary, body, urgency hints) to a local
-listener; no D-Bus access crosses that socket, and it is removed with the
+notification records and, for the owned endpoint, scoped action/close callbacks;
+no general D-Bus access crosses that socket, and it is removed with the
 session. Any same-user process on the remote host can send records to it, so
 relayed notifications are treated as untrusted input: bodies permit only basic
 formatting tags without attributes, other text is sanitized, content is
@@ -613,18 +631,20 @@ length-limited, delivered without shell interpolation, and rate-limited.
 
 ## Development
 
-Install ShellCheck and tmux and run the repository checks:
+Install the check dependencies and run the repository checks:
 
 ```bash
-sudo pacman -S --needed shellcheck tmux
+sudo pacman -S --needed shellcheck tmux python python-dbus python-gobject dbus xdg-dbus-proxy
 ./scripts/check
 ```
 
 The check script runs Bash syntax validation, ShellCheck, the command-level
 test suite, and `git diff --check`. The same checks run in GitHub Actions.
 The suite checks real tmux pane formats and exact session/window targeting on
-private sockets with empty configurations. Notification tests use isolated
-listeners and mock desktop delivery; SSH and USB/IP operations remain mocked.
+private sockets with empty configurations. Notification tests exercise real
+private D-Bus daemons, endpoint/listener processes, and the generated secure
+bootstrap with a disposable notification fixture and fake browser. SSH and
+USB/IP operations remain mocked; graphical host acceptance is recorded separately.
 
 ## License
 

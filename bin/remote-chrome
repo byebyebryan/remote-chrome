@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.3.3"
+VERSION="1.4.0"
 
 usage() {
   cat <<USAGE
@@ -174,6 +174,11 @@ esac
 export DBUS_SESSION_BUS_ADDRESS="$normal_bus"
 proxy_socket="$runtime_dir/remote-chrome-dbus-proxy-${BASHPID:-$$}.sock"
 notify_forwarder_script=""
+notify_forwarder_script_inode=""
+notify_helper_log=""
+notify_helper_log_inode=""
+notify_ready_file=""
+notify_ready_file_inode=""
 umask 077
 proxy_pid=""
 proxy_starttime=""
@@ -184,7 +189,11 @@ secret_starttime=""
 secret_owned=0
 notify_pid=""
 notify_starttime=""
+notify_process_description="notify forwarder"
 notify_socket_inode=""
+notify_backend="disabled"
+notify_capabilities=""
+notify_error=""
 chrome_pid=""
 chrome_starttime=""
 incoming_state=""
@@ -342,6 +351,56 @@ remote_secure_wait_owned_child() {
   remote_secure_child_pid_matches "$pid" "$recorded_starttime"
 }
 
+remote_secure_stop_notify_process() {
+  local process_stopped=0
+  [ -n "$notify_pid" ] || return 0
+  if [ -z "$notify_starttime" ]; then
+    echo "remote-chrome secure session: $notify_process_description PID $notify_pid has no recorded starttime; preserving it." >&2
+    return 1
+  elif remote_secure_wait_owned_pid "$notify_pid" "$notify_starttime" python3; then
+    if remote_secure_stop_pid "$notify_pid" "$notify_starttime" python3; then
+      process_stopped=1
+    else
+      echo "remote-chrome secure session: owned $notify_process_description PID $notify_pid remains after TERM/KILL; inspect it before retrying." >&2
+      return 1
+    fi
+  elif kill -0 "$notify_pid" >/dev/null 2>&1; then
+    echo "remote-chrome secure session: $notify_process_description PID $notify_pid identity changed; preserving the replacement process." >&2
+    return 1
+  else
+    process_stopped=1
+  fi
+  if [ "$process_stopped" = "1" ]; then
+    wait "$notify_pid" >/dev/null 2>&1 || true
+    notify_pid=""
+    notify_starttime=""
+  fi
+}
+
+remote_secure_remove_notify_file() {
+  local path="$1"
+  local expected_inode="$2"
+  local description="$3"
+  local current_inode
+  [ -n "$path" ] || return 0
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  if [ -L "$path" ] || [ ! -f "$path" ] || [ ! -O "$path" ]; then
+    echo "remote-chrome secure session: $description identity changed; preserving $path." >&2
+    return 1
+  fi
+  current_inode="$(stat -c '%d:%i' "$path" 2>/dev/null || true)"
+  if [ -z "$expected_inode" ] || [ "$current_inode" != "$expected_inode" ]; then
+    echo "remote-chrome secure session: $description identity changed; preserving $path." >&2
+    return 1
+  fi
+  if ! rm -f -- "$path" || [ -e "$path" ] || [ -L "$path" ]; then
+    echo "remote-chrome secure session: could not remove owned $description $path." >&2
+    return 1
+  fi
+}
+
 remote_secure_cleanup() {
   [ "$cleanup_done" = "0" ] || return "$cleanup_status"
   cleanup_done=1
@@ -390,33 +449,14 @@ remote_secure_cleanup() {
     fi
   fi
 
-  if [ -n "$notify_pid" ]; then
-    process_stopped=0
-    if [ -z "$notify_starttime" ]; then
-      echo "remote-chrome secure session: notify forwarder PID $notify_pid has no recorded starttime; preserving it." >&2
-      cleanup_failed=1
-    elif remote_secure_wait_owned_pid "$notify_pid" "$notify_starttime" python3; then
-      if remote_secure_stop_pid "$notify_pid" "$notify_starttime" python3; then
-        process_stopped=1
-      else
-        echo "remote-chrome secure session: owned notify forwarder PID $notify_pid remains after TERM/KILL; inspect it before retrying." >&2
-        cleanup_failed=1
-      fi
-    elif kill -0 "$notify_pid" >/dev/null 2>&1; then
-      echo "remote-chrome secure session: notify forwarder PID $notify_pid identity changed; preserving the replacement process." >&2
-      cleanup_failed=1
-    fi
-    if [ "$process_stopped" = "1" ]; then
-      wait "$notify_pid" >/dev/null 2>&1 || true
-    fi
-  fi
+  remote_secure_stop_notify_process || cleanup_failed=1
 
-  if [ -n "$notify_forwarder_script" ]; then
-    rm -f -- "$notify_forwarder_script" || {
-      echo "remote-chrome secure session: could not remove forwarder script $notify_forwarder_script; inspect it before retrying." >&2
-      cleanup_failed=1
-    }
-  fi
+  remote_secure_remove_notify_file "$notify_forwarder_script" \
+    "$notify_forwarder_script_inode" "notification helper script" || cleanup_failed=1
+  remote_secure_remove_notify_file "$notify_ready_file" \
+    "$notify_ready_file_inode" "notification readiness file" || cleanup_failed=1
+  remote_secure_remove_notify_file "$notify_helper_log" \
+    "$notify_helper_log_inode" "notification helper log" || cleanup_failed=1
 
   if [ -n "$notify_socket_inode" ] && [ -S "$notify_socket" ]; then
     current_inode="$(stat -c '%d:%i' "$notify_socket" 2>/dev/null || true)"
@@ -613,7 +653,551 @@ done
 [ -n "$proxy_socket_inode" ] ||
   remote_secure_fail "xdg-dbus-proxy did not create a socket: $proxy_socket"
 
+remote_notify_name_has_owner() {
+  busctl --user --timeout=0.35 --json=short call org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus NameHasOwner s org.freedesktop.Notifications 2>/dev/null |
+    python3 -c 'import json,sys; print("1" if json.load(sys.stdin)["data"][0] else "0")'
+}
+
+remote_notify_name_owner() {
+  busctl --user --timeout=0.35 --json=short call org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus GetNameOwner s org.freedesktop.Notifications 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0])'
+}
+
+remote_notify_owner_information() {
+  local owner="$1"
+  busctl --user --timeout=0.35 --json=short call "$owner" /org/freedesktop/Notifications \
+    org.freedesktop.Notifications GetServerInformation 2>/dev/null |
+    python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(str(d[0])+"\t"+str(d[1]))'
+}
+
+remote_notify_owner_capabilities() {
+  local owner="$1"
+  busctl --user --timeout=0.35 --json=short call "$owner" /org/freedesktop/Notifications \
+    org.freedesktop.Notifications GetCapabilities 2>/dev/null |
+    python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(",".join(str(x) for x in d[0]))'
+}
+
+remote_notify_record_process() {
+  notify_pid=$!
+  notify_starttime="$(remote_secure_pid_starttime "$notify_pid" 2>/dev/null || true)"
+  if [ -z "$notify_starttime" ]; then
+    if kill -0 "$notify_pid" >/dev/null 2>&1; then
+      remote_secure_fail "could not record the owned notification helper PID $notify_pid starttime; refusing unverified cleanup."
+    fi
+    wait "$notify_pid" >/dev/null 2>&1 || true
+    notify_pid=""
+  fi
+}
+
 if [ -n "$notify_socket" ]; then
+  if [ -S "$notify_socket" ]; then
+    notify_socket_inode="$(stat -c '%d:%i' "$notify_socket" 2>/dev/null || true)"
+  fi
+  notify_forwarder_script="$runtime_dir/remote-chrome-notify-forwarder-$$.py"
+  notify_helper_log="$runtime_dir/remote-chrome-notify-helper-$$.log"
+  notify_ready_file="$runtime_dir/remote-chrome-notify-status-$$.state"
+  for notify_candidate in "$notify_forwarder_script" "$notify_helper_log" "$notify_ready_file"; do
+    if [ -e "$notify_candidate" ] || [ -L "$notify_candidate" ]; then
+      notify_forwarder_script=""
+      notify_helper_log=""
+      notify_ready_file=""
+      remote_secure_fail "refusing to overwrite an existing notification artifact: $notify_candidate"
+    fi
+  done
+  : >"$notify_helper_log"
+  chmod 600 -- "$notify_helper_log"
+  notify_helper_log_inode="$(stat -c '%d:%i' "$notify_helper_log" 2>/dev/null || true)"
+  source_owner_has="unknown"
+  source_owner=""
+  source_server=""
+  source_vendor=""
+  if command -v busctl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    source_owner_has="$(remote_notify_name_has_owner 2>/dev/null || true)"
+  fi
+  if [ "$source_owner_has" = "1" ]; then
+    source_owner="$(remote_notify_name_owner 2>/dev/null || true)"
+    if [ -n "$source_owner" ]; then
+      owner_info="$(remote_notify_owner_information "$source_owner" 2>/dev/null || true)"
+      IFS=$'\t' read -r source_server source_vendor <<<"$owner_info"
+    fi
+    if [ "$source_server" = "remote-chrome-notification-endpoint" ] &&
+       [ "$source_vendor" = "remote-chrome" ]; then
+      remote_secure_fail "another managed headless notification session owns org.freedesktop.Notifications; refusing a competing notifications-enabled Chrome session."
+    elif [ -n "$source_owner" ] && [ -n "$source_server" ] && [ -n "$source_vendor" ]; then
+      source_capabilities="$(remote_notify_owner_capabilities "$source_owner" 2>/dev/null || true)"
+      if [[ ",$source_capabilities," == *,body,* && ",$source_capabilities," == *,actions,* ]]; then
+        notify_backend="desktop"
+        notify_capabilities="informational"
+      else
+        notify_backend="unavailable"
+        notify_error="existing notification owner lacks compatible body/actions support"
+        echo "remote-chrome: notifications unavailable ($notify_error); Chrome will start securely without notification forwarding." >&2
+      fi
+    else
+      notify_backend="unavailable"
+      notify_error="could not identify current notification owner"
+      echo "remote-chrome: notifications unavailable ($notify_error); Chrome will start securely without notification forwarding." >&2
+    fi
+  elif [ "$source_owner_has" = "0" ]; then
+    if [ -S "$notify_socket" ] && command -v python3 >/dev/null 2>&1; then
+      cat >"$notify_forwarder_script" <<'REMOTE_CHROME_NOTIFY_ENDPOINT'
+import json
+import os
+import secrets
+import select
+import signal
+import socket
+import sys
+import time
+
+NAME = "org.freedesktop.Notifications"
+PATH = "/org/freedesktop/Notifications"
+MANAGED_SERVER = "remote-chrome-notification-endpoint"
+MANAGED_VENDOR = "remote-chrome"
+MAX_LINE = 64 * 1024
+MAX_QUEUE = 64
+MAX_QUEUE_BYTES = 1 << 20
+MAX_ACTIVE = 256
+PROTOCOL_VERSION = 1
+
+
+def write_status(path, value):
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+
+
+def send_frame(channel, record):
+    blob = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(blob) > MAX_LINE:
+        raise ValueError("oversized frame")
+    channel.sendall(blob)
+
+
+def read_frame(channel, deadline):
+    buffer = bytearray()
+    while time.monotonic() < deadline and len(buffer) <= MAX_LINE:
+        ready, _, _ = select.select([channel], [], [], max(0, deadline - time.monotonic()))
+        if not ready:
+            break
+        chunk = channel.recv(65536)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        if b"\n" in buffer:
+            line, _, _rest = buffer.partition(b"\n")
+            return json.loads(line)
+    raise TimeoutError("notification listener handshake timed out")
+
+
+class NotificationEndpoint:
+    def __init__(self, dbus, bus, channel, session_id, generation, capabilities, apps):
+        import dbus.service
+        from gi.repository import GLib
+        self.dbus = dbus
+        self.bus = bus
+        self.channel = channel
+        self.session_id = session_id
+        self.generation = generation
+        self.apps = None if apps.strip() == "*" else tuple(term.lower() for term in apps.split(",") if term)
+        self.capabilities = set(capabilities) & {"body", "actions", "body-markup"}
+        self.GLib = GLib
+        self.loop = GLib.MainLoop()
+        self.input = bytearray()
+        self.output = []
+        self.output_bytes = 0
+        self.write_watch = 0
+        self.closed = False
+        self.next_id = 1
+        self.active = {}
+        parent = self
+
+        class EndpointObject(dbus.service.Object):
+            @dbus.service.method(NAME, in_signature="", out_signature="as")
+            def GetCapabilities(self):
+                return dbus.Array(sorted(parent.capabilities), signature="s")
+
+            @dbus.service.method(NAME, in_signature="", out_signature="ssss")
+            def GetServerInformation(self):
+                return (MANAGED_SERVER, MANAGED_VENDOR, "1", "1.2")
+
+            @dbus.service.method(NAME, in_signature="susssasa{sv}i", out_signature="u")
+            def Notify(self, app_name, replaces_id, icon, summary, body, actions, hints, expire_timeout):
+                return parent.notify(app_name, replaces_id, summary, body, actions, hints, expire_timeout)
+
+            @dbus.service.method(NAME, in_signature="u", out_signature="")
+            def CloseNotification(self, notification_id):
+                parent.close(notification_id)
+
+            @dbus.service.signal(NAME, signature="us")
+            def ActionInvoked(self, notification_id, key):
+                pass
+
+            @dbus.service.signal(NAME, signature="uu")
+            def NotificationClosed(self, notification_id, reason):
+                pass
+
+        self.object = EndpointObject(bus, PATH)
+        self.read_watch = GLib.io_add_watch(
+            channel, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.on_channel
+        )
+
+    @staticmethod
+    def valid_id(value):
+        return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 0xFFFFFFFF
+
+    def envelope(self, kind, **fields):
+        return {"v": PROTOCOL_VERSION, "type": kind, "session_id": self.session_id, "generation": self.generation, **fields}
+
+    def queue(self, record):
+        if self.closed:
+            raise self.dbus.DBusException("notification transport is unavailable")
+        blob = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(blob) > MAX_LINE or len(self.output) >= MAX_QUEUE or self.output_bytes + len(blob) > MAX_QUEUE_BYTES:
+            self.disconnect("outbound-queue-limit")
+            raise self.dbus.DBusException("notification transport queue is full")
+        self.output.append(memoryview(blob))
+        self.output_bytes += len(blob)
+        if not self.write_watch:
+            self.write_watch = self.GLib.io_add_watch(
+                self.channel, self.GLib.IO_OUT | self.GLib.IO_HUP | self.GLib.IO_ERR, self.on_write
+            )
+
+    def on_write(self, _source, condition):
+        if condition & (self.GLib.IO_HUP | self.GLib.IO_ERR):
+            self.disconnect("listener-disconnected")
+            return self.GLib.SOURCE_REMOVE
+        while self.output:
+            try:
+                written = self.channel.send(self.output[0])
+            except BlockingIOError:
+                return self.GLib.SOURCE_CONTINUE
+            except OSError:
+                self.disconnect("listener-disconnected")
+                return self.GLib.SOURCE_REMOVE
+            if written <= 0:
+                self.disconnect("listener-disconnected")
+                return self.GLib.SOURCE_REMOVE
+            self.output_bytes -= written
+            self.output[0] = self.output[0][written:]
+            if not self.output[0]:
+                self.output.pop(0)
+        self.write_watch = 0
+        return self.GLib.SOURCE_REMOVE
+
+    def on_channel(self, _source, condition):
+        if condition & (self.GLib.IO_IN | self.GLib.IO_HUP):
+            while True:
+                try:
+                    chunk = self.channel.recv(65536)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    self.disconnect("listener-read-failed")
+                    return self.GLib.SOURCE_REMOVE
+                if not chunk:
+                    self.disconnect("listener-disconnected")
+                    return self.GLib.SOURCE_REMOVE
+                self.input.extend(chunk)
+                while b"\n" in self.input:
+                    line, _, rest = self.input.partition(b"\n")
+                    self.input = bytearray(rest)
+                    if len(line) > MAX_LINE:
+                        self.disconnect("oversized-frame")
+                        return self.GLib.SOURCE_REMOVE
+                    try:
+                        self.handle(json.loads(line))
+                    except (ValueError, TypeError, RecursionError):
+                        continue
+                if len(self.input) > MAX_LINE:
+                    self.disconnect("oversized-frame")
+                    return self.GLib.SOURCE_REMOVE
+        if condition & (self.GLib.IO_HUP | self.GLib.IO_ERR):
+            self.disconnect("listener-disconnected")
+            return self.GLib.SOURCE_REMOVE
+        return self.GLib.SOURCE_CONTINUE
+
+    def handle(self, record):
+        if (not isinstance(record, dict) or type(record.get("v")) is not int
+                or record["v"] != PROTOCOL_VERSION or record.get("session_id") != self.session_id
+                or record.get("generation") != self.generation):
+            return
+        kind = record.get("type")
+        source_id = record.get("source_id")
+        if not self.valid_id(source_id):
+            return
+        state = self.active.get(source_id)
+        if kind == "mapped":
+            local_id = record.get("local_id")
+            if state is not None and self.valid_id(local_id):
+                state["local_id"] = local_id
+                self.active[source_id] = state
+        elif kind == "action":
+            local_id = record.get("local_id")
+            key = record.get("key")
+            if (state is not None and not state["close_requested"] and self.valid_id(local_id)
+                    and state["local_id"] == local_id and isinstance(key, str) and key in state["actions"]):
+                self.object.ActionInvoked(self.dbus.UInt32(source_id), self.dbus.String(key))
+        elif kind == "closed":
+            local_id = record.get("local_id")
+            reason = record.get("reason")
+            if (state is not None and self.valid_id(local_id) and state["local_id"] == local_id
+                    and isinstance(reason, int) and not isinstance(reason, bool) and 1 <= reason <= 4):
+                self.active.pop(source_id, None)
+                self.object.NotificationClosed(self.dbus.UInt32(source_id), self.dbus.UInt32(reason))
+        elif kind == "delivery-error":
+            if self.active.pop(source_id, None) is not None:
+                self.object.NotificationClosed(self.dbus.UInt32(source_id), self.dbus.UInt32(4))
+
+    def allocate_id(self):
+        for _ in range(MAX_ACTIVE + 1):
+            candidate = self.next_id
+            self.next_id = 1 if candidate == 0xFFFFFFFF else candidate + 1
+            if candidate not in self.active:
+                return candidate
+        raise self.dbus.DBusException("notification ID space exhausted")
+
+    def notify(self, app_name, replaces_id, summary, body, actions, hints, expire_timeout):
+        if self.closed:
+            raise self.dbus.DBusException("notification transport is unavailable")
+        if self.apps is not None and not any(term in str(app_name).lower() for term in self.apps):
+            raise self.dbus.DBusException("notification app is outside the forwarding allowlist")
+        raw_actions = [str(item) for item in actions]
+        if len(raw_actions) > 32 or len(raw_actions) % 2 or any(len(item) > 256 for item in raw_actions):
+            raise self.dbus.DBusException("invalid action list")
+        replaces = int(replaces_id)
+        source_id = (replaces if replaces in self.active and not self.active[replaces]["close_requested"]
+                     else self.allocate_id())
+        if source_id not in self.active and len(self.active) >= MAX_ACTIVE:
+            raise self.dbus.DBusException("notification active-ID limit reached")
+        old_state = self.active.get(source_id, {})
+        self.active[source_id] = {
+            "actions": raw_actions[::2], "local_id": old_state.get("local_id", 0),
+            "close_requested": False,
+        }
+        urgency = 1
+        try:
+            urgency = int(hints.get("urgency", 1))
+        except (TypeError, ValueError, AttributeError):
+            pass
+        if urgency not in (0, 1, 2):
+            urgency = 1
+        record = self.envelope(
+            "notify", source_id=source_id, replaces_id=replaces if replaces == source_id else 0,
+            app_name=str(app_name)[:128], summary=str(summary)[:512], body=str(body)[:4096],
+            actions=raw_actions, urgency=urgency, expires=int(expire_timeout),
+            desktop_entry=str(hints.get("desktop-entry", ""))[:128],
+        )
+        try:
+            self.queue(record)
+        except Exception:
+            self.active.pop(source_id, None)
+            raise
+        return self.dbus.UInt32(source_id)
+
+    def close(self, notification_id):
+        source_id = int(notification_id)
+        state = self.active.get(source_id)
+        if state is None:
+            raise self.dbus.DBusException("unknown notification ID")
+        if state["close_requested"]:
+            return
+        state["close_requested"] = True
+        self.active[source_id] = state
+        self.queue(self.envelope("close", source_id=source_id, local_id=state.get("local_id", 0)))
+
+    def disconnect(self, reason):
+        if self.closed:
+            return
+        self.closed = True
+        self.active.clear()
+        self.output.clear()
+        self.output_bytes = 0
+        print("notify-endpoint: transport unavailable: " + reason, file=sys.stderr)
+        try:
+            self.channel.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.loop.quit()
+        except AttributeError:
+            pass
+
+    def run(self):
+        self.queue(self.envelope("active"))
+        self.loop.run()
+        self.object.remove_from_connection()
+
+
+def inspect_owner(bus, dbus, status_path):
+    try:
+        owner = str(bus.get_name_owner(NAME))
+        service = dbus.Interface(bus.get_object(owner, PATH, introspect=False), NAME)
+        information = service.GetServerInformation(timeout=0.35)
+        if str(information[0]) == MANAGED_SERVER and str(information[1]) == MANAGED_VENDOR:
+            write_status(status_path, "busy-managed")
+            return "busy-managed"
+        capabilities = set(map(str, service.GetCapabilities(timeout=0.35)))
+        if not {"body", "actions"}.issubset(capabilities):
+            write_status(status_path, "unavailable")
+            return "unavailable"
+        write_status(status_path, "busy-desktop")
+        return "busy-desktop"
+    except Exception:
+        write_status(status_path, "unavailable")
+        return "unavailable"
+
+
+def main(argv):
+    if len(argv) != 4:
+        return 64
+    socket_path, apps, status_path = argv[1:]
+    try:
+        import dbus
+        import dbus.service
+        from dbus.mainloop.glib import DBusGMainLoop
+        from gi.repository import GLib
+    except Exception as error:
+        write_status(status_path, "unavailable")
+        print("notify-endpoint: DBus bindings unavailable: " + str(error), file=sys.stderr)
+        return 1
+    DBusGMainLoop(set_as_default=True)
+    address = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if not address:
+        write_status(status_path, "unavailable")
+        return 1
+    try:
+        bus = dbus.bus.BusConnection(address)
+    except Exception as error:
+        write_status(status_path, "unavailable")
+        print("notify-endpoint: source bus unavailable: " + str(error), file=sys.stderr)
+        return 1
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel.settimeout(0.5)
+    try:
+        channel.connect(socket_path)
+    except OSError as error:
+        write_status(status_path, "unavailable")
+        print("notify-endpoint: relay unavailable: " + str(error), file=sys.stderr)
+        return 1
+
+    session_id = os.environ.get("REMOTE_CHROME_ORIGIN_SESSION", "remote-chrome")[:256] or "remote-chrome"
+    generation = secrets.token_hex(24)
+    try:
+        send_frame(channel, {"v": PROTOCOL_VERSION, "type": "hello", "session_id": session_id, "generation": generation})
+        response = read_frame(channel, time.monotonic() + 1.2)
+        if (not isinstance(response, dict) or type(response.get("v")) is not int
+                or response["v"] != PROTOCOL_VERSION or response.get("type") != "ready" or response.get("session_id") != session_id
+                or response.get("generation") != generation):
+            message = (response.get("message", response.get("code", "listener rejected handshake"))
+                       if isinstance(response, dict) else "invalid handshake")
+            write_status(status_path, "unavailable")
+            print("notify-endpoint: " + str(message), file=sys.stderr)
+            return 1
+        capabilities = response.get("capabilities", [])
+        if (not isinstance(capabilities, list) or any(not isinstance(item, str) for item in capabilities)
+                or not {"body", "actions"}.issubset(capabilities)
+                or not isinstance(response.get("destination_owner"), str)
+                or not response["destination_owner"].startswith(":")):
+            write_status(status_path, "unavailable")
+            print("notify-endpoint: destination does not support body/actions or pinned ownership", file=sys.stderr)
+            return 1
+    except Exception as error:
+        write_status(status_path, "unavailable")
+        print("notify-endpoint: handshake failed: " + str(error), file=sys.stderr)
+        return 1
+
+    name_result = bus.request_name(NAME, 4)
+    if int(name_result) != 1:
+        state = inspect_owner(bus, dbus, status_path)
+        try:
+            send_frame(channel, {"v": PROTOCOL_VERSION, "type": "abort", "session_id": session_id, "generation": generation,
+                                 "reason": state})
+        except OSError:
+            pass
+        return 20 if state == "busy-managed" else 0
+
+    channel.setblocking(False)
+    endpoint = NotificationEndpoint(dbus, bus, channel, session_id, generation, capabilities, apps)
+    try:
+        caps = ",".join(sorted(endpoint.capabilities))
+        write_status(status_path, "ready\t" + caps)
+        print("notify-endpoint: ready caps=" + caps, file=sys.stderr)
+        signal.signal(signal.SIGTERM, lambda *_: endpoint.loop.quit())
+        signal.signal(signal.SIGINT, lambda *_: endpoint.loop.quit())
+        endpoint.run()
+        return 0
+    finally:
+        endpoint.disconnect("endpoint-exit")
+        try:
+            bus.release_name(NAME)
+        except Exception:
+            pass
+        try:
+            bus.close()
+        except Exception:
+            pass
+        write_status(status_path, "stopped")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+REMOTE_CHROME_NOTIFY_ENDPOINT
+      chmod 600 -- "$notify_forwarder_script"
+      : >"$notify_ready_file"
+      chmod 600 -- "$notify_ready_file"
+      notify_forwarder_script_inode="$(stat -c '%d:%i' "$notify_forwarder_script" 2>/dev/null || true)"
+      notify_ready_file_inode="$(stat -c '%d:%i' "$notify_ready_file" 2>/dev/null || true)"
+      python3 "$notify_forwarder_script" "$notify_socket" "$notify_apps" "$notify_ready_file" \
+        2>>"$notify_helper_log" &
+      notify_process_description="notification endpoint"
+      remote_notify_record_process
+      for ((attempt = 0; attempt < 20; attempt++)); do
+        [ -s "$notify_ready_file" ] && break
+        kill -0 "$notify_pid" >/dev/null 2>&1 || break
+        sleep 0.1
+      done
+      helper_state=""
+      IFS=$'\t' read -r helper_state notify_capabilities <"$notify_ready_file" 2>/dev/null || true
+      case "$helper_state" in
+        ready)
+          notify_backend="helper"
+          ;;
+        busy-managed)
+          remote_secure_fail "another managed headless notification session won the service-name race; refusing a competing notifications-enabled Chrome session."
+          ;;
+        busy-desktop)
+          notify_backend="desktop"
+          notify_capabilities="informational"
+          remote_secure_stop_notify_process || remote_secure_fail "could not stop losing notification endpoint helper."
+          ;;
+        *)
+          notify_error="$helper_state"
+          [ -n "$notify_error" ] || notify_error="endpoint startup timed out"
+          echo "remote-chrome: notifications unavailable ($notify_error); Chrome will start securely without notification forwarding." >&2
+          notify_backend="unavailable"
+          remote_secure_stop_notify_process || true
+          ;;
+      esac
+    else
+      notify_error="notification relay socket or Python runtime is unavailable"
+      echo "remote-chrome: notifications unavailable ($notify_error); Chrome will start securely without notification forwarding." >&2
+      notify_backend="unavailable"
+    fi
+  else
+    notify_error="could not probe the source notification owner without activation"
+    echo "remote-chrome: notifications unavailable ($notify_error); Chrome will start securely without notification forwarding." >&2
+    notify_backend="unavailable"
+  fi
+fi
+
+if [ -n "$notify_socket" ] && [ "$notify_backend" = "desktop" ]; then
   if [ -S "$notify_socket" ]; then
     notify_socket_inode="$(stat -c '%d:%i' "$notify_socket" 2>/dev/null || true)"
   fi
@@ -747,11 +1331,30 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         sys.exit(130)
 REMOTE_CHROME_NOTIFY_FORWARDER
-  python3 "$notify_forwarder_script" "$notify_socket" "$notify_apps" &
-  notify_pid=$!
-  notify_starttime="$(remote_secure_pid_starttime "$notify_pid" 2>/dev/null || true)"
-  [ -n "$notify_starttime" ] ||
-    remote_secure_fail "could not record the notify forwarder PID $notify_pid starttime; refusing unverified cleanup."
+  chmod 600 -- "$notify_forwarder_script"
+  notify_forwarder_script_inode="$(stat -c '%d:%i' "$notify_forwarder_script" 2>/dev/null || true)"
+  python3 "$notify_forwarder_script" "$notify_socket" "$notify_apps" 2>>"$notify_helper_log" &
+  notify_process_description="notify forwarder"
+  remote_notify_record_process
+fi
+
+if [ -n "$incoming_state" ] && [ -f "$incoming_state" ]; then
+  incoming_notify_pending="$incoming_state.notify-$$"
+  if {
+    awk -F '\t' '$1 !~ /^notify_/' "$incoming_state"
+    printf 'notify_backend\t%s\n' "$notify_backend"
+    printf 'notify_pid\t%s\n' "$notify_pid"
+    printf 'notify_starttime\t%s\n' "$notify_starttime"
+    printf 'notify_capabilities\t%s\n' "$notify_capabilities"
+    printf 'notify_error\t%s\n' "$notify_error"
+    printf 'notify_helper_log\t%s\n' "$notify_helper_log"
+    printf 'notify_status_file\t%s\n' "$notify_ready_file"
+  } >"$incoming_notify_pending" && mv -fT -- "$incoming_notify_pending" "$incoming_state"; then
+    chmod 600 -- "$incoming_state"
+  else
+    rm -f -- "$incoming_notify_pending" 2>/dev/null || true
+    echo "remote-chrome: notification status could not be recorded in incoming session state." >&2
+  fi
 fi
 
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$proxy_socket"
@@ -1638,8 +2241,118 @@ chrome_status_incoming() {
     session="$(notify_state_field "$state" session)"
     printf '  %s: %s (%s)\n' "${name:-$(notify_state_field "$state" peer)}" \
       "${session:-foreground}" "$phase"
+    notify_source_state_status "$state" || true
   done
   [ "$found" = "1" ] || echo "  none"
+}
+
+notify_helper_live() {
+  local pid="$1" starttime="$2" parent="$3" process_stat command_line first
+  local -a process_fields=()
+  [[ "$pid" =~ ^[0-9]+$ && "$starttime" =~ ^[0-9]+$ ]] || return 1
+  IFS= read -r process_stat 2>/dev/null <"/proc/$pid/stat" || return 1
+  case "${process_stat##*) }" in Z\ *|X\ *) return 1 ;; esac
+  [ "$(notify_pid_starttime "$pid" 2>/dev/null || true)" = "$starttime" ] || return 1
+  read -r -a process_fields <<<"${process_stat##*) }"
+  [ "${process_fields[1]:-}" = "$parent" ] || return 1
+  command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  first="${command_line%% *}"
+  [ "${first##*/}" = "python3" ]
+}
+
+notify_source_state_status() {
+  local state="$1" backend pid birth parent capabilities error owner_pid
+  backend="$(notify_state_field "$state" notify_backend)"
+  if [ -z "$backend" ]; then
+    echo "  notifications: backend=unreported (older bootstrap; reset to select the new endpoint)"
+    return 0
+  fi
+  pid="$(notify_state_field "$state" notify_pid)"
+  birth="$(notify_state_field "$state" notify_starttime)"
+  parent="$(notify_state_field "$state" pid)"
+  capabilities="$(notify_state_field "$state" notify_capabilities)"
+  error="$(notify_state_field "$state" notify_error)"
+  printf '  notifications: backend=%s capabilities=%s helper-pid=%s\n' \
+    "$backend" "${capabilities:-none}" "${pid:-none}"
+  case "$backend" in
+    disabled) return 0 ;;
+    unavailable)
+      printf '  notifications: transport=unavailable reason=%s\n' "${error:-setup failed}"
+      return 1
+      ;;
+    helper|desktop)
+      if ! chrome_incoming_live "$state" || ! notify_helper_live "$pid" "$birth" "$parent"; then
+        echo "  notifications: transport=degraded (owned helper identity is no longer live)"
+        return 1
+      fi
+      owner_pid="$(busctl --user --timeout=0.35 call org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID \
+        s org.freedesktop.Notifications 2>/dev/null | awk '$1 == "u" {print $2}')"
+      if [ "$backend" = "helper" ]; then
+        if [ "$owner_pid" != "$pid" ]; then
+          echo "  notifications: transport=degraded (service name is no longer owned by this helper)"
+          return 1
+        fi
+        echo "  notifications: transport=ready callbacks=actions,closed ownership=verified"
+      else
+        if ! [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+          echo "  notifications: transport=degraded (existing daemon has no current owner)"
+          return 1
+        fi
+        echo "  notifications: transport=monitoring callbacks=none ownership=existing-daemon"
+      fi
+      ;;
+    *) echo "  notifications: transport=unknown"; return 1 ;;
+  esac
+}
+
+notify_source_status() {
+  local session="$1" state found=0 code=0
+  for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
+    [[ -f "$state" && -O "$state" && ! -L "$state" ]] || continue
+    [ "$(notify_state_field "$state" session)" = "$session" ] || continue
+    found=1
+    notify_source_state_status "$state" || code=1
+  done
+  if [ "$found" = "0" ]; then
+    echo "  notifications: source session is untracked or no longer running"
+    return 1
+  fi
+  return "$code"
+}
+
+notify_status_current() {
+  local host="$1" session="$2" state pid birth socket output failure
+  notify_set_runtime_paths "$session"
+  state="$notify_state_file"
+  if [ ! -e "$state" ]; then
+    echo "status: notifications: no managed relay (disabled or untracked)"
+    return 0
+  fi
+  [[ -f "$state" && -O "$state" && ! -L "$state" ]] || {
+    echo "status: degraded: notification state ownership is invalid." >&2
+    return 1
+  }
+  pid="$(notify_state_field "$state" listener_pid)"
+  birth="$(notify_state_field "$state" listener_starttime)"
+  socket="$(notify_state_field "$state" local_socket)"
+  if ! kill -0 "$pid" 2>/dev/null ||
+    [ "$(notify_pid_starttime "$pid" 2>/dev/null || true)" != "$birth" ] || [ ! -S "$socket" ]; then
+    echo "status: degraded: notification listener identity/socket is no longer live." >&2
+    return 1
+  fi
+  echo "status: notifications: listener live pid=$pid"
+  if output="$(timeout --kill-after=1 2 ssh -o BatchMode=yes -o ConnectTimeout=2 \
+    -o ConnectionAttempts=1 "$host" \
+    "remote-chrome _notify-status $(printf '%q' "$session")" </dev/null 2>&1)"; then
+    printf '%s\n' "$output"
+  else
+    printf '%s\n' "$output" >&2
+    echo "status: degraded: source notification path is unavailable; reset the exact session." >&2
+    return 1
+  fi
+  failure="$(awk -F '\t' '$2 ~ /^(delivery-failed|interactive-disconnected|interactive-client-failed)$/ {last=$0} END {print last}' "${state}.log" 2>/dev/null || true)"
+  [ -z "$failure" ] || printf 'status: notifications: recent failure: %s\n' "$failure"
 }
 
 chrome_stop_incoming() {
@@ -2723,6 +3436,8 @@ chrome_status_current() {
     fi
   fi
 
+  notify_status_current "$host" "$session" || code=1
+
   if [ "$code" = "0" ]; then
     echo "status: healthy"
   else
@@ -3646,7 +4361,8 @@ doctor_notifications() {
   fi
 
   for ((attempt = 0; attempt < 50; attempt++)); do
-    if grep -qF -- "$marker" "${state_file}.log" 2>/dev/null; then
+    if awk -F '\t' -v marker="$marker" '$2 == "delivered" && index($0, marker) {found=1} END {exit !found}' \
+      "${state_file}.log" 2>/dev/null; then
       delivered=1
       break
     fi
@@ -5406,6 +6122,34 @@ def handle_connection(connection, recent, log_path, body_markup):
     buffer = b""
     connection.settimeout(5)
     try:
+        while b"\n" not in buffer and len(buffer) <= MAX_LINE:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+        if len(buffer) > MAX_LINE:
+            log_line(log_path, "oversized-record-dropped")
+            return
+        first_line = buffer.split(b"\n", 1)[0]
+        try:
+            first_record = json.loads(first_line)
+        except (ValueError, RecursionError):
+            first_record = None
+        if isinstance(first_record, dict) and first_record.get("type") == "hello":
+            try:
+                InteractiveClient(connection, log_path, first_record, buffer[len(first_line) + 1:]).run()
+            except Exception as error:
+                log_line(log_path, f"interactive-client-failed\t{type(error).__name__}: {error}")
+                try:
+                    connection.sendall((json.dumps({"v": 1, "type": "error", "code": "listener-unavailable",
+                                                    "message": str(error)[:256]}) + "\n").encode("utf-8"))
+                except OSError:
+                    pass
+            return
+        if body_markup is None:
+            # Legacy records only occur when bootstrap selected an existing
+            # daemon. Interactive mode never probes the activating well-known name.
+            body_markup = supports_body_markup()
         while True:
             chunk = connection.recv(65536)
             if not chunk:
@@ -5435,6 +6179,397 @@ def handle_connection(connection, recent, log_path, body_markup):
             # Each record is untrusted. Invalid hints, NULs, invalid Unicode,
             # or excessive nesting must not terminate a session's listener.
             log_line(log_path, f"invalid-record-dropped\t{type(error).__name__}")
+
+
+def positive_id(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 0xFFFFFFFF
+
+
+PROTOCOL_VERSION = 1
+MAX_FRAME = 64 * 1024
+MAX_QUEUE_BYTES = 1 << 20
+MAX_QUEUE = 64
+MAX_ACTIVE = 256
+
+
+class InteractiveClient:
+    """One ordered D-Bus operation stream, pinned to one destination owner."""
+
+    def __init__(self, connection, log_path, hello, initial=b""):
+        import dbus
+        from dbus.mainloop.glib import DBusGMainLoop
+        from gi.repository import GLib
+        self.dbus, self.GLib = dbus, GLib
+        self.connection, self.log_path = connection, log_path
+        self.session_id, self.generation = hello.get("session_id"), hello.get("generation")
+        if (type(hello.get("v")) is not int or hello["v"] != PROTOCOL_VERSION
+                or not isinstance(self.session_id, str) or not 0 < len(self.session_id) <= 256
+                or not isinstance(self.generation, str) or not 0 < len(self.generation) <= 128):
+            raise ValueError("invalid protocol or session identity")
+        self.connection.setblocking(False)
+        self.input = bytearray(initial)
+        self.output, self.operations = [], []
+        self.output_bytes = self.operation_bytes = 0
+        self.write_watch = 0
+        self.closed = self.active = False
+        self.states = {}
+        self.recent = []
+        self.inflight = None
+        self.cleanup_ids = set()
+        self.drain_timer = 0
+        self.drain_expired = False
+        self.loop = GLib.MainLoop()
+        DBusGMainLoop(set_as_default=True)
+        self.bus = dbus.bus.BusConnection(os.environ["DBUS_SESSION_BUS_ADDRESS"])
+        self.daemon = dbus.Interface(self.bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus", introspect=False),
+                                     "org.freedesktop.DBus")
+        self.name, self.path = "org.freedesktop.Notifications", "/org/freedesktop/Notifications"
+        self.owner = str(self.daemon.GetNameOwner(self.name, timeout=0.35))
+        self.interface = dbus.Interface(self.bus.get_object(self.owner, self.path, introspect=False), self.name)
+        self.capabilities = {str(value) for value in self.interface.GetCapabilities(timeout=0.45)}
+        self.server_information = [str(value) for value in self.interface.GetServerInformation(timeout=0.45)]
+        if not {"body", "actions"}.issubset(self.capabilities):
+            self.bus.close()
+            raise RuntimeError("destination daemon must support body and actions")
+        self.body_markup = "body-markup" in self.capabilities
+        self.matches = [
+            self.bus.add_signal_receiver(self.on_action, signal_name="ActionInvoked",
+                dbus_interface=self.name, path=self.path, bus_name=self.owner, sender_keyword="sender"),
+            self.bus.add_signal_receiver(self.on_closed, signal_name="NotificationClosed",
+                dbus_interface=self.name, path=self.path, bus_name=self.owner, sender_keyword="sender"),
+            self.bus.add_signal_receiver(self.on_owner_changed, signal_name="NameOwnerChanged",
+                dbus_interface="org.freedesktop.DBus", path="/org/freedesktop/DBus",
+                bus_name="org.freedesktop.DBus", arg0=self.name),
+        ]
+        # Signal matches exist before readiness, and ownership is checked again
+        # after installing them so a setup-time name change cannot go unnoticed.
+        if str(self.daemon.GetNameOwner(self.name, timeout=0.2)) != self.owner:
+            self.bus.close()
+            raise RuntimeError("destination owner changed during readiness")
+        self.read_watch = GLib.io_add_watch(connection, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.on_socket)
+
+    def envelope(self, kind, **fields):
+        return {"v": PROTOCOL_VERSION, "type": kind, "session_id": self.session_id,
+                "generation": self.generation, **fields}
+
+    def queue(self, record):
+        if self.closed:
+            return
+        blob = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(blob) > MAX_FRAME or len(self.output) >= MAX_QUEUE or self.output_bytes + len(blob) > MAX_QUEUE_BYTES:
+            self.disconnect("outbound-queue-limit")
+            return
+        self.output.append(memoryview(blob))
+        self.output_bytes += len(blob)
+        if not self.write_watch:
+            self.write_watch = self.GLib.io_add_watch(self.connection,
+                self.GLib.IO_OUT | self.GLib.IO_HUP | self.GLib.IO_ERR, self.on_write)
+
+    def run(self):
+        self.queue(self.envelope("ready", destination_owner=self.owner,
+            capabilities=sorted(self.capabilities & {"body", "actions", "body-markup"}),
+            server_information=self.server_information))
+        log_line(self.log_path, f"interactive-ready\towner {self.owner}\tcaps {','.join(sorted(self.capabilities))}")
+        try:
+            self.consume_input()
+            if not self.closed:
+                self.loop.run()
+        finally:
+            self.dispose()
+
+    def on_write(self, _source, condition):
+        if condition & (self.GLib.IO_HUP | self.GLib.IO_ERR):
+            self.write_watch = 0
+            self.disconnect("socket-write-hangup")
+            return self.GLib.SOURCE_REMOVE
+        while self.output:
+            try:
+                written = self.connection.send(self.output[0])
+            except BlockingIOError:
+                return self.GLib.SOURCE_CONTINUE
+            except OSError:
+                written = 0
+            if written <= 0:
+                self.write_watch = 0
+                self.disconnect("socket-write-failed")
+                return self.GLib.SOURCE_REMOVE
+            self.output_bytes -= written
+            self.output[0] = self.output[0][written:]
+            if not self.output[0]:
+                self.output.pop(0)
+        self.write_watch = 0
+        return self.GLib.SOURCE_REMOVE
+
+    def consume_input(self):
+        while b"\n" in self.input and not self.closed:
+            line, _, rest = self.input.partition(b"\n")
+            self.input = bytearray(rest)
+            if len(line) > MAX_FRAME:
+                self.disconnect("oversized-frame")
+                return
+            try:
+                self.handle_record(json.loads(line))
+            except (ValueError, TypeError, RecursionError, UnicodeError):
+                self.queue(self.envelope("error", code="malformed-record"))
+        if len(self.input) > MAX_FRAME:
+            self.disconnect("oversized-frame")
+
+    def on_socket(self, _source, condition):
+        if condition & (self.GLib.IO_IN | self.GLib.IO_HUP):
+            while not self.closed:
+                try:
+                    chunk = self.connection.recv(65536)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    self.read_watch = 0
+                    self.disconnect("source-disconnected")
+                    return self.GLib.SOURCE_REMOVE
+                self.input.extend(chunk)
+                self.consume_input()
+        if self.closed or condition & (self.GLib.IO_HUP | self.GLib.IO_ERR):
+            self.read_watch = 0
+            self.disconnect("source-disconnected")
+            return self.GLib.SOURCE_REMOVE
+        return self.GLib.SOURCE_CONTINUE
+
+    def handle_record(self, record):
+        if (not isinstance(record, dict) or type(record.get("v")) is not int
+                or record["v"] != PROTOCOL_VERSION or record.get("session_id") != self.session_id
+                or record.get("generation") != self.generation):
+            self.queue(self.envelope("error", code="stale-session"))
+            return
+        kind = record.get("type")
+        if kind == "abort":
+            self.disconnect("source-aborted")
+            return
+        if kind == "active":
+            self.active = True
+            return
+        if not self.active:
+            self.queue(self.envelope("error", code="source-not-active"))
+            return
+        source_id = record.get("source_id")
+        if not positive_id(source_id):
+            self.queue(self.envelope("error", code="invalid-id"))
+            return
+        if kind == "notify":
+            replaces = record.get("replaces_id", 0)
+            actions = record.get("actions", [])
+            expires = record.get("expires", -1)
+            if (type(replaces) is not int or replaces not in (0, source_id)
+                    or any(not isinstance(record.get(k), str) for k in ("app_name", "summary", "body"))
+                    or not isinstance(actions, list) or len(actions) > 32 or len(actions) % 2
+                    or any(not isinstance(item, str) or len(item) > 256 for item in actions)
+                    or type(expires) is not int or not -1 <= expires <= 0x7FFFFFFF):
+                self.fail_record(record, "invalid notification")
+                return
+            now = time.monotonic()
+            self.recent = [stamp for stamp in self.recent if now - stamp < RATE_WINDOW]
+            if len(self.recent) >= RATE_LIMIT:
+                self.fail_record(record, "rate limit")
+                return
+            self.recent.append(now)
+            if source_id not in self.states:
+                if len(self.states) >= MAX_ACTIVE:
+                    self.queue(self.envelope("delivery-error", source_id=source_id, error="active limit"))
+                    return
+                self.states[source_id] = {"local_id": 0, "actions": [], "closing": False}
+            if self.states[source_id]["closing"]:
+                self.queue(self.envelope("error", code="closed-source-id"))
+                return
+        elif kind == "close":
+            state = self.states.get(source_id)
+            local_id = record.get("local_id", 0)
+            if state is None:
+                self.queue(self.envelope("error", code="unknown-source-id"))
+                return
+            if (type(local_id) is not int or local_id < 0 or local_id > 0xFFFFFFFF
+                    or (local_id and local_id != state["local_id"])):
+                self.queue(self.envelope("error", code="mapping-mismatch"))
+                return
+            if state["closing"]:
+                return
+            state["closing"] = True
+        else:
+            self.queue(self.envelope("error", code="unknown-message"))
+            return
+        size = len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
+        if len(self.operations) >= MAX_QUEUE or self.operation_bytes + size > MAX_QUEUE_BYTES:
+            self.disconnect("operation-queue-limit")
+            return
+        self.operations.append((record, size))
+        self.operation_bytes += size
+        self.pump()
+
+    def pump(self):
+        if self.closed or self.inflight is not None:
+            return
+        while self.operations:
+            record, size = self.operations.pop(0)
+            self.operation_bytes -= size
+            source_id = record["source_id"]
+            state = self.states.get(source_id)
+            if state is None:
+                continue
+            self.inflight = record
+            try:
+                if record["type"] == "close":
+                    if not state["local_id"]:
+                        self.inflight = None
+                        continue
+                    self.interface.CloseNotification(self.dbus.UInt32(state["local_id"]),
+                        reply_handler=self.on_close_reply, error_handler=self.on_operation_error, timeout=1.0)
+                else:
+                    plain = clean_body(record["body"], False)
+                    summary = clean_text(record["summary"], MAX_SUMMARY) or plain[:MAX_SUMMARY]
+                    body = clean_body(record["body"], self.body_markup) if plain.strip() else ""
+                    hints = self.dbus.Dictionary({}, signature="sv")
+                    urgency = record.get("urgency", 1)
+                    if type(urgency) is int and 0 <= urgency <= 2:
+                        hints["urgency"] = self.dbus.Byte(urgency, variant_level=1)
+                    desktop = clean_name(record.get("desktop_entry"), MAX_DESKTOP_ENTRY)
+                    if desktop:
+                        hints["desktop-entry"] = self.dbus.String(desktop, variant_level=1)
+                    self.interface.Notify(clean_text(record["app_name"], MAX_APP) or "remote-chrome",
+                        self.dbus.UInt32(state["local_id"]), "", summary, body,
+                        self.dbus.Array(record.get("actions", []), signature="s"), hints,
+                        self.dbus.Int32(record.get("expires", -1)), reply_handler=self.on_notify_reply,
+                        error_handler=self.on_operation_error, timeout=1.0)
+                return
+            except Exception as error:
+                self.on_operation_error(error)
+                return
+
+    def on_notify_reply(self, local_id):
+        record, self.inflight = self.inflight, None
+        local_id = int(local_id)
+        if not positive_id(local_id):
+            if record is not None:
+                self.fail_record(record, "invalid destination ID")
+            self.pump()
+            return
+        if self.closed:
+            self.cleanup_local(local_id)
+            self.finish_drain()
+            return
+        source_id = record["source_id"]
+        state = self.states.get(source_id)
+        if state is None:
+            self.cleanup_local(local_id)
+        else:
+            state.update(local_id=local_id, actions=record.get("actions", [])[::2])
+            self.queue(self.envelope("mapped", source_id=source_id, local_id=local_id))
+            summary = clean_text(record["summary"], MAX_SUMMARY)
+            log_line(self.log_path, f"delivered\t{source_id}\t{local_id}\t{summary}")
+        self.pump()
+
+    def on_close_reply(self):
+        record, self.inflight = self.inflight, None
+        if not self.closed and record is not None:
+            state = self.states.pop(record["source_id"], None)
+            if state is not None:
+                self.queue(self.envelope("closed", source_id=record["source_id"],
+                    local_id=state["local_id"], reason=3))
+        self.pump()
+        self.finish_drain()
+
+    def fail_record(self, record, error):
+        state = self.states.pop(record["source_id"], None)
+        if state and state["local_id"]:
+            self.cleanup_local(state["local_id"])
+        self.queue(self.envelope("delivery-error", source_id=record["source_id"], error=str(error)[:256]))
+        log_line(self.log_path, f"delivery-failed\t{record['source_id']}\t{type(error).__name__}: {error}")
+
+    def on_operation_error(self, error):
+        record, self.inflight = self.inflight, None
+        if record is not None and not self.closed:
+            self.fail_record(record, error)
+        self.pump()
+        self.finish_drain()
+
+    def on_action(self, notification_id, key, sender=None):
+        local_id, key = int(notification_id), str(key)
+        if self.closed or sender != self.owner:
+            return
+        for source_id, state in self.states.items():
+            if state["local_id"] == local_id and not state["closing"] and key in state["actions"]:
+                self.queue(self.envelope("action", source_id=source_id, local_id=local_id, key=key))
+                log_line(self.log_path, f"action\t{source_id}\t{local_id}\t{key[:128]}")
+                return
+
+    def on_closed(self, notification_id, reason, sender=None):
+        local_id, reason = int(notification_id), int(reason)
+        if self.closed or sender != self.owner or not 1 <= reason <= 4:
+            return
+        for source_id, state in list(self.states.items()):
+            if state["local_id"] == local_id:
+                self.states.pop(source_id)
+                self.queue(self.envelope("closed", source_id=source_id, local_id=local_id, reason=reason))
+                log_line(self.log_path, f"closed\t{source_id}\t{local_id}\t{reason}")
+                return
+
+    def on_owner_changed(self, name, old_owner, new_owner):
+        if str(name) == self.name and str(new_owner) != self.owner:
+            self.disconnect("destination-owner-changed")
+
+    def cleanup_local(self, local_id):
+        if local_id in self.cleanup_ids:
+            return
+        self.cleanup_ids.add(local_id)
+        def done(*_args):
+            self.cleanup_ids.discard(local_id)
+            self.finish_drain()
+        try:
+            self.interface.CloseNotification(self.dbus.UInt32(local_id),
+                reply_handler=done, error_handler=done, timeout=0.25)
+        except Exception:
+            done()
+
+    def finish_drain(self):
+        if self.closed and self.inflight is None and not self.cleanup_ids:
+            self.loop.quit()
+        return self.GLib.SOURCE_REMOVE
+
+    def disconnect(self, reason):
+        if self.closed:
+            return
+        self.closed = True
+        log_line(self.log_path, f"interactive-disconnected\t{reason}")
+        self.operations.clear()
+        self.operation_bytes = 0
+        self.output.clear()
+        self.output_bytes = 0
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        for state in self.states.values():
+            if state["local_id"]:
+                self.cleanup_local(state["local_id"])
+        self.states.clear()
+        self.drain_timer = self.GLib.timeout_add(1350, self.force_finish_drain)
+        self.finish_drain()
+
+    def force_finish_drain(self):
+        self.drain_timer = 0
+        self.drain_expired = True
+        self.loop.quit()
+        return self.GLib.SOURCE_REMOVE
+
+    def dispose(self):
+        if not self.closed:
+            self.disconnect("listener-stop")
+        if not self.drain_expired and (self.inflight is not None or self.cleanup_ids):
+            self.loop.run()
+        for watch in (self.read_watch, self.write_watch, self.drain_timer):
+            if watch and self.GLib.MainContext.default().find_source_by_id(watch):
+                self.GLib.source_remove(watch)
+        for match in self.matches:
+            match.remove()
+        self.bus.close()
 
 
 def main(argv):
@@ -5478,8 +6613,8 @@ def main(argv):
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    body_markup = supports_body_markup()
-    log_line(log_path, f"started\tpid {os.getpid()}\tbody-markup {int(body_markup)}")
+    body_markup = None
+    log_line(log_path, f"started\tpid {os.getpid()}\tinteractive-capability-probe deferred")
     recent = []
     try:
         while True:
@@ -5538,6 +6673,10 @@ main() {
     _notify-listener)
       shift
       _notify_listener_main "$@"
+      ;;
+    _notify-status)
+      [ "$#" = "2" ] || return 2
+      notify_source_status "$2"
       ;;
     -V|--version|version)
       echo "$PROGRAM $VERSION"

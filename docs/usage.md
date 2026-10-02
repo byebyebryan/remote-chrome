@@ -223,14 +223,20 @@ executable.
 
 ## Remote notifications
 
-The proxy permits `org.freedesktop.Notifications` as well as
-`org.freedesktop.secrets`, so Chrome delivers web notifications to the remote
-daemon instead of drawing its own toplevel windows; the portal service stays
-hidden. With notifications enabled (the default), the launch also opens a
-per-session `ssh -R` unix socket. An embedded forwarder on the remote host
-watches the notification service and relays one JSON record per notification;
-a local listener sanitizes the content and re-emits it through this machine's
-notification daemon.
+The proxy permits `org.freedesktop.Notifications` and
+`org.freedesktop.secrets`; the portal service stays hidden. Native notifications
+require an actual compatible service behind that proxy. With notifications
+enabled (the default), a per-session `ssh -R` unix socket connects to a local
+listener that sanitizes content and delivers it through this machine's daemon.
+
+An existing remote notification daemon is preserved and monitored for
+informational forwarding. On a headless bus without an owner, the launcher
+starts an owned endpoint before Chrome. It implements the notification contract
+and negotiates body/action capabilities with the local daemon, including default
+clicks, offered action buttons, replacement IDs, and close callbacks. There is
+one owned endpoint per remote user bus. Another managed launch is rejected
+before Chrome starts if that endpoint is already in use. Stop the first session
+or pass `--no-notifications` for the second launch.
 
 ```bash
 remote-chrome remote-host --no-notifications
@@ -239,22 +245,26 @@ REMOTE_CHROME_NOTIFICATION_APPS=chrome,chromium remote-chrome remote-host
 ```
 
 `--no-notifications` and `REMOTE_CHROME_NOTIFICATIONS=0` disable only the
-relay; the proxy permission remains, so Chrome still does not fall back to its
-own notification windows. `REMOTE_CHROME_NOTIFICATION_APPS` is a
+relay and owned endpoint; the proxy permission remains. Without a compatible
+remote daemon, Chrome may use its own notification windows.
+`REMOTE_CHROME_NOTIFICATION_APPS` is a
 comma-separated, case-insensitive substring allowlist (default: `chrome`; use
 `*` to relay everything). Keep terms free of spaces: the detached command
 quotes values correctly, but the foreground argument path cannot carry a space
 inside one value.
 
-Relayed notifications are informational: summary, body, urgency, and app
-identity are forwarded, but clicks, buttons, inline replies, and remote icon
-files are not. Bodies preserve `<b>`, `<i>`, and `<u>` when the local daemon
+Existing-daemon forwarding is informational, without click/button callbacks.
+The owned headless endpoint supports actions when the destination advertises
+them. Inline replies and remote icon files are not transferred.
+Bodies preserve `<b>`, `<i>`, and `<u>` when the local daemon
 advertises markup support, along with line breaks and `<br>`. Other tags and
 all attributes are removed; literal text and entities are escaped for display.
-Summaries remain plain text. Capability detection uses local `busctl`; bodies
+Summaries remain plain text. Existing-daemon markup detection uses local
+`busctl`; headless mode negotiates capabilities directly over D-Bus. Bodies
 fall back to plain text if markup support is unavailable or cannot be detected.
-Notification forwarding failures are advisory and
-never block or change a launch. Malformed notification records are discarded
+Missing Python D-Bus/GLib bindings, unavailable body/actions support, or failed
+endpoint readiness warn while allowing the secure browser launch. Readiness
+has a short bounded deadline. Malformed notification records are discarded
 individually so later valid notifications still arrive. `stop`, `reset`, and
 `stop` without a host clean up every recorded listener, local socket, remote
 socket, and state file. If listener startup cannot save its state, it stops the
@@ -264,6 +274,12 @@ second for forced termination if needed, and teardown continues on failure.
 `doctor HOST` performs a round-trip
 probe when a live relay session is present. Per-session activity is recorded in
 `${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
+
+The headless endpoint releases its name when its owning session exits, resets,
+or is stopped. Run `remote-chrome stop` on the browser host when arriving at
+its desktop to stop incoming sessions and let the desktop daemon acquire the
+name. An already running Chrome that selected its built-in fallback needs a
+controlled `remote-chrome reset` to select the newly installed native path.
 
 Cleanup attempts every applicable resource in order. If remote detach, tunnel
 close, local unbind, or owned-daemon cleanup remains unresolved, `stop` returns
