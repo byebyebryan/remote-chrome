@@ -2585,6 +2585,9 @@ chrome_reset_host=""
 chrome_reset_remote_socket=""
 chrome_reset_remote_pgid=""
 chrome_reset_remote_pid=""
+chrome_reset_remote_starttime=""
+chrome_reset_remote_boot_id=""
+chrome_reset_remote_browser_allowlist=()
 
 chrome_reset_read_pane() {
   local session="$1"
@@ -2810,18 +2813,70 @@ chrome_reset_find_local_ssh() {
 chrome_reset_remote_identity() {
   local host="$1"
   local socket_path="$2"
+  local selected_session="${3:-}"
+  local post_stop="${4:-0}"
   local output=""
-  local result_line
+  local result_line allowlist="-" remote_command
+  if [ "$post_stop" = "1" ] && [ "${#chrome_reset_remote_browser_allowlist[@]}" -gt 0 ]; then
+    allowlist="$(IFS=,; printf '%s' "${chrome_reset_remote_browser_allowlist[*]}")"
+  fi
+  if [ "$post_stop" != "1" ]; then
+    chrome_reset_remote_starttime=""
+    chrome_reset_remote_boot_id=""
+    chrome_reset_remote_browser_allowlist=()
+  fi
+  remote_command="$(quote_command bash -s -- "$socket_path" "$selected_session" \
+    "$post_stop" "$chrome_reset_remote_boot_id" "$allowlist")"
 
   if ! output="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-    "$host" bash -s -- "$socket_path" 2>&1 <<'REMOTE_SCRIPT'
+    "$host" "$remote_command" 2>&1 <<'REMOTE_SCRIPT'
 set -u
 wanted_socket="$1"
+selected_session="${2:-}"
+post_stop="${3:-0}"
+expected_boot="${4:-}"
+allowlist="${5:--}"
 uid="$(id -u)" || exit 2
+boot_id="$(cat /proc/sys/kernel/random/boot_id)" || exit 2
+if [ "$post_stop" = "1" ] && [ "$expected_boot" != "$boot_id" ]; then
+  echo "Remote boot identity changed or was not captured; refusing reset." >&2
+  exit 2
+fi
+proc_identity() {
+  local pid="$1" stat_line
+  local -a fields=()
+  IFS= read -r stat_line <"/proc/$pid/stat" || return 1
+  read -r -a fields <<<"${stat_line##*) }"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ && "${fields[2]:-}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${fields[0]:-}" != Z && "${fields[0]:-}" != X ]] || return 1
+  proc_birth="${fields[19]}"
+  proc_group="${fields[2]}"
+}
+same_session() {
+  local entry
+  [ -n "$selected_session" ] || return 1
+  [ -r "/proc/$1/environ" ] || return 2
+  while IFS= read -r -d '' entry; do
+    [ "$entry" != "REMOTE_CHROME_ORIGIN_SESSION=$selected_session" ] || return 0
+  done <"/proc/$1/environ"
+  return 1
+}
 processes="$(ps -u "$uid" -o pid=,ppid=,pgid=,args= 2>&1)" || {
   printf '%s\n' "$processes" >&2
   exit 2
 }
+browser_roots="$(printf '%s\n' "$processes" | awk '
+  {
+    pid=$1; pgid=$3; $1=""; $2=""; $3=""; sub(/^ +/, "")
+    count=split($0, argv, /[[:space:]]+/); base=argv[1]; sub(/^.*\//, "", base)
+    if (base !~ /^(google-chrome|google-chrome-stable|chrome|chromium|chromium-browser)$/) next
+    for (i=2; i<=count; i++) if (argv[i] ~ /^--type=/) next
+    print pid "\t" pgid
+  }')"
+if [ "$(printf '%s\n' "$browser_roots" | awk 'NF {n++} END {print n+0}')" -gt 128 ]; then
+  echo "Too many browser identities to verify safely; refusing reset." >&2
+  exit 2
+fi
 
 matches="$(printf '%s\n' "$processes" |
   awk -v wanted="$wanted_socket" '
@@ -2860,6 +2915,19 @@ matches="$(printf '%s\n' "$processes" |
   ')"
 
 if [ -z "$matches" ]; then
+  if [ "$post_stop" = "1" ]; then
+    while IFS=$'\t' read -r browser_pid browser_pgid; do
+      [ -n "$browser_pid" ] || continue
+      proc_identity "$browser_pid" || exit 2
+      [ "$proc_group" = "$browser_pgid" ] || exit 2
+      case ",$allowlist," in
+        *",$browser_pid:$proc_birth,"*) ;;
+        *) printf 'UNRELATED\t%s\n' "$browser_pid"; exit 0 ;;
+      esac
+    done <<<"$browser_roots"
+    printf '%s\n' ABSENT
+    exit 0
+  fi
   chrome_count="$(printf '%s\n' "$processes" |
     awk '
       {
@@ -2905,7 +2973,28 @@ if [ "$group_count" -ne 1 ]; then
 fi
 pgid="$(printf '%s\n' "$groups" | sed -n '1p')"
 pid="$(printf '%s\n' "$matches" | awk -F '\t' -v wanted="$pgid" '$2 == wanted {print $1; exit}')"
-printf 'MATCH\t%s\t%s\n' "$pid" "$pgid"
+proc_identity "$pid" || exit 2
+[ "$proc_group" = "$pgid" ] || exit 2
+server_birth="$proc_birth"
+allowlist=""
+while IFS=$'\t' read -r browser_pid browser_pgid; do
+  [ -n "$browser_pid" ] || continue
+  proc_identity "$browser_pid" || exit 2
+  [ "$proc_group" = "$browser_pgid" ] || exit 2
+  if [ "$proc_birth" -lt "$server_birth" ] && [ "$browser_pgid" = "$pgid" ]; then
+    echo "Preexisting browser shares the selected Waypipe group; refusing TERM." >&2
+    exit 2
+  fi
+  if [ "$browser_pgid" = "$pgid" ] || [ "$proc_birth" -ge "$server_birth" ]; then
+    continue
+  fi
+  session_code=0
+  same_session "$browser_pid" || session_code=$?
+  [ "$session_code" -ne 2 ] || exit 2
+  [ "$session_code" -ne 0 ] || continue
+  allowlist+="${allowlist:+,}$browser_pid:$proc_birth"
+done <<<"$browser_roots"
+printf 'MATCH\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$pgid" "$server_birth" "$boot_id" "${allowlist:--}"
 REMOTE_SCRIPT
 )"; then
     [ -n "$output" ] && printf '%s\n' "$output" >&2
@@ -2916,11 +3005,18 @@ REMOTE_SCRIPT
   result_line="$(printf '%s\n' "$output" | sed -n '1p')"
   case "$result_line" in
     MATCH$'\t'*)
-      IFS=$'\t' read -r _ chrome_reset_remote_pid chrome_reset_remote_pgid <<<"$result_line"
+      IFS=$'\t' read -r _ chrome_reset_remote_pid chrome_reset_remote_pgid \
+        chrome_reset_remote_starttime chrome_reset_remote_boot_id allowlist <<<"$result_line"
       if [[ ! "$chrome_reset_remote_pid" =~ ^[0-9]+$ ]] ||
-        [[ ! "$chrome_reset_remote_pgid" =~ ^[0-9]+$ ]]; then
+        [[ ! "$chrome_reset_remote_pgid" =~ ^[0-9]+$ ]] ||
+        [[ ! "$chrome_reset_remote_starttime" =~ ^[0-9]+$ ]] ||
+        [[ ! "$chrome_reset_remote_boot_id" =~ ^[a-f0-9-]{36}$ ]] ||
+        [[ ! "$allowlist" =~ ^([0-9]+:[0-9]+)(,[0-9]+:[0-9]+)*$ && "$allowlist" != - ]]; then
         echo "Remote waypipe identity check returned an invalid process identity; refusing reset." >&2
         return 2
+      fi
+      if [ "$allowlist" != - ]; then
+        IFS=, read -r -a chrome_reset_remote_browser_allowlist <<<"$allowlist"
       fi
       return 0
       ;;
@@ -2951,17 +3047,23 @@ chrome_reset_remote_stop() {
   local expected_pgid="$3"
   local timeout="${REMOTE_CHROME_RESET_TIMEOUT:-5}"
   local output=""
+  local remote_command
   [[ "$expected_pgid" =~ ^[0-9]+$ ]] || return 1
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5
   [ "$timeout" -gt 0 ] || timeout=1
   timeout="$((10#$timeout))"
+  remote_command="$(quote_command bash -s -- "$socket_path" "$expected_pgid" "$timeout" \
+    "$chrome_reset_remote_pid" "$chrome_reset_remote_starttime" "$chrome_reset_remote_boot_id")"
 
   if ! output="$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-    "$host" bash -s -- "$socket_path" "$expected_pgid" "$timeout" 2>&1 <<'REMOTE_SCRIPT'
+    "$host" "$remote_command" 2>&1 <<'REMOTE_SCRIPT'
 set -u
 wanted_socket="$1"
 wanted_pgid="$2"
 timeout_seconds="$3"
+expected_pid="${4:-}"
+expected_birth="${5:-}"
+expected_boot="${6:-}"
 uid="$(id -u)" || exit 2
 processes="$(ps -u "$uid" -o pid=,ppid=,pgid=,args= 2>&1)" || {
   printf '%s\n' "$processes" >&2
@@ -3035,6 +3137,39 @@ if [ "$group_count" -ne 1 ] || [ "$(printf '%s\n' "$groups" | sed -n '1p')" != "
   printf '%s\n' CHANGED
   exit 0
 fi
+if [[ ! "$expected_pid" =~ ^[0-9]+$ || ! "$expected_birth" =~ ^[0-9]+$ ]] ||
+  [ "$expected_boot" != "$(cat /proc/sys/kernel/random/boot_id)" ]; then
+  echo "Missing or changed captured Waypipe identity; refusing TERM." >&2
+  exit 2
+fi
+[ "$(printf '%s\n' "$matches" | awk -F '\t' -v pid="$expected_pid" -v pgid="$wanted_pgid" \
+  '$1 == pid && $2 == pgid {found=1} END {print found+0}')" = 1 ] || exit 2
+IFS= read -r server_stat <"/proc/$expected_pid/stat" || exit 2
+read -r -a server_fields <<<"${server_stat##*) }"
+if [ "${server_fields[19]:-}" != "$expected_birth" ] ||
+  [ "${server_fields[2]:-}" != "$wanted_pgid" ] ||
+  [[ "${server_fields[0]:-}" == Z || "${server_fields[0]:-}" == X ]]; then
+  echo "Captured Waypipe process identity changed; refusing TERM." >&2
+  exit 2
+fi
+group_browsers="$(printf '%s\n' "$processes" | awk -v pgid="$wanted_pgid" '
+  $3 == pgid {
+    pid=$1; $1=""; $2=""; $3=""; sub(/^ +/, "")
+    count=split($0, argv, /[[:space:]]+/); base=argv[1]; sub(/^.*\//, "", base)
+    if (base !~ /^(google-chrome|google-chrome-stable|chrome|chromium|chromium-browser)$/) next
+    for (i=2; i<=count; i++) if (argv[i] ~ /^--type=/) next
+    print pid
+  }')"
+while IFS= read -r browser_pid; do
+  [ -n "$browser_pid" ] || continue
+  IFS= read -r browser_stat <"/proc/$browser_pid/stat" || exit 2
+  read -r -a browser_fields <<<"${browser_stat##*) }"
+  [[ "${browser_fields[19]:-}" =~ ^[0-9]+$ ]] || exit 2
+  if [ "${browser_fields[19]}" -lt "$expected_birth" ]; then
+    echo "Preexisting browser shares the selected Waypipe group; refusing TERM." >&2
+    exit 2
+  fi
+done <<<"$group_browsers"
 
 if ! kill -TERM -- "-$wanted_pgid" 2>&1; then
   echo "Could not send TERM to exact remote waypipe process group $wanted_pgid." >&2
@@ -3160,7 +3295,7 @@ chrome_reset() {
     yk_window_present=1
   fi
 
-  chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" || remote_identity_code=$?
+  chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" "$session" || remote_identity_code=$?
   case "$remote_identity_code" in
     0)
       echo "Remote waypipe server matched socket $chrome_reset_remote_socket (pid=$chrome_reset_remote_pid pgid=$chrome_reset_remote_pgid)." >&2
@@ -3171,11 +3306,9 @@ chrome_reset() {
       fi
       chrome_reset_remote_stop "$host" "$chrome_reset_remote_socket" \
         "$chrome_reset_remote_pgid" || return 1
-      # A successful TERM only proves that the exact group accepted the
-      # request.  Re-check identity before touching the local tmux session so a browser
-      # that escaped the group, or an unrelated browser that was already
-      # present, cannot be hidden by a reset restart.
-      chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" ||
+      # Verify the captured identities after TERM. Only the exact preexisting
+      # browser roots may remain; an escaped/new/reused root still blocks reset.
+      chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" "$session" 1 ||
         post_stop_identity_code=$?
       if [ "$post_stop_identity_code" -ne 1 ]; then
         echo "Remote Waypipe teardown did not leave a cleanly absent server; preserving the existing tmux session." >&2

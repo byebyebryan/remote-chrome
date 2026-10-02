@@ -3878,9 +3878,9 @@ test_reset_remote_stop_targets_only_verified_pgid() (
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" 1000' >"$fake_bin/id"
   chmod +x "$fake_bin/ps" "$fake_bin/id"
   ssh() {
+    local remote_command="${!#}"
     command cat >"$script_file"
-    PATH="$fake_bin:$PATH" bash -s -- \
-      /tmp/waypipe-server-one.sock 999999 1 <"$script_file"
+    PATH="$fake_bin:$PATH" bash -c "$remote_command" <"$script_file"
   }
 
   chrome_reset_remote_stop test-host /tmp/waypipe-server-one.sock 999999 >/dev/null 2>&1 || true
@@ -3902,9 +3902,9 @@ test_reset_remote_identity_detects_main_chrome_executable() (
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" 1000' >"$fake_bin/id"
   chmod +x "$fake_bin/ps" "$fake_bin/id"
   ssh() {
+    local remote_command="${!#}"
     command cat >"$script_file"
-    PATH="$fake_bin:$PATH" bash -s -- \
-      /tmp/waypipe-server-one.sock 701 1 <"$script_file"
+    PATH="$fake_bin:$PATH" bash -c "$remote_command" <"$script_file"
   }
 
   if chrome_reset_remote_identity test-host /tmp/waypipe-server-one.sock >"$test_dir/probe" 2>&1; then
@@ -3924,6 +3924,100 @@ test_reset_remote_identity_detects_main_chrome_executable() (
   [ "$code" -ne 0 ] || fail "remote stop unexpectedly succeeded with unrelated Chrome"
   output="$(cat "$test_dir/stop")"
   assert_contains "$output" "remains or returned an invalid result"
+)
+
+test_reset_captured_browser_identity_ledger() (
+  local test_dir fake_bin code=0 output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fake_bin="$test_dir/bin"
+  mkdir -p "$fake_bin" "$test_dir/proc/sys/kernel/random"
+  printf '%s\n' 12345678-1234-1234-1234-123456789abc >"$test_dir/proc/sys/kernel/random/boot_id"
+  printf '%s\n' '#!/usr/bin/env bash' 'cat "$RESET_FIXTURE/processes"' >"$fake_bin/ps"
+  chmod +x "$fake_bin/ps"
+  fixture_stat() {
+    local pid="$1" pgid="$2" birth="$3"
+    local -a fields=(S 1 "$pgid")
+    while [ "${#fields[@]}" -lt 19 ]; do fields+=(0); done
+    fields+=("$birth")
+    mkdir -p "$test_dir/proc/$pid"
+    printf '%s (fixture) %s\n' "$pid" "${fields[*]}" >"$test_dir/proc/$pid/stat"
+    : >"$test_dir/proc/$pid/environ"
+  }
+  ssh() {
+    local remote_command="${!#}"
+    cat >"$test_dir/script"
+    # Production always reads /proc. Only the extracted test script is changed.
+    printf '%s\n' 'kill() { echo "FAIL: unexpected fixture signal" >&2; return 97; }' >"$test_dir/fixture-script"
+    sed "s|/proc/|$test_dir/proc/|g" "$test_dir/script" >>"$test_dir/fixture-script"
+    PATH="$fake_bin:$PATH" RESET_FIXTURE="$test_dir" bash -c "$remote_command" <"$test_dir/fixture-script"
+  }
+  fixture_stat 100 701 20
+  fixture_stat 200 900 10
+  fixture_stat 300 701 30
+  printf 'REMOTE_CHROME_ORIGIN_SESSION=other-session\0' >"$test_dir/proc/200/environ"
+  printf '%s\n' '100 1 701 waypipe --socket /tmp/waypipe-server-one.sock server' \
+    '200 1 900 /opt/google/chrome/chrome' '300 100 701 /opt/google/chrome/chrome' >"$test_dir/processes"
+  chrome_reset_remote_identity test-host /tmp/waypipe-server-one.sock selected-session || fail "initial ledger capture failed"
+  [ "${chrome_reset_remote_browser_allowlist[*]}" = "200:10" ] || fail "wrong preexisting browser ledger"
+  [ "$chrome_reset_remote_starttime" = 20 ] || fail "missing Waypipe birth identity"
+
+  assert_probe() {
+    local expected="$1" actual=0
+    chrome_reset_remote_identity test-host /tmp/waypipe-server-one.sock selected-session 1 >"$test_dir/output" 2>&1 || actual=$?
+    [ "$actual" = "$expected" ] || fail "post-stop probe expected $expected, got $actual: $(cat "$test_dir/output")"
+  }
+  printf '%s\n' '200 1 900 /opt/google/chrome/chrome' >"$test_dir/processes"
+  assert_probe 1
+  printf '%s\n' '200 1 900 /opt/google/chrome/chrome' '300 1 950 /opt/google/chrome/chrome' >"$test_dir/processes"
+  fixture_stat 300 950 30
+  assert_probe 2 # owned browser escaped the selected group
+  fixture_stat 400 960 50
+  printf '%s\n' '200 1 900 /opt/google/chrome/chrome' '400 1 960 /opt/google/chrome/chrome' >"$test_dir/processes"
+  assert_probe 2 # new browser appeared after capture
+  printf '%s\n' '200 1 900 /opt/google/chrome/chrome' >"$test_dir/processes"
+  fixture_stat 200 900 99
+  assert_probe 2 # recorded PID was reused
+  fixture_stat 200 900 10
+  printf '%s\n' 87654321-1234-1234-1234-123456789abc >"$test_dir/proc/sys/kernel/random/boot_id"
+  assert_probe 2
+  printf '%s\n' 12345678-1234-1234-1234-123456789abc >"$test_dir/proc/sys/kernel/random/boot_id"
+  : >"$test_dir/processes"
+  assert_probe 1 # a preexisting browser is allowed to exit
+  chrome_reset_remote_boot_id=""
+  assert_probe 2 # missing ledger cannot authorize absence
+
+  fixture_stat 200 701 10
+  printf '%s\n' '100 1 701 waypipe --socket /tmp/waypipe-server-one.sock server' \
+    '200 1 701 /opt/google/chrome/chrome' >"$test_dir/processes"
+  chrome_reset_remote_identity test-host /tmp/waypipe-server-one.sock selected-session >"$test_dir/output" 2>&1 &&
+    fail "preexisting browser sharing the selected group was accepted"
+  assert_contains "$(cat "$test_dir/output")" 'shares the selected Waypipe group'
+
+  fixture_stat 200 900 10
+  printf 'REMOTE_CHROME_ORIGIN_SESSION=selected-session\0' >"$test_dir/proc/200/environ"
+  printf '%s\n' '100 1 701 waypipe --socket /tmp/waypipe-server-one.sock server' \
+    '200 1 900 /opt/google/chrome/chrome' >"$test_dir/processes"
+  chrome_reset_remote_identity test-host /tmp/waypipe-server-one.sock selected-session || fail "session ledger capture failed"
+  [ "${#chrome_reset_remote_browser_allowlist[@]}" = 0 ] || fail "owned older browser was allowlisted"
+  printf '%s\n' '200 1 900 /opt/google/chrome/chrome' >"$test_dir/processes"
+  assert_probe 2
+
+  printf '%s\n' '100 1 701 waypipe --socket /tmp/waypipe-server-one.sock server' >"$test_dir/processes"
+  chrome_reset_remote_identity test-host /tmp/waypipe-server-one.sock selected-session || fail "server capture failed"
+  fixture_stat 100 701 21
+  chrome_reset_remote_stop test-host /tmp/waypipe-server-one.sock 701 >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "changed server birth authorized TERM"
+  output="$(cat "$test_dir/output")"
+  assert_contains "$output" 'process identity changed'
+  fixture_stat 100 701 20
+  fixture_stat 200 701 10
+  printf '%s\n' '100 1 701 waypipe --socket /tmp/waypipe-server-one.sock server' \
+    '200 1 701 /opt/google/chrome/chrome' >"$test_dir/processes"
+  code=0
+  chrome_reset_remote_stop test-host /tmp/waypipe-server-one.sock 701 >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "preexisting browser in group authorized TERM"
+  assert_contains "$(cat "$test_dir/output")" 'shares the selected Waypipe group'
 )
 
 test_reset_post_stop_identity_check_preserves_tmux_on_unrelated_chrome() (
@@ -4381,6 +4475,7 @@ tests=(
   test_reset_extracts_exact_socket_and_refuses_ambiguous_local_children
   test_reset_remote_stop_targets_only_verified_pgid
   test_reset_remote_identity_detects_main_chrome_executable
+  test_reset_captured_browser_identity_ledger
   test_reset_post_stop_identity_check_preserves_tmux_on_unrelated_chrome
   test_reset_recreates_when_session_exits_after_remote_stop
   test_reset_remote_failure_keeps_tmux_and_absent_group_recreates_command
