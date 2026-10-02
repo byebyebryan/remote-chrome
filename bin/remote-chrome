@@ -528,6 +528,9 @@ remote_secure_cleanup() {
 remote_secure_on_exit() {
   local exit_status="$?"
   local final_status="$exit_status"
+  # SSH/Waypipe teardown can deliver another HUP/TERM during owned cleanup.
+  # Finish the bounded cleanup ledger before accepting another termination.
+  trap '' INT TERM HUP
   remote_secure_cleanup || true
   if [ "$final_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
     final_status="$cleanup_status"
@@ -538,7 +541,7 @@ remote_secure_on_exit() {
 
 remote_secure_signal() {
   local status="$1"
-  trap - INT TERM HUP
+  trap '' INT TERM HUP
   exit "$status"
 }
 

@@ -48,6 +48,13 @@ if os.environ.get("CHROME_MODE") == "notify":
         "<i>updated</i>", actions, hints, dbus.Int32(0))
     record["replacement"] = int(replacement)
     service.CloseNotification(replacement)
+if os.environ.get("CHROME_CLEANUP_DELAY"):
+    import signal, time
+    def delayed_term(*args):
+        Path(os.environ["CHROME_TRACE"] + ".term").write_text("TERM")
+        time.sleep(0.3)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, delayed_term)
 Path(os.environ["CHROME_TRACE"]).write_text(json.dumps(record))
 if os.environ.get("CHROME_MODE") == "hold":
     import time
@@ -254,13 +261,15 @@ class SecureNotifications(unittest.TestCase):
         self.assertTrue(self.owned(self.source))
         self.assertEqual(list(self.source_runtime.glob("remote-chrome-*")), [])
 
-    def holding_bootstrap(self, *, tracked=False):
+    def holding_bootstrap(self, *, tracked=False, delayed_cleanup=False):
         env = os.environ | {
             "DBUS_SESSION_BUS_ADDRESS": self.source,
             "XDG_RUNTIME_DIR": str(self.source_runtime),
             "PATH": str(self.fakebin) + ":" + os.environ["PATH"],
             "CHROME_TRACE": str(self.trace), "CHROME_MODE": "hold",
         }
+        if delayed_cleanup:
+            env["CHROME_CLEANUP_DELAY"] = "1"
         if tracked:
             env.update(REMOTE_CHROME_ORIGIN_NAME="test-display",
                        REMOTE_CHROME_ORIGIN_TARGET="test-source",
@@ -285,6 +294,15 @@ class SecureNotifications(unittest.TestCase):
         bootstrap, _ = self.holding_bootstrap()
         bootstrap.send_signal(signal.SIGHUP)
         self.assertEqual(bootstrap.wait(timeout=8), 129)
+        self.clean_source()
+
+    def test_second_signal_cannot_interrupt_owned_cleanup(self):
+        self.listener()
+        bootstrap, _ = self.holding_bootstrap(tracked=True, delayed_cleanup=True)
+        bootstrap.send_signal(signal.SIGTERM)
+        wait_for(lambda: Path(str(self.trace) + ".term").exists(), "cleanup did not reach Chrome TERM")
+        bootstrap.send_signal(signal.SIGHUP)
+        self.assertEqual(bootstrap.wait(timeout=8), 143)
         self.clean_source()
 
     def stop_incoming(self, env):
