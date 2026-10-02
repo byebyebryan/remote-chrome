@@ -1,0 +1,804 @@
+{
+  "scratch": "/tmp/remote-chrome-notification-study-_b4580g1",
+  "checks": {
+    "capabilities_negotiated": {
+      "destination_probe": [
+        "actions",
+        "body",
+        "body-markup"
+      ],
+      "source_advertised": [
+        "actions",
+        "body",
+        "body-markup"
+      ],
+      "claims_actions_only_after_direct_client_callback_setup": true,
+      "not_claimed": [
+        "icon-static",
+        "persistence",
+        "inline-reply",
+        "activation-token"
+      ]
+    },
+    "capabilities_negotiated_passed": true,
+    "source_dbus_capabilities": "as 3 \"actions\" \"body\" \"body-markup\"",
+    "source_dbus_capabilities_passed": true,
+    "formatter_and_id_mapping": {
+      "summary": "study action roundtrip",
+      "body": "<b></b>127.0.0.1:36069<br/><br/>Native body &amp; &lt;format&gt; test",
+      "actions": [
+        "default",
+        "Activate",
+        "settings",
+        "Settings"
+      ],
+      "source_id": 1,
+      "local_id": 100
+    },
+    "formatter_and_id_mapping_passed": true,
+    "destination_action_reached_web_notification_onclick": {
+      "fixture_call": "",
+      "local_id": 100,
+      "source_id": 1,
+      "key": "default",
+      "web_events": [
+        "onclick"
+      ],
+      "path": [
+        "destination D-Bus ActionInvoked",
+        "destination client",
+        "private Unix socket",
+        "source ActionInvoked",
+        "Chrome Web Notification onclick"
+      ]
+    },
+    "destination_action_reached_web_notification_onclick_passed": true,
+    "browser_close_roundtrip": {
+      "source_close_request": {
+        "event": "close-request",
+        "source_id": 1
+      },
+      "destination_close_request": {
+        "event": "close-submit",
+        "source_id": 1,
+        "local_id": 100
+      },
+      "source_closed_callback": {
+        "event": "closed",
+        "source_id": 1,
+        "local_id": 100,
+        "reason": 3
+      },
+      "web_events": [
+        "onclick",
+        "onclose"
+      ]
+    },
+    "browser_close_roundtrip_passed": true,
+    "source_replacement_identity": {
+      "first": 2,
+      "second": 2
+    },
+    "source_replacement_identity_passed": true,
+    "replacement_before_first_mapping": {
+      "destination_notifications": [
+        {
+          "event": "notify",
+          "app": "Google Chrome",
+          "replaces_id": 0,
+          "local_id": 101,
+          "summary": "study replacement one",
+          "body": "<b></b>Old body",
+          "actions": [
+            "default",
+            "Open"
+          ],
+          "expires": -1
+        },
+        {
+          "event": "notify",
+          "app": "Google Chrome",
+          "replaces_id": 101,
+          "local_id": 101,
+          "summary": "study replacement two",
+          "body": "<b></b>New body",
+          "actions": [
+            "default",
+            "Open"
+          ],
+          "expires": -1
+        }
+      ],
+      "destination_queue_timeline": [
+        {
+          "event": "queue-enqueued",
+          "message_type": "notify",
+          "source_id": 2,
+          "replaces_source_id": 2,
+          "summary": "study replacement two"
+        },
+        {
+          "event": "mapped",
+          "source_id": 2,
+          "local_id": 101,
+          "replaces_local_id": 0
+        },
+        {
+          "event": "mapped",
+          "source_id": 2,
+          "local_id": 101,
+          "replaces_local_id": 101
+        }
+      ]
+    },
+    "replacement_before_first_mapping_passed": true,
+    "close_before_destination_id_race": {
+      "source_id": 3,
+      "closed_callback": {
+        "event": "closed",
+        "source_id": 3,
+        "local_id": 102,
+        "reason": 3
+      },
+      "destination_close": [
+        {
+          "event": "close",
+          "local_id": 102
+        }
+      ],
+      "destination_queue_timeline": [
+        {
+          "event": "queue-enqueued",
+          "message_type": "notify",
+          "source_id": 3,
+          "replaces_source_id": 0,
+          "summary": "study close before map"
+        },
+        {
+          "event": "queue-enqueued",
+          "message_type": "close",
+          "source_id": 3,
+          "replaces_source_id": 0,
+          "summary": null
+        },
+        {
+          "event": "mapped",
+          "source_id": 3,
+          "local_id": 102,
+          "replaces_local_id": 0
+        }
+      ],
+      "source_event_timeline": [
+        {
+          "event": "notify",
+          "source_id": 3,
+          "replaces_source_id": 0,
+          "app": "Google Chrome",
+          "summary": "study close before map",
+          "body": "Closed promptly",
+          "actions": [
+            "default",
+            "Open"
+          ],
+          "hints": {},
+          "expires": -1
+        },
+        {
+          "event": "close-request",
+          "source_id": 3
+        },
+        {
+          "event": "mapped",
+          "source_id": 3,
+          "local_id": 102
+        }
+      ]
+    },
+    "close_before_destination_id_race_passed": true,
+    "destination_dismissal_and_expiry_callbacks": {
+      "dismiss": {
+        "source_id": 4,
+        "local_id": 103,
+        "reason": 2
+      },
+      "expiry": {
+        "source_id": 5,
+        "local_id": 104,
+        "reason": 1
+      }
+    },
+    "destination_dismissal_and_expiry_callbacks_passed": true
+  },
+  "chrome": "Google Chrome 154.0.8037.97",
+  "prototype": "milestone-0-bidirectional-notification-actions",
+  "protocol": {
+    "transport": "persistent newline-delimited JSON over private AF_UNIX SOCK_STREAM",
+    "version": 1,
+    "identity": [
+      "session_id",
+      "generation"
+    ],
+    "source_to_destination": [
+      "notify",
+      "close"
+    ],
+    "destination_to_source": [
+      "mapped",
+      "action",
+      "closed"
+    ],
+    "callbacks_include": [
+      "source_id",
+      "local_id",
+      "generation"
+    ],
+    "queue_limit_messages": 64,
+    "queue_limit_bytes": 1048576,
+    "active_limit": 64
+  },
+  "manual_visual_acceptance": "not performed; destination action was injected by the private fixture daemon",
+  "source_bus": "unix:path=/tmp/remote-chrome-notification-study-_b4580g1/bus.sock",
+  "destination_bus": "unix:path=/tmp/remote-chrome-notification-study-_b4580g1/destination-bus.sock",
+  "source_generation": 17,
+  "session_id": "study-8c5dcc7f25a0a652",
+  "formatter": "loaded from current bin/remote-chrome _notify-listener definitions",
+  "installed_launcher_sha256": "bb604a453ec77f49bc219d121d2d368897dedd68fc3bd6304e8ac3c4191765cf",
+  "capabilities": {
+    "destination_probe": [
+      "actions",
+      "body",
+      "body-markup"
+    ],
+    "source_advertised": [
+      "actions",
+      "body",
+      "body-markup"
+    ],
+    "claims_actions_only_after_direct_client_callback_setup": true,
+    "not_claimed": [
+      "icon-static",
+      "persistence",
+      "inline-reply",
+      "activation-token"
+    ]
+  },
+  "source_events": [
+    {
+      "event": "ready",
+      "name_result": 1,
+      "capabilities": [
+        "actions",
+        "body",
+        "body-markup"
+      ],
+      "unique_name": ":1.0",
+      "session_id": "study-8c5dcc7f25a0a652",
+      "generation": 17
+    },
+    {
+      "event": "capabilities",
+      "capabilities": [
+        "actions",
+        "body",
+        "body-markup"
+      ]
+    },
+    {
+      "event": "capabilities",
+      "capabilities": [
+        "actions",
+        "body",
+        "body-markup"
+      ]
+    },
+    {
+      "event": "notify",
+      "source_id": 1,
+      "replaces_source_id": 0,
+      "app": "Google Chrome",
+      "summary": "study action roundtrip",
+      "body": "127.0.0.1:36069\n\nNative body &amp; &lt;format&gt; test",
+      "actions": [
+        "default",
+        "Activate",
+        "settings",
+        "Settings"
+      ],
+      "hints": {
+        "urgency": 2,
+        "desktop_entry": "google-chrome"
+      },
+      "expires": 0
+    },
+    {
+      "event": "mapped",
+      "source_id": 1,
+      "local_id": 100
+    },
+    {
+      "event": "action",
+      "source_id": 1,
+      "local_id": 100,
+      "key": "default"
+    },
+    {
+      "event": "close-request",
+      "source_id": 1
+    },
+    {
+      "event": "closed",
+      "source_id": 1,
+      "local_id": 100,
+      "reason": 3
+    },
+    {
+      "event": "notify",
+      "source_id": 2,
+      "replaces_source_id": 0,
+      "app": "Google Chrome",
+      "summary": "study replacement one",
+      "body": "Old body",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "hints": {},
+      "expires": -1
+    },
+    {
+      "event": "notify",
+      "source_id": 2,
+      "replaces_source_id": 2,
+      "app": "Google Chrome",
+      "summary": "study replacement two",
+      "body": "New body",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "hints": {},
+      "expires": -1
+    },
+    {
+      "event": "mapped",
+      "source_id": 2,
+      "local_id": 101
+    },
+    {
+      "event": "mapped",
+      "source_id": 2,
+      "local_id": 101
+    },
+    {
+      "event": "notify",
+      "source_id": 3,
+      "replaces_source_id": 0,
+      "app": "Google Chrome",
+      "summary": "study close before map",
+      "body": "Closed promptly",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "hints": {},
+      "expires": -1
+    },
+    {
+      "event": "close-request",
+      "source_id": 3
+    },
+    {
+      "event": "mapped",
+      "source_id": 3,
+      "local_id": 102
+    },
+    {
+      "event": "closed",
+      "source_id": 3,
+      "local_id": 102,
+      "reason": 3
+    },
+    {
+      "event": "notify",
+      "source_id": 4,
+      "replaces_source_id": 0,
+      "app": "Google Chrome",
+      "summary": "study dismiss",
+      "body": "callback",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "hints": {},
+      "expires": -1
+    },
+    {
+      "event": "mapped",
+      "source_id": 4,
+      "local_id": 103
+    },
+    {
+      "event": "closed",
+      "source_id": 4,
+      "local_id": 103,
+      "reason": 2
+    },
+    {
+      "event": "notify",
+      "source_id": 5,
+      "replaces_source_id": 0,
+      "app": "Google Chrome",
+      "summary": "study expiry",
+      "body": "callback",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "hints": {},
+      "expires": -1
+    },
+    {
+      "event": "mapped",
+      "source_id": 5,
+      "local_id": 104
+    },
+    {
+      "event": "closed",
+      "source_id": 5,
+      "local_id": 104,
+      "reason": 1
+    }
+  ],
+  "client_events": [
+    {
+      "event": "client-ready",
+      "capabilities": [
+        "actions",
+        "body",
+        "body-markup"
+      ],
+      "formatter_source": "bin/remote-chrome:_notify-listener",
+      "socket": "/tmp/remote-chrome-notification-study-_b4580g1/destination-bridge.sock",
+      "session_id": "study-8c5dcc7f25a0a652",
+      "generation": 17
+    },
+    {
+      "event": "peer-connected",
+      "session_id": "study-8c5dcc7f25a0a652",
+      "generation": 17
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "notify",
+      "source_id": 1,
+      "replaces_source_id": 0,
+      "summary": "study action roundtrip"
+    },
+    {
+      "event": "notify-submit",
+      "source_id": 1,
+      "replaces_source_id": 0,
+      "replaces_local_id": 0,
+      "app": "Google Chrome",
+      "summary": "study action roundtrip",
+      "body": "<b></b>127.0.0.1:36069<br/><br/>Native body &amp; &lt;format&gt; test",
+      "actions": [
+        "default",
+        "Activate",
+        "settings",
+        "Settings"
+      ]
+    },
+    {
+      "event": "mapped",
+      "source_id": 1,
+      "local_id": 100,
+      "replaces_local_id": 0
+    },
+    {
+      "event": "action",
+      "source_id": 1,
+      "local_id": 100,
+      "key": "default"
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "close",
+      "source_id": 1,
+      "replaces_source_id": 0,
+      "summary": null
+    },
+    {
+      "event": "close-submit",
+      "source_id": 1,
+      "local_id": 100
+    },
+    {
+      "event": "closed",
+      "source_id": 1,
+      "local_id": 100,
+      "reason": 3
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "notify",
+      "source_id": 2,
+      "replaces_source_id": 0,
+      "summary": "study replacement one"
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "notify",
+      "source_id": 2,
+      "replaces_source_id": 2,
+      "summary": "study replacement two"
+    },
+    {
+      "event": "notify-submit",
+      "source_id": 2,
+      "replaces_source_id": 0,
+      "replaces_local_id": 0,
+      "app": "Google Chrome",
+      "summary": "study replacement one",
+      "body": "<b></b>Old body",
+      "actions": [
+        "default",
+        "Open"
+      ]
+    },
+    {
+      "event": "mapped",
+      "source_id": 2,
+      "local_id": 101,
+      "replaces_local_id": 0
+    },
+    {
+      "event": "notify-submit",
+      "source_id": 2,
+      "replaces_source_id": 2,
+      "replaces_local_id": 101,
+      "app": "Google Chrome",
+      "summary": "study replacement two",
+      "body": "<b></b>New body",
+      "actions": [
+        "default",
+        "Open"
+      ]
+    },
+    {
+      "event": "mapped",
+      "source_id": 2,
+      "local_id": 101,
+      "replaces_local_id": 101
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "notify",
+      "source_id": 3,
+      "replaces_source_id": 0,
+      "summary": "study close before map"
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "close",
+      "source_id": 3,
+      "replaces_source_id": 0,
+      "summary": null
+    },
+    {
+      "event": "notify-submit",
+      "source_id": 3,
+      "replaces_source_id": 0,
+      "replaces_local_id": 0,
+      "app": "Google Chrome",
+      "summary": "study close before map",
+      "body": "<b></b>Closed promptly",
+      "actions": [
+        "default",
+        "Open"
+      ]
+    },
+    {
+      "event": "mapped",
+      "source_id": 3,
+      "local_id": 102,
+      "replaces_local_id": 0
+    },
+    {
+      "event": "close-submit",
+      "source_id": 3,
+      "local_id": 102
+    },
+    {
+      "event": "closed",
+      "source_id": 3,
+      "local_id": 102,
+      "reason": 3
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "notify",
+      "source_id": 4,
+      "replaces_source_id": 0,
+      "summary": "study dismiss"
+    },
+    {
+      "event": "notify-submit",
+      "source_id": 4,
+      "replaces_source_id": 0,
+      "replaces_local_id": 0,
+      "app": "Google Chrome",
+      "summary": "study dismiss",
+      "body": "<b></b>callback",
+      "actions": [
+        "default",
+        "Open"
+      ]
+    },
+    {
+      "event": "mapped",
+      "source_id": 4,
+      "local_id": 103,
+      "replaces_local_id": 0
+    },
+    {
+      "event": "closed",
+      "source_id": 4,
+      "local_id": 103,
+      "reason": 2
+    },
+    {
+      "event": "queue-enqueued",
+      "message_type": "notify",
+      "source_id": 5,
+      "replaces_source_id": 0,
+      "summary": "study expiry"
+    },
+    {
+      "event": "notify-submit",
+      "source_id": 5,
+      "replaces_source_id": 0,
+      "replaces_local_id": 0,
+      "app": "Google Chrome",
+      "summary": "study expiry",
+      "body": "<b></b>callback",
+      "actions": [
+        "default",
+        "Open"
+      ]
+    },
+    {
+      "event": "mapped",
+      "source_id": 5,
+      "local_id": 104,
+      "replaces_local_id": 0
+    },
+    {
+      "event": "closed",
+      "source_id": 5,
+      "local_id": 104,
+      "reason": 1
+    }
+  ],
+  "destination_events": [
+    {
+      "event": "capabilities",
+      "capabilities": [
+        "body",
+        "actions",
+        "body-markup"
+      ]
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "replaces_id": 0,
+      "local_id": 100,
+      "summary": "study action roundtrip",
+      "body": "<b></b>127.0.0.1:36069<br/><br/>Native body &amp; &lt;format&gt; test",
+      "actions": [
+        "default",
+        "Activate",
+        "settings",
+        "Settings"
+      ],
+      "expires": 0
+    },
+    {
+      "event": "fixture-action",
+      "local_id": 100,
+      "key": "default"
+    },
+    {
+      "event": "close",
+      "local_id": 100
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "replaces_id": 0,
+      "local_id": 101,
+      "summary": "study replacement one",
+      "body": "<b></b>Old body",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "expires": -1
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "replaces_id": 101,
+      "local_id": 101,
+      "summary": "study replacement two",
+      "body": "<b></b>New body",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "expires": -1
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "replaces_id": 0,
+      "local_id": 102,
+      "summary": "study close before map",
+      "body": "<b></b>Closed promptly",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "expires": -1
+    },
+    {
+      "event": "close",
+      "local_id": 102
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "replaces_id": 0,
+      "local_id": 103,
+      "summary": "study dismiss",
+      "body": "<b></b>callback",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "expires": -1
+    },
+    {
+      "event": "fixture-dismiss",
+      "local_id": 103,
+      "reason": 2
+    },
+    {
+      "event": "notify",
+      "app": "Google Chrome",
+      "replaces_id": 0,
+      "local_id": 104,
+      "summary": "study expiry",
+      "body": "<b></b>callback",
+      "actions": [
+        "default",
+        "Open"
+      ],
+      "expires": -1
+    },
+    {
+      "event": "fixture-expire",
+      "local_id": 104,
+      "reason": 1
+    }
+  ],
+  "visual_acceptance": {
+    "native_backend_selected": true,
+    "actual_web_notification_handler_reached": true,
+    "desktop_visible_user_click": false,
+    "action_source": "private destination fixture daemon TriggerAction(local_id, key)"
+  },
+  "owned_processes_exited": true,
+  "aggregate_exit_code": 0
+}
