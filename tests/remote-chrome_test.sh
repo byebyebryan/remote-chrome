@@ -5110,7 +5110,8 @@ test_reset_extracts_exact_socket_and_refuses_ambiguous_local_children() (
 )
 
 test_reset_restarts_notification_listener() (
-  local test_dir command_line events="" session="remote-chrome-test-host"
+  local test_dir command_line events="" session="remote-chrome-test-host" previous_traps
+  local recreation_code=0 code=0
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   XDG_RUNTIME_DIR="$test_dir"
@@ -5146,7 +5147,7 @@ test_reset_restarts_notification_listener() (
       list-panes) printf '%s|%s|%s\n' '%0' 4242 "$command_line" ;;
       list-windows) printf '%s\n' chrome ;;
       kill-session) events+="kill-session " ;;
-      new-session) events+="new-session " ;;
+      new-session) events+="new-session "; return "$recreation_code" ;;
       *) return 0 ;;
     esac
   }
@@ -5157,9 +5158,128 @@ test_reset_restarts_notification_listener() (
   chrome_reset_remote_identity() { return 1; }
   confirm() { return 0; }
 
+  trap ':' INT TERM HUP
+  previous_traps="$(trap -p EXIT INT TERM HUP)"
   chrome_reset test-host --yes >/dev/null 2>&1
-  [[ "$events" == *"stop-listener"*"new-session"*"start-listener"* ]] ||
-    fail "reset did not restart the notification listener around recreation: $events"
+  [[ "$events" == *"stop-listener"*"start-listener"*"new-session"* ]] ||
+    fail "reset started Chrome before restarting the notification listener: $events"
+  [ "$(trap -p EXIT INT TERM HUP)" = "$previous_traps" ] ||
+    fail "reset changed its caller's cleanup traps"
+
+  recreation_code=1
+  events=""
+  chrome_reset test-host --yes >/dev/null 2>&1 || code=$?
+  [ "$code" -eq 1 ] || fail "reset did not report recreation failure"
+  [[ "$events" == *"start-listener"*"new-session"*"stop-listener"* ]] ||
+    fail "failed reset did not roll back its listener: $events"
+  [ "$(trap -p EXIT INT TERM HUP)" = "$previous_traps" ] ||
+    fail "failed reset changed its caller's cleanup traps"
+)
+
+test_reset_listener_readiness_and_recreation_rollback() (
+  local test_dir mode code command_line session="remote-chrome-review"
+  local use_yubikey local_socket probe_trace listener_pid listener_starttime
+  test_dir="$(mktemp -d)"
+  trap 'notify_stop_listener; rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  chrome_yubikey_mode=auto
+
+  need() { :; }
+  script_path() { printf '%s\n' "$repo_root/bin/remote-chrome"; }
+  notify_remove_remote_socket() { :; }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { [ "$use_yubikey" = "1" ]; }
+  yk_preflight_for_forwarding() { [ "$mode" != "preflight-failure" ]; }
+  chrome_reset_find_local_ssh() {
+    chrome_reset_remote_socket="$test_dir/waypipe.sock"
+    return 0
+  }
+  chrome_reset_remote_identity() { return 1; }
+
+  reset_fixture_create_chrome() {
+    notify_state_field "$notify_state_file" listener_pid >"$probe_trace"
+    notify_state_field "$notify_state_file" listener_starttime >>"$probe_trace"
+    # Connecting immediately models the reverse forward's first endpoint
+    # connection. No notification frames or desktop D-Bus calls are sent.
+    python3 - "$notify_local_socket" <<'PY' || return 1
+import socket
+import sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+    peer.settimeout(0.5)
+    peer.connect(sys.argv[1])
+PY
+    case "$mode" in
+      plain-failure|forwarding-failure) return 1 ;;
+      interrupted) kill -TERM "$BASHPID" ;;
+    esac
+    return 0
+  }
+  chrome_launch_detached_with_yubikey() { reset_fixture_create_chrome; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s|%s|%s\n' '%0' 4242 "$command_line" ;;
+      list-windows) printf '%s\n' chrome ;;
+      new-session) reset_fixture_create_chrome ;;
+      *) return 0 ;;
+    esac
+  }
+
+  for mode in plain-success forwarding-success plain-failure forwarding-failure preflight-failure interrupted; do
+    use_yubikey=0
+    case "$mode" in forwarding-*|preflight-failure) use_yubikey=1 ;; esac
+    notify_prepare_session "$session" test-host
+    local_socket="$notify_local_socket"
+    probe_trace="$test_dir/$mode.probe"
+    command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+      chrome chrome_libsecret_os_crypt_password_v2 "$notify_remote_socket" \
+      "$notify_local_socket" chrome --new-window)"
+    {
+      printf 'listener_pid\t%s\n' "999999"
+      printf 'listener_starttime\t%s\n' "1"
+      printf 'local_socket\t%s\n' "$notify_local_socket"
+      printf 'remote_socket\t%s\n' "$notify_remote_socket"
+      printf 'apps\t%s\n' "chrome"
+      printf 'session\t%s\n' "$session"
+      printf 'host\t%s\n' "test-host"
+    } >"$notify_state_file"
+    code=0
+    (
+      # Keep the fixture's outer cleanup in its parent. The reset itself must
+      # own rollback when this child is interrupted during recreation.
+      trap - EXIT INT TERM HUP
+      chrome_reset test-host --session "$session" --yes
+    ) >"$test_dir/$mode.output" 2>&1 || code=$?
+
+    case "$mode" in
+      plain-success|forwarding-success)
+        [ "$code" -eq 0 ] || fail "$mode reset failed: $(cat "$test_dir/$mode.output")"
+        [ -S "$local_socket" ] || fail "$mode did not retain its ready listener"
+        notify_load_state "$notify_state_file"
+        notify_stop_listener test-host
+        ;;
+      interrupted)
+        [ "$code" -eq 143 ] || fail "interrupted reset did not preserve TERM status: $code"
+        ;;
+      *) [ "$code" -ne 0 ] || fail "$mode reset unexpectedly succeeded" ;;
+    esac
+    assert_file_missing "$notify_state_file"
+    assert_file_missing "$local_socket"
+    if [ "$mode" = "preflight-failure" ]; then
+      assert_file_missing "$probe_trace"
+    else
+      [ -s "$probe_trace" ] || fail "$mode never attempted Chrome recreation"
+      listener_pid="$(sed -n '1p' "$probe_trace")"
+      listener_starttime="$(sed -n '2p' "$probe_trace")"
+      [[ "$listener_pid" =~ ^[0-9]+$ ]] || fail "$mode reached Chrome without a recorded listener"
+      [ "$(notify_pid_starttime "$listener_pid" 2>/dev/null || true)" != "$listener_starttime" ] ||
+        fail "$mode left its listener running after teardown"
+    fi
+  done
 )
 
 test_reset_parser_skips_ssh_options_before_host() (
@@ -5718,6 +5838,7 @@ tests=(
   test_notify_launch_failure_stops_listener
   test_reset_parser_skips_ssh_options_before_host
   test_reset_restarts_notification_listener
+  test_reset_listener_readiness_and_recreation_rollback
   test_secure_command_shape_recreates_through_reset_parser
   test_secure_command_line_replays_with_exact_arguments
   test_prepare_bootstrap_script_writes_and_removes_session_file

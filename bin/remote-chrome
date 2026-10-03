@@ -3392,6 +3392,9 @@ chrome_reset() {
   local reset_forwarding_expected=0
   local pane_host
   local notify_reset_state=0
+  local notify_reset_listener_started=0
+  local notify_reset_previous_traps=""
+  local recreate_failed=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -3563,21 +3566,43 @@ chrome_reset() {
   chrome_prepare_bootstrap_script "$session" >/dev/null || return 1
 
   if [ "$yk_needed" = "1" ]; then
-    yk_preflight_for_forwarding 1
+    yk_preflight_for_forwarding 1 || return $?
+  fi
+  if [ "$notify_reset_state" = "1" ]; then
+    # The remote endpoint connects once during bootstrap. Its local listener
+    # must already be accepting connections before the Chrome pane starts.
+    if notify_start_listener; then
+      notify_reset_listener_started=1
+      notify_reset_previous_traps="$(trap -p EXIT INT TERM HUP)"
+      trap 'trap "" INT TERM HUP; notify_stop_listener "$host"' EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      trap 'exit 129' HUP
+    else
+      echo "remote-chrome notify: listener restart failed; remote notifications will not appear locally." >&2
+    fi
+  fi
+
+  if [ "$yk_needed" = "1" ]; then
     if ! chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reset_pane_command"; then
       echo "Could not recreate the Chrome/YubiKey tmux session after remote Waypipe teardown." >&2
-      return 1
+      recreate_failed=1
     fi
   else
     if ! chrome_tmux_create_chrome_session "$session" "$chrome_reset_pane_command"; then
       echo "Could not recreate chrome pane in tmux session $session." >&2
-      return 1
+      recreate_failed=1
     fi
   fi
-  if [ "$notify_reset_state" = "1" ]; then
-    notify_start_listener ||
-      echo "remote-chrome notify: listener restart failed; remote notifications will not appear locally." >&2
+  if [ "$notify_reset_listener_started" = "1" ]; then
+    if [ "$recreate_failed" = "1" ]; then
+      trap '' INT TERM HUP
+      notify_stop_listener "$host"
+    fi
+    trap - EXIT INT TERM HUP
+    [ -z "$notify_reset_previous_traps" ] || eval "$notify_reset_previous_traps"
   fi
+  [ "$recreate_failed" = "0" ] || return 1
   echo "Reset $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
   print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
   print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
