@@ -367,6 +367,176 @@ test_non_owner_cleanup_preserves_existing_attempt_lock() (
   [ -z "$events" ] || fail "non-owner cleanup invoked stop: $events"
 )
 
+test_stale_rollback_cannot_clean_new_attempt_generation() (
+  local test_dir old_token old_identity events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_attempt_token=old-owner
+  yk_acquire_attempt
+  old_token="$yk_attempt_token"
+  old_identity="$yk_attempt_lock_identity"
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_write_state
+
+  yk_attempt_owned=0
+  rmdir -- "$yk_attempt_lock"
+  command sleep 0.02
+  mkdir -m 700 -- "$yk_attempt_lock"
+  yk_attempt_token=new-owner
+  yk_active_busid=6-2.3
+  yk_write_state
+
+  yk_attempt_owned=1
+  yk_attempt_lock_identity="$old_identity"
+  yk_attempt_token="$old_token"
+  yk_remote_detach_busid() { events+="detach "; }
+  yk_close_tunnel() { events+="tunnel "; }
+  yk_unbind_owned_busid() { events+="unbind "; }
+  yk_stop_owned_usbipd() { events+="daemon "; }
+  sudo() { events+="sudo "; return 0; }
+
+  yk_rollback_start || code=$?
+  [ "$code" -ne 0 ] || fail "stale rollback reported cleanup of another owner's generation"
+  [ -z "$events" ] || fail "stale rollback acted on newer resources: $events"
+  runtime_owned_directory "$yk_attempt_lock" || fail "stale rollback removed the new attempt lock"
+  [ "$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file")" = new-owner ] ||
+    fail "stale rollback replaced the new owner's ledger"
+)
+
+test_stale_helper_cleanup_preserves_new_attempt_generation() (
+  local test_dir old_token old_identity events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_attempt_token=old-owner
+  yk_acquire_attempt
+  old_token="$yk_attempt_token"
+  old_identity="$yk_attempt_lock_identity"
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_write_state
+
+  # Model a stop followed by a new provisional launch before the old helper's
+  # EXIT trap runs. The path is reused, but its recorded directory generation
+  # and ledger token both belong to the newer launch.
+  yk_attempt_owned=0
+  rmdir -- "$yk_attempt_lock"
+  command sleep 0.02
+  mkdir -m 700 -- "$yk_attempt_lock"
+  [ "$(runtime_path_identity "$yk_attempt_lock")" != "$old_identity" ] ||
+    fail "fixture did not create a distinct attempt-lock generation"
+  yk_attempt_token=new-owner
+  yk_write_state
+
+  yk_attempt_owned=1
+  yk_attempt_lock_identity="$old_identity"
+  yk_attempt_token="$old_token"
+  yk_remote_detach_busid() { events+="detach "; }
+  yk_close_tunnel() { events+="tunnel "; }
+  yk_stop_owned_usbipd() { events+="daemon "; }
+  sudo() { events+="sudo "; return 0; }
+  yk_cleanup_done=0
+  yk_cleanup
+
+  runtime_owned_directory "$yk_attempt_lock" || fail "stale helper removed the new provisional lock"
+  [ "$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file")" = new-owner ] ||
+    fail "stale helper changed the new owner's ledger"
+  [ -z "$events" ] || fail "stale helper cleaned newer owner's resources: $events"
+  [ "$yk_attempt_owned" = 0 ] || fail "stale helper kept ownership after retiring"
+)
+
+test_helper_cleanup_rechecks_generation_after_waiting_for_lock() (
+  local test_dir events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_attempt_token="waiting-owner"
+  yk_acquire_attempt
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_write_state
+  yk_remote_detach_busid() { events+="detach "; }
+  yk_close_tunnel() { events+="tunnel "; }
+  yk_stop_owned_usbipd() { events+="daemon "; }
+  sudo() { events+="sudo "; return 0; }
+  yk_cleanup_lock_acquire() {
+    # A newer generation replaces the ledger while this helper is waiting on
+    # the per-state cleanup lock.
+    yk_cleanup_lock_owned=1
+    yk_cleanup_lock_token=mock-owner
+    yk_attempt_owned=0
+    yk_attempt_token=new-owner
+    yk_write_state
+    yk_attempt_owned=1
+  }
+  yk_cleanup_lock_release() {
+    yk_cleanup_lock_owned=0
+    events+="release-lock "
+  }
+
+  yk_stop waiting-owner || code=$?
+  [ "$code" -eq 0 ] || fail "helper did not retire harmlessly after generation replacement"
+  [ "$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file")" = new-owner ] ||
+    fail "helper changed the replacement ledger"
+  runtime_owned_directory "$yk_attempt_lock" || fail "helper removed the replacement lock"
+  [ "$events" = "release-lock " ] || fail "helper acted on resources after generation changed: $events"
+)
+
+test_helper_cleanup_preserves_new_lock_when_ledger_disappears_while_waiting() (
+  local test_dir events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_attempt_token="waiting-owner"
+  yk_acquire_attempt
+  local old_identity="$yk_attempt_lock_identity"
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_write_state
+  yk_remote_detach_busid() { events+="detach "; }
+  yk_close_tunnel() { events+="tunnel "; }
+  yk_stop_owned_usbipd() { events+="daemon "; }
+  sudo() { events+="sudo "; return 0; }
+  yk_cleanup_lock_acquire() {
+    yk_cleanup_lock_owned=1
+    yk_cleanup_lock_token=mock-owner
+    rm -- "$yk_state_file"
+    rmdir -- "$yk_attempt_lock"
+    command sleep 0.02
+    mkdir -m 700 -- "$yk_attempt_lock"
+  }
+  yk_cleanup_lock_release() {
+    yk_cleanup_lock_owned=0
+    events+="release-lock "
+  }
+
+  yk_stop waiting-owner || code=$?
+  [ "$code" -eq 0 ] || fail "helper did not retire after ledger disappearance"
+  [ ! -e "$yk_state_file" ] || fail "helper resurrected a missing ledger"
+  runtime_owned_directory "$yk_attempt_lock" || fail "helper removed a new provisional lock"
+  [ "$(runtime_path_identity "$yk_attempt_lock")" != "$old_identity" ] ||
+    fail "fixture did not create a new provisional-lock generation"
+  [ "$events" = "release-lock " ] || fail "helper acted on resources after ledger disappearance: $events"
+)
+
 test_active_attempt_cannot_write_state_after_lock_removal() (
   local test_dir
   test_dir="$(mktemp -d)"
@@ -381,6 +551,79 @@ test_active_attempt_cannot_write_state_after_lock_removal() (
     fail "active attempt wrote state after its lock disappeared"
   fi
   assert_file_missing "$yk_state_file"
+)
+
+test_yubikey_state_publication_uses_private_unique_temp() (
+  local test_dir marker_target marker state_tmp_count
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  marker_target="$test_dir/marker-target"
+  marker="${yk_state_file}.tmp.$$"
+  printf '%s\n' keep-me >"$marker_target"
+  ln -s "$marker_target" "$marker"
+
+  yk_phase=ready
+  yk_write_state || fail "YubiKey state could not be atomically published"
+  [ "$(stat -c '%a' "$yk_state_file")" = 600 ] || fail "YubiKey state permissions are not private"
+  [ -L "$marker" ] || fail "legacy predictable YubiKey temp marker was replaced"
+  [ "$(cat "$marker_target")" = keep-me ] || fail "state temp handling changed the marker target"
+  local -a temp_paths=("${yk_state_file}.tmp."*)
+  state_tmp_count="${#temp_paths[@]}"
+  [ "$state_tmp_count" -eq 1 ] || fail "state publication left unexpected temp artifacts"
+)
+
+test_yubikey_stop_refuses_symlink_state_without_resource_cleanup() (
+  local test_dir target events="" code=0 before
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_write_state
+  target="$test_dir/forged-state"
+  mv -- "$yk_state_file" "$target"
+  ln -s "$target" "$yk_state_file"
+  before="$(cat "$target")"
+  yk_remote_detach_busid() { events+="detach "; }
+  yk_close_tunnel() { events+="tunnel "; }
+  yk_stop_owned_usbipd() { events+="daemon "; }
+  sudo() { events+="sudo "; return 0; }
+
+  yk_stop >/dev/null 2>&1 || code=$?
+  [ "$code" -eq 2 ] || fail "explicit stop accepted a symlink state ledger"
+  [ -L "$yk_state_file" ] || fail "explicit stop removed an unsafe state symlink"
+  [ "$(cat "$target")" = "$before" ] || fail "explicit stop changed the symlink target"
+  [ -z "$events" ] || fail "explicit stop acted on resources from a symlink ledger: $events"
+  [ -z "$(yk_standard_state_files)" ] || fail "state discovery included a symlink ledger"
+)
+
+test_yubikey_run_refuses_unsafe_log_before_tee_or_start() (
+  local test_dir target events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  target="$test_dir/log-target"
+  printf '%s\n' preserve >"$target"
+  ln -s "$target" "$yk_log_file"
+  yk_start() { events+="start "; }
+
+  yk_run >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -eq 1 ] || fail "YubiKey runner accepted a symlink log path"
+  [ -L "$yk_log_file" ] || fail "YubiKey runner removed the unsafe log symlink"
+  [ "$(cat "$target")" = preserve ] || fail "YubiKey runner wrote through the symlink log"
+  [[ "$events" != *start* ]] || fail "YubiKey runner started before validating its log"
+  assert_contains "$(cat "$test_dir/output")" "unsafe YubiKey log path"
 )
 
 test_successful_start_records_exact_state() (
@@ -732,7 +975,7 @@ test_usbipd_state_write_records_pid_before_started_phase() (
   [[ "$definition" != *"yk_write_state || true"* ]] ||
     fail "usbipd setup ignored state persistence failures"
   local pid_line phase_line
-  pid_line="$(printf '%s\n' "$definition" | awk '/yk_usbipd_pid=.*sudo cat/{print NR; exit}')"
+  pid_line="$(printf '%s\n' "$definition" | awk '/yk_usbipd_pid=.*yk_validate_usbipd_pid_file/{print NR; exit}')"
   phase_line="$(printf '%s\n' "$definition" | awk '/yk_phase="usbipd-started"/{print NR; exit}')"
   if [ -z "$pid_line" ] || [ -z "$phase_line" ] || [ "$pid_line" -ge "$phase_line" ]; then
     fail "validated usbipd PID was not read before usbipd-started state"
@@ -1483,6 +1726,95 @@ test_prepare_bootstrap_script_writes_and_removes_session_file() (
   assert_file_missing "$script_path"
 )
 
+test_launch_refuses_dangling_bootstrap_before_existing_chrome_handling() (
+  local test_dir bootstrap_path events_file output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  : >"$events_file"
+  XDG_RUNTIME_DIR="$test_dir"
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { printf '%s' 'existing ' >>"$events_file"; }
+  bootstrap_path="$(chrome_bootstrap_script_path remote-chrome-test-host)"
+  ln -s "$test_dir/missing" "$bootstrap_path"
+
+  output="$(chrome_launch test-host --no-yubikey 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "launch accepted a dangling bootstrap symlink"
+  [ -L "$bootstrap_path" ] || fail "launch removed a dangling bootstrap symlink"
+  [ ! -s "$events_file" ] || fail "launch handled existing Chrome before validating bootstrap path"
+  assert_contains "$output" "unsafe Chrome bootstrap path"
+)
+
+test_launch_refuses_symlink_yubikey_state_before_setup_or_existing_chrome() (
+  local test_dir target events_file output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  : >"$events_file"
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  printf '%s\n' protected >"$test_dir/foreign-state"
+  ln -s "$test_dir/foreign-state" "$yk_state_file"
+  WAYLAND_DISPLAY=wayland-0
+  need() { :; }
+  chrome_preflight() { :; }
+  yk_preflight_for_forwarding() { printf '%s' 'usb-setup ' >>"$events_file"; }
+  chrome_handle_existing() { printf '%s' 'existing ' >>"$events_file"; }
+
+  output="$(chrome_launch test-host --with-yubikey --foreground 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "launch accepted a symlink YubiKey ledger"
+  [ -L "$yk_state_file" ] || fail "launch removed an unsafe YubiKey ledger path"
+  [ "$(cat "$test_dir/foreign-state")" = protected ] || fail "launch changed the symlink target"
+  [ ! -s "$events_file" ] || fail "launch began USB setup or existing-Chrome handling before artifact validation: $(cat "$events_file")"
+  assert_contains "$output" "unsafe YubiKey state path"
+)
+
+test_bootstrap_publication_preserves_unsafe_paths_and_old_tmp_marker() (
+  local test_dir script_path target marker prepared
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  script_path="$(chrome_bootstrap_script_path runtime-artifact-test)"
+  target="$test_dir/target"
+  marker="${script_path}.tmp.$$"
+  printf '%s\n' protected >"$target"
+
+  ln -s "$target" "$script_path"
+  if chrome_prepare_bootstrap_script runtime-artifact-test >/dev/null 2>&1; then
+    fail "bootstrap publication accepted an existing symlink"
+  fi
+  [ -L "$script_path" ] || fail "bootstrap publication removed an unsafe symlink"
+  [ "$(cat "$target")" = protected ] || fail "bootstrap publication overwrote a symlink target"
+  if chrome_remove_bootstrap_script runtime-artifact-test >/dev/null 2>&1; then
+    fail "bootstrap cleanup accepted an existing symlink"
+  fi
+  [ -L "$script_path" ] || fail "bootstrap cleanup removed an unsafe symlink"
+
+  rm -- "$script_path"
+  ln -s "$test_dir/missing-target" "$script_path"
+  if chrome_prepare_bootstrap_script runtime-artifact-test >/dev/null 2>&1; then
+    fail "bootstrap publication accepted a dangling symlink"
+  fi
+  [ -L "$script_path" ] || fail "bootstrap publication removed a dangling symlink"
+
+  rm -- "$script_path"
+  ln -s "$target" "$marker"
+  prepared="$(chrome_prepare_bootstrap_script runtime-artifact-test)" ||
+    fail "bootstrap publication failed with a harmless legacy temp marker"
+  [ "$prepared" = "$script_path" ] || fail "bootstrap publication returned the wrong path"
+  [ -f "$script_path" ] || fail "bootstrap script was not atomically published"
+  [ "$(stat -c '%a' "$script_path")" = 600 ] || fail "bootstrap script permissions are not private"
+  [ -L "$marker" ] || fail "legacy predictable bootstrap temp marker was replaced"
+  [ "$(cat "$target")" = protected ] || fail "bootstrap temp cleanup changed the marker target"
+  local -a temp_paths=("${script_path}.tmp."*)
+  [ "${#temp_paths[@]}" -eq 1 ] || fail "bootstrap publication left unexpected temp artifacts"
+)
+
 test_tmux_command_option_records_exact_raw_command() (
   local command_line="waypipe --no-gpu ssh test-host bash -s -- arg <<< x"
   local recorded_command=""
@@ -2184,7 +2516,9 @@ test_stop_loads_earliest_usbipd_provisional_phase() (
   yk_close_tunnel() { :; }
   sudo() {
     if [ "$1" = "cat" ]; then
-      command cat "$2"
+      shift
+      [ "${1:-}" != "--" ] || shift
+      command cat "$@"
     else
       events+="sudo:$* "
     fi
@@ -2720,8 +3054,7 @@ test_rollback_failure_retains_state_for_retry() (
   yk_control_socket="$test_dir/control.sock"
   yk_usbip_port=3240
   yk_set_runtime_paths
-  yk_attempt_owned=1
-  mkdir -- "$yk_attempt_lock"
+  yk_acquire_attempt
   yk_phase="attached"
   yk_active_busid="5-1.2.2"
   yk_bind_state="bound"
@@ -2768,14 +3101,14 @@ test_orphan_usbipd_status_and_reconciliation_require_exact_ownership() (
   sudo() {
     events+="sudo:$* "
     case "${1:-}" in
-      rm) command rm -f "$3" ;;
+      cat|rm) local action="$1"; shift; command "$action" "$@" ;;
     esac
     return 0
   }
   yk_stop_orphan_usbipd_files || code=$?
   [ "$code" -ne 0 ] || fail "reconciliation did not report preserved unverified daemon"
   assert_contains "$events" "kill 4242"
-  assert_contains "$events" "rm -f $test_dir/remote-chrome-usbipd-3240.pid"
+  assert_contains "$events" "rm -f -- $test_dir/remote-chrome-usbipd-3240.pid"
   [[ "$events" != *"kill 4343"* ]] || fail "reconciliation killed an unverified daemon"
   [ ! -e "$test_dir/remote-chrome-usbipd-3240.pid" ] || fail "verified orphan pid file remained"
   [ -e "$test_dir/remote-chrome-usbipd-3241.pid" ] || fail "unverified pid file was removed"
@@ -3126,7 +3459,11 @@ test_startup_invalid_pid_file_is_preserved() (
   sudo() {
     events+="sudo:$* "
     case "${1:-}" in
-      cat) command cat "$2" ;;
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
       -v|modprobe) return 0 ;;
       *) return 0 ;;
     esac
@@ -3136,6 +3473,59 @@ test_startup_invalid_pid_file_is_preserved() (
   [ "$code" -ne 0 ] || fail "startup accepted an invalid usbipd pid file"
   [[ "$events" != *"rm -f"* ]] || fail "startup removed an invalid usbipd pid file"
   [ "$(cat "$yk_usbipd_pid_file")" = "not-a-pid" ] || fail "startup changed an invalid usbipd pid file"
+)
+
+test_startup_refuses_symlink_pid_before_sudo_or_usb_setup() (
+  local test_dir target events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  target="$test_dir/pid-target"
+  printf '%s\n' 4242 >"$target"
+  ln -s "$target" "$yk_usbipd_pid_file"
+  need() { events+="need:$1 "; }
+  yk_local_module_preflight() { events+="module "; }
+  sudo() { events+="sudo:$* "; return 0; }
+
+  yk_ensure_local_ready || code=$?
+  [ "$code" -ne 0 ] || fail "startup accepted a symlink usbipd pid file"
+  [ -L "$yk_usbipd_pid_file" ] || fail "startup removed an unsafe PID symlink"
+  [ "$(cat "$target")" = 4242 ] || fail "startup changed the PID symlink target"
+  [ -z "$events" ] || fail "startup invoked sudo or USB setup before PID validation: $events"
+)
+
+test_root_owned_private_pid_file_stays_usable_for_cleanup() (
+  local test_dir pid_file events_file
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  : >"$events_file"
+  pid_file="$test_dir/remote-chrome-usbipd-3240.pid"
+  printf '%s\n' 4242 >"$pid_file"
+  chmod 600 -- "$pid_file"
+  # Model a root-owned file whose contents require a privileged read without
+  # requiring privilege or silently skipping this regression in normal CI.
+  stat() {
+    if [ "$*" = "-c %u -- $pid_file" ]; then printf '0\n'; else command stat "$@"; fi
+  }
+  cat() { return 1; }
+
+  yk_pid_file_status "$pid_file" || fail "safe root/EUID-owned private PID file was rejected"
+  sudo() {
+    printf '%s ' "$1" >>"$events_file"
+    case "$1" in
+      cat) shift; command cat "$@" ;;
+      rm) shift; command rm "$@" ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_remove_pid_file "$pid_file" 4242 || fail "validated private PID file could not be removed"
+  [ ! -e "$pid_file" ] || fail "validated private PID file remained after removal"
+  [ "$(command cat "$events_file")" = "cat rm " ] || fail "PID cleanup did not use privileged validated read/removal"
 )
 
 test_doctor_invalid_chrome_command_is_aggregated() (
@@ -3265,7 +3655,11 @@ test_stop_provisional_invalid_pid_file_preserves_evidence() (
   yk_close_tunnel() { :; }
   sudo() {
     case "${1:-}" in
-      cat) command cat "$2" ;;
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
       *) events+="sudo:$* " ;;
     esac
     return 0
@@ -3302,7 +3696,11 @@ test_stop_state_pid_file_mismatch_preserves_evidence() (
   yk_owned_usbipd_running() { return 0; }
   sudo() {
     case "${1:-}" in
-      cat) command cat "$2" ;;
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
       *) events+="sudo:$* " ;;
     esac
     return 0
@@ -3345,7 +3743,11 @@ test_stop_pid_file_replacement_before_rm_preserves_evidence() (
   }
   sudo() {
     case "${1:-}" in
-      cat) command cat "$2" ;;
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
       *) events+="sudo:$* " ;;
     esac
     return 0
@@ -3387,7 +3789,11 @@ test_start_rejects_unverified_usbipd_pid() (
         printf '%s\n' 4242 >"$yk_usbipd_pid_file"
         return 0
         ;;
-      cat) command cat "$2" ;;
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
       *) return 0 ;;
     esac
   }
@@ -3436,6 +3842,48 @@ test_orphan_pid_file_replacement_before_rm_preserves_evidence() (
   assert_contains "$output" "replaced or invalid usbipd pid file"
   [ "$(cat "$test_dir/remote-chrome-usbipd-3240.pid")" = "4343" ] || fail "orphan replacement pid file changed"
   [[ "$events" != *"rm -f"* ]] || fail "orphan replacement pid file was removed"
+)
+
+test_cleanup_lock_rejects_directory_and_symlink_directory() (
+  local test_dir payload events="" code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_write_state
+  payload="$test_dir/lock-payload"
+  mkdir -- "$yk_cleanup_lock"
+  printf '%s\n' untouched >"$yk_cleanup_lock/payload"
+  yk_remote_detach_busid() { events+="detach "; }
+  yk_close_tunnel() { events+="tunnel "; }
+  yk_unbind_owned_busid() { events+="unbind "; }
+  yk_stop_owned_usbipd() { events+="daemon "; }
+  sudo() { events+="sudo "; return 0; }
+  REMOTE_CHROME_YUBIKEY_CLEANUP_LOCK_TIMEOUT=0
+
+  yk_cleanup_resources 1 || code=$?
+  [ "$code" -ne 0 ] || fail "cleanup accepted a directory at the lock path"
+  [ "$(cat "$yk_cleanup_lock/payload")" = untouched ] || fail "cleanup lock publication wrote inside a directory"
+  [ -z "$events" ] || fail "directory at cleanup-lock path authorized resource cleanup: $events"
+  [ "$yk_cleanup_lock_owned" = 0 ] || fail "directory at cleanup-lock path granted lock ownership"
+  code=0
+
+  rm -r -- "$yk_cleanup_lock"
+  mkdir -- "$payload"
+  printf '%s\n' untouched >"$payload/marker"
+  ln -s "$payload" "$yk_cleanup_lock"
+  yk_cleanup_resources 1 || code=$?
+  [ "$code" -ne 0 ] || fail "cleanup accepted a symlink to a directory at the lock path"
+  [ -L "$yk_cleanup_lock" ] || fail "cleanup removed a symlinked cleanup-lock path"
+  [ "$(cat "$payload/marker")" = untouched ] || fail "cleanup publication wrote into the symlink target directory"
+  [ -z "$events" ] || fail "symlinked directory at cleanup-lock path authorized cleanup: $events"
+  [ "$yk_cleanup_lock_owned" = 0 ] || fail "symlinked directory at cleanup-lock path granted lock ownership"
+  [ -f "$yk_state_file" ] || fail "unsafe cleanup lock caused recovery state removal"
 )
 
 test_cleanup_lock_serializes_concurrent_stop_callers() (
@@ -4018,6 +4466,56 @@ test_reset_confirmation_and_yes_scope() (
   assert_contains "$events" "new-session:"
   assert_contains "$events" "$command_line"
   [[ "$events" != *confirm* ]] || fail "--yes reset still prompted"
+)
+
+test_reset_refuses_unsafe_bootstrap_before_remote_or_tmux_teardown() (
+  local test_dir events_file output code=0 session=remote-chrome-test-host bootstrap_path
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  events_file="$test_dir/events"
+  : >"$events_file"
+  XDG_RUNTIME_DIR="$test_dir"
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+      show-options)
+        case "$5" in
+          "$chrome_tmux_command_option") printf '%s\n' 'waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
+          "$chrome_tmux_yubikey_option") printf '%s\n' off ;;
+          *) return 1 ;;
+        esac
+        ;;
+      list-windows) printf '%s\n' chrome ;;
+      kill-session) printf '%s' 'kill-session ' >>"$events_file" ;;
+      new-session) printf '%s' 'new-session ' >>"$events_file" ;;
+      *) return 1 ;;
+    esac
+  }
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_usbip_port=3240
+    yk_set_runtime_paths
+  }
+  chrome_reset_find_local_ssh() {
+    printf '%s' 'inspect-local-ssh ' >>"$events_file"
+    chrome_reset_remote_socket="$test_dir/waypipe.sock"
+  }
+  chrome_reset_remote_identity() { printf '%s' 'remote-identity ' >>"$events_file"; return 0; }
+  chrome_reset_remote_stop() { printf '%s' 'remote-stop ' >>"$events_file"; return 0; }
+  bootstrap_path="$(chrome_bootstrap_script_path "$session")"
+  ln -s "$test_dir/missing-bootstrap" "$bootstrap_path"
+
+  output="$(chrome_reset test-host --yes 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "reset accepted an unsafe bootstrap symlink"
+  [ -L "$bootstrap_path" ] || fail "reset removed an unsafe bootstrap symlink"
+  [[ "$(cat "$events_file")" != *remote-identity* ]] || fail "reset inspected/changed the remote browser before artifact validation"
+  [[ "$(cat "$events_file")" != *remote-stop* ]] || fail "reset stopped the remote browser before artifact validation"
+  [[ "$(cat "$events_file")" != *kill-session* ]] || fail "reset removed tmux before artifact validation"
+  [[ "$(cat "$events_file")" != *new-session* ]] || fail "reset recreated tmux after artifact validation failed"
+  assert_contains "$output" "Unsafe runtime artifact prevents resetting"
 )
 
 test_bare_host_resets_existing_session_without_health_check() (
@@ -4636,7 +5134,14 @@ tests=(
   test_stop_waits_for_usb_recovery_then_releases_its_resources
   test_stop_removes_orphan_attempt_lock_without_state
   test_non_owner_cleanup_preserves_existing_attempt_lock
+  test_stale_rollback_cannot_clean_new_attempt_generation
+  test_stale_helper_cleanup_preserves_new_attempt_generation
+  test_helper_cleanup_rechecks_generation_after_waiting_for_lock
+  test_helper_cleanup_preserves_new_lock_when_ledger_disappears_while_waiting
   test_active_attempt_cannot_write_state_after_lock_removal
+  test_yubikey_state_publication_uses_private_unique_temp
+  test_yubikey_stop_refuses_symlink_state_without_resource_cleanup
+  test_yubikey_run_refuses_unsafe_log_before_tee_or_start
   test_successful_start_records_exact_state
   test_stop_cleans_only_recorded_busid
   test_stop_cleans_yubikey_without_yubikey_window
@@ -4676,6 +5181,9 @@ tests=(
   test_secure_command_shape_recreates_through_reset_parser
   test_secure_command_line_replays_with_exact_arguments
   test_prepare_bootstrap_script_writes_and_removes_session_file
+  test_launch_refuses_dangling_bootstrap_before_existing_chrome_handling
+  test_launch_refuses_symlink_yubikey_state_before_setup_or_existing_chrome
+  test_bootstrap_publication_preserves_unsafe_paths_and_old_tmp_marker
   test_tmux_command_option_records_exact_raw_command
   test_reset_reads_canonical_option_before_teardown
   test_reset_reads_real_tmux_chrome_and_yubikey_windows
@@ -4743,6 +5251,8 @@ tests=(
   test_state_usbipd_rechecks_exact_ownership_before_kill
   test_state_unverified_pid_preserves_evidence_under_retention_policy
   test_startup_invalid_pid_file_is_preserved
+  test_startup_refuses_symlink_pid_before_sudo_or_usb_setup
+  test_root_owned_private_pid_file_stays_usable_for_cleanup
   test_doctor_invalid_chrome_command_is_aggregated
   test_load_rejects_invalid_bind_state
   test_status_degrades_cleanup_failed_phase
@@ -4752,6 +5262,7 @@ tests=(
   test_stop_pid_file_replacement_before_rm_preserves_evidence
   test_start_rejects_unverified_usbipd_pid
   test_orphan_pid_file_replacement_before_rm_preserves_evidence
+  test_cleanup_lock_rejects_directory_and_symlink_directory
   test_cleanup_lock_serializes_concurrent_stop_callers
   test_cleanup_lock_releases_on_signal
   test_cleanup_failed_launch_reconciles_absent_resources
@@ -4761,6 +5272,7 @@ tests=(
   test_reset_help_and_target_selection
   test_reset_without_host_selects_sole_managed_session
   test_reset_confirmation_and_yes_scope
+  test_reset_refuses_unsafe_bootstrap_before_remote_or_tmux_teardown
   test_bare_host_resets_existing_session_without_health_check
   test_bare_host_launches_when_session_is_absent
   test_reset_extracts_exact_socket_and_refuses_ambiguous_local_children

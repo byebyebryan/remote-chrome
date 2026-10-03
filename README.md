@@ -567,6 +567,13 @@ demonstrably gone (or intentionally retained by policy).
 Active/ready forwarding state remains a launch duplicate and must be stopped
 explicitly; unreachable or ambiguous probes keep the ledger for a retry.
 
+Runtime state, logs, bootstrap scripts, and locks must have the expected type
+and belong to the current user. Unsafe paths are preserved and rejected before
+launch or reset can stop Chrome. State and bootstrap publication use private
+temporary files, and retiring helpers can clean up only their own attempt.
+Daemon PID files may also belong to root; cleanup still verifies the exact
+daemon before using them.
+
 ## Configuration
 
 Chrome defaults:

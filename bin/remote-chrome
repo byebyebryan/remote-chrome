@@ -73,6 +73,27 @@ safe_name() {
   printf '%s\n' "$value"
 }
 
+runtime_artifact_status() {
+  local path="$1"
+  if [[ -e "$path" || -L "$path" ]]; then
+    [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 2
+    return 0
+  fi
+  return 1
+}
+
+runtime_owned_directory() {
+  [[ -d "$1" && ! -L "$1" && -O "$1" ]]
+}
+
+runtime_path_present() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+runtime_path_identity() {
+  stat -c '%d:%i:%y' -- "$1" 2>/dev/null
+}
+
 script_path() {
   if [[ "$0" == */* ]]; then
     local dir
@@ -1411,19 +1432,132 @@ chrome_bootstrap_script_path() {
 chrome_prepare_bootstrap_script() {
   local session="$1"
   local script_path
+  local temp_path
+  local path_status=0
+  local old_umask
 
   script_path="$(chrome_bootstrap_script_path "$session")"
-  if ! (umask 077 && chrome_secure_bootstrap_script >"$script_path"); then
+  runtime_artifact_status "$script_path" || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "Refusing to overwrite an unsafe remote Chrome bootstrap path: $script_path" >&2
+    return 1
+  fi
+  old_umask="$(umask)"
+  umask 077
+  temp_path="$(mktemp -- "${script_path}.tmp.XXXXXXXX")" || {
+    umask "$old_umask"
+    echo "Could not create a private temporary bootstrap script beside $script_path." >&2
+    return 1
+  }
+  if ! chrome_secure_bootstrap_script >"$temp_path" || ! chmod 600 -- "$temp_path"; then
+    runtime_artifact_status "$temp_path" && rm -f -- "$temp_path"
+    umask "$old_umask"
     echo "Could not write the remote Chrome bootstrap script to $script_path." >&2
     return 1
   fi
+  if [ "$path_status" -eq 1 ]; then
+    if ! ln -T -- "$temp_path" "$script_path"; then
+      runtime_artifact_status "$temp_path" && rm -f -- "$temp_path"
+      umask "$old_umask"
+      echo "Could not safely publish the remote Chrome bootstrap script to $script_path." >&2
+      return 1
+    fi
+    rm -f -- "$temp_path"
+  else
+    path_status=0
+    runtime_artifact_status "$script_path" || path_status=$?
+    if [ "$path_status" -ne 0 ] || ! mv -fT -- "$temp_path" "$script_path"; then
+      runtime_artifact_status "$temp_path" && rm -f -- "$temp_path"
+      umask "$old_umask"
+      echo "Could not atomically replace the remote Chrome bootstrap script at $script_path." >&2
+      return 1
+    fi
+  fi
+  umask "$old_umask"
   printf '%s\n' "$script_path"
 }
 
 chrome_remove_bootstrap_script() {
   local session="$1"
+  local script_path
+  local path_status=0
 
-  rm -f -- "$(chrome_bootstrap_script_path "$session")" 2>/dev/null || true
+  script_path="$(chrome_bootstrap_script_path "$session")"
+  runtime_artifact_status "$script_path" || path_status=$?
+  case "$path_status" in
+    1) return 0 ;;
+    2)
+      echo "Preserving unsafe remote Chrome bootstrap artifact: $script_path" >&2
+      return 1
+      ;;
+  esac
+  path_status=0
+  runtime_artifact_status "$script_path" || path_status=$?
+  [ "$path_status" -eq 0 ] || {
+    echo "Remote Chrome bootstrap artifact changed before removal; preserving $script_path" >&2
+    return 1
+  }
+  rm -f -- "$script_path"
+}
+
+chrome_validate_launch_artifacts() {
+  local session="$1"
+  local forwarding_expected="$2"
+  local foreground="$3"
+  local skip_active_socket_check="${4:-0}"
+  local bootstrap_path=""
+  local path_status=0
+  local socket_status=1
+
+  if [ "$foreground" != "1" ]; then
+    bootstrap_path="$(chrome_bootstrap_script_path "$session")"
+    runtime_artifact_status "$bootstrap_path" || path_status=$?
+    if [ "$path_status" -eq 2 ]; then
+      echo "Refusing to launch with an unsafe Chrome bootstrap path: $bootstrap_path" >&2
+      return 1
+    fi
+  fi
+  [ "$forwarding_expected" = "1" ] || return 0
+
+  path_status=0
+  yk_state_path_status || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "Refusing to launch with an unsafe YubiKey state path: $yk_state_file" >&2
+    return 1
+  fi
+  path_status=0
+  yk_log_path_status || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "Refusing to launch with an unsafe YubiKey log path: $yk_log_file" >&2
+    return 1
+  fi
+  if runtime_path_present "$yk_attempt_lock" && ! runtime_owned_directory "$yk_attempt_lock"; then
+    echo "Refusing to launch with an unsafe YubiKey attempt lock: $yk_attempt_lock" >&2
+    return 1
+  fi
+  path_status=0
+  runtime_artifact_status "$yk_cleanup_lock" || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "Refusing to launch with an unsafe YubiKey cleanup lock: $yk_cleanup_lock" >&2
+    return 1
+  fi
+  yk_control_socket_status || socket_status=$?
+  if [ "$socket_status" -eq 2 ]; then
+    echo "Refusing to launch with an unsafe SSH control socket: $yk_control_socket" >&2
+    return 1
+  fi
+  path_status=0
+  yk_pid_file_status "$yk_usbipd_pid_file" || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "Refusing to launch with an unsafe usbipd pid path: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  if [ "$skip_active_socket_check" != "1" ] && [ "$socket_status" -eq 0 ] &&
+    ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
+    echo "YubiKey forwarding already has an active SSH tunnel: $yk_control_socket" >&2
+    echo "Refusing to stop or replace the existing remote Chrome session." >&2
+    return 1
+  fi
 }
 
 chrome_origin_args=()
@@ -1736,6 +1870,12 @@ chrome_launch() {
     echo "YubiKey forwarding disabled by --no-yubikey."
   fi
 
+  # Validate every runtime destination before any USB setup or any action that
+  # may stop an existing browser. A dangling symlink is an existing unsafe
+  # artifact, just like a symlink with a live target.
+  chrome_validate_launch_artifacts "$session" "$forwarding_expected" "$foreground" ||
+    die "Unsafe or active runtime artifact prevents launching $session."
+
   # Check launch ownership before inspecting or mutating remote Chrome.  A
   # previous tmux session or managed/provisional YubiKey state means this
   # launch is a duplicate and must abort without touching the browser.
@@ -1745,7 +1885,7 @@ chrome_launch() {
       die "tmux session already exists: $session"
     fi
   fi
-  if [ "$forwarding_expected" = "1" ] && [ -e "$yk_state_file" ]; then
+  if [ "$forwarding_expected" = "1" ] && runtime_path_present "$yk_state_file"; then
     local reconcile_code=0
     yk_reconcile_cleanup_failed || reconcile_code=$?
     case "$reconcile_code" in
@@ -1759,7 +1899,7 @@ chrome_launch() {
     esac
   fi
   if [ "$forwarding_expected" = "1" ] &&
-    { [ -e "$yk_state_file" ] || [ -e "$yk_attempt_lock" ]; }; then
+    { runtime_path_present "$yk_state_file" || runtime_path_present "$yk_attempt_lock"; }; then
     die "YubiKey forwarding already has an active or provisional attempt for $yk_remote; stop it before launching again."
   fi
 
@@ -3246,6 +3386,7 @@ chrome_reset() {
   local post_stop_identity_code=0
   local session_probe_code=0
   local session_probe_output=""
+  local reset_forwarding_expected=0
   local pane_host
   local notify_reset_state=0
 
@@ -3319,10 +3460,20 @@ chrome_reset() {
   fi
 
   yk_prepare_for_launch "$host"
-  [ -e "$yk_state_file" ] && yk_state_present=1
+  runtime_path_present "$yk_state_file" && yk_state_present=1
   if tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null |
     grep -qx yubikey; then
     yk_window_present=1
+  fi
+
+  if [ "$yk_state_present" = "1" ] || [ "$yk_window_present" = "1" ] ||
+    [ "$chrome_yubikey_mode" = "force" ] ||
+    { [ "$chrome_yubikey_mode" = "auto" ] && yk_local_candidate_exists; }; then
+    reset_forwarding_expected=1
+  fi
+  if ! chrome_validate_launch_artifacts "$session" "$reset_forwarding_expected" 0 1; then
+    echo "Unsafe runtime artifact prevents resetting $session; the existing browser and tmux session are unchanged." >&2
+    return 1
   fi
 
   chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" "$session" || remote_identity_code=$?
@@ -3572,11 +3723,17 @@ chrome_status_current() {
     fi
 
     if [ "$yk_tunnel_open" = "1" ] || [ "$yk_attach_state" != "none" ]; then
-      if [ -S "$yk_control_socket" ] &&
+      local socket_status=0
+      yk_control_socket_status || socket_status=$?
+      if [ "$socket_status" -eq 0 ] &&
         ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
         echo "status: SSH USB/IP control socket is alive: $yk_control_socket"
       else
-        echo "status: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
+        if [ "$socket_status" -eq 2 ]; then
+          echo "status: degraded: unsafe SSH USB/IP control socket path is preserved: $yk_control_socket" >&2
+        else
+          echo "status: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
+        fi
         code=1
       fi
     fi
@@ -3621,6 +3778,7 @@ yk_usbipd_pid_file=""
 yk_log_file=""
 yk_attempt_lock=""
 yk_attempt_owned=0
+yk_attempt_lock_identity=""
 yk_attempt_token="${REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN:-}"
 yk_cleanup_lock=""
 yk_cleanup_lock_owned=0
@@ -3695,6 +3853,129 @@ yk_set_runtime_paths() {
   yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-$(safe_name "$yk_usbip_port").pid"
 }
 
+yk_state_path_status() {
+  runtime_artifact_status "$yk_state_file"
+}
+
+yk_log_path_status() {
+  runtime_artifact_status "$yk_log_file"
+}
+
+yk_prepare_log_file() {
+  local path_status=0
+  yk_log_path_status || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "Refusing to append to unsafe YubiKey log path: $yk_log_file" >&2
+    return 1
+  fi
+  if [ "$path_status" -eq 1 ]; then
+    if ! (umask 077; set -o noclobber; : >"$yk_log_file") 2>/dev/null; then
+      path_status=0
+      yk_log_path_status || path_status=$?
+      if [ "$path_status" -ne 0 ]; then
+        echo "Could not safely create YubiKey log file: $yk_log_file" >&2
+        return 1
+      fi
+    fi
+  fi
+  yk_log_path_status || {
+    echo "YubiKey log path became unsafe: $yk_log_file" >&2
+    return 1
+  }
+  chmod 600 -- "$yk_log_file"
+}
+
+yk_remove_runtime_artifact() {
+  local path="$1"
+  local path_status=0
+  runtime_artifact_status "$path" || path_status=$?
+  case "$path_status" in
+    1) return 0 ;;
+    2)
+      echo "Preserving unsafe runtime artifact: $path" >&2
+      return 1
+      ;;
+  esac
+  path_status=0
+  runtime_artifact_status "$path" || path_status=$?
+  [ "$path_status" -eq 0 ] || {
+    echo "Runtime artifact changed before removal; preserving $path" >&2
+    return 1
+  }
+  rm -f -- "$path"
+}
+
+yk_control_socket_status() {
+  local path="$yk_control_socket"
+  if runtime_path_present "$path"; then
+    [[ -S "$path" && ! -L "$path" && -O "$path" ]] || return 2
+    return 0
+  fi
+  return 1
+}
+
+yk_pid_file_status() {
+  local path="$1"
+  local owner
+  if ! runtime_path_present "$path"; then
+    return 1
+  fi
+  [[ -f "$path" && ! -L "$path" ]] || return 2
+  owner="$(stat -c '%u' -- "$path" 2>/dev/null)" || return 2
+  [[ "$owner" = 0 || "$owner" = "$EUID" ]] || return 2
+  return 0
+}
+
+yk_remove_pid_file() {
+  local path="$1"
+  local expected_pid="${2:-}"
+  local path_status=0
+  local file_pid
+
+  yk_pid_file_status "$path" || path_status=$?
+  [ "$path_status" -eq 1 ] && return 0
+  if [ "$path_status" -ne 0 ]; then
+    echo "Preserving unsafe usbipd pid file: $path" >&2
+    return 1
+  fi
+  if [ -n "$expected_pid" ]; then
+    yk_pid_file_status "$path" || {
+      echo "Preserving unsafe usbipd pid file: $path" >&2
+      return 1
+    }
+    file_pid="$(sudo cat -- "$path" 2>/dev/null || true)"
+    if [[ ! "$file_pid" =~ ^[0-9]+$ ]]; then
+      echo "Preserving invalid usbipd pid file: $path" >&2
+      return 1
+    fi
+    [ "$file_pid" = "$expected_pid" ] || {
+      echo "Preserving usbipd pid file with unexpected PID $file_pid: $path" >&2
+      return 1
+    }
+  fi
+  if ! sudo rm -f -- "$path" >/dev/null 2>&1; then
+    echo "Could not remove usbipd pid file $path." >&2
+    return 1
+  fi
+}
+
+yk_reserve_pid_file() {
+  local path_status=0
+  yk_pid_file_status "$yk_usbipd_pid_file" || path_status=$?
+  if [ "$path_status" -ne 1 ]; then
+    echo "Refusing to reserve an existing or unsafe usbipd pid path: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  if ! (umask 077; set -o noclobber; : >"$yk_usbipd_pid_file") 2>/dev/null; then
+    echo "Could not safely reserve usbipd pid path $yk_usbipd_pid_file." >&2
+    return 1
+  fi
+  if ! yk_pid_file_status "$yk_usbipd_pid_file"; then
+    echo "Reserved usbipd pid path is not a safe regular file: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+}
+
 yk_local_busid_bound() {
   local busid="$1"
   [ -e "$yk_usbip_host_sysfs/$busid" ] || [ -L "$yk_usbip_host_sysfs/$busid" ]
@@ -3719,6 +4000,7 @@ yk_state_owns_pid_file() {
   local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
   local basename
 
+  runtime_artifact_status "$state_file" || return 1
   state_pid_file="$(awk -F '\t' '$1 == "usbipd_pid_file" {print $2; exit}' "$state_file" 2>/dev/null || true)"
   state_started="$(awk -F '\t' '$1 == "started_usbipd" {print $2; exit}' "$state_file" 2>/dev/null || true)"
   [ "$state_started" = "1" ] || return 1
@@ -3742,7 +4024,7 @@ yk_standard_state_files() {
   local state_file
 
   for state_file in "$runtime_dir"/remote-chrome-yubikey-*.sock.state; do
-    [ -f "$state_file" ] || continue
+    runtime_artifact_status "$state_file" || continue
     printf '%s\n' "$state_file"
   done
 }
@@ -3759,7 +4041,7 @@ yk_print_status_line() {
       printf '\n'
       ;;
     1)
-      if [ -d "$yk_attempt_lock" ]; then
+      if runtime_owned_directory "$yk_attempt_lock"; then
         printf '%s phase=starting readiness=unknown provisional-lock=%s\n' "$label" "$yk_attempt_lock"
       else
         printf '%s no managed state\n' "$label"
@@ -3775,7 +4057,13 @@ yk_print_status_line() {
 yk_status_state_file() (
   local state_file="$1"
   local host
+  local path_status=0
 
+  runtime_artifact_status "$state_file" || path_status=$?
+  if [ "$path_status" -ne 0 ]; then
+    echo "Ignoring unsafe or missing YubiKey state file: $state_file" >&2
+    return 1
+  fi
   host="$(awk -F '\t' '$1 == "remote" {print $2; exit}' "$state_file" 2>/dev/null || true)"
   if [ -z "$host" ]; then
     echo "Managed YubiKey state is missing its remote host: $state_file" >&2
@@ -3790,7 +4078,13 @@ yk_status_state_file() (
 yk_stop_state_file() {
   local state_file="$1"
   local host
+  local path_status=0
 
+  runtime_artifact_status "$state_file" || path_status=$?
+  if [ "$path_status" -ne 0 ]; then
+    echo "Refusing to read or clean an unsafe or missing YubiKey state file: $state_file" >&2
+    return 1
+  fi
   host="$(awk -F '\t' '$1 == "remote" {print $2; exit}' "$state_file" 2>/dev/null || true)"
   if [ -z "$host" ]; then
     echo "Managed YubiKey state is missing its remote host: $state_file" >&2
@@ -3809,9 +4103,11 @@ yk_stop_orphan_attempt_locks() {
   local code=0
 
   for lock_file in "$runtime_dir"/remote-chrome-yubikey-*.sock.state.lock; do
-    [ -d "$lock_file" ] || continue
+    runtime_owned_directory "$lock_file" || continue
     state_file="${lock_file%.lock}"
-    [ -e "$state_file" ] && continue
+    local state_status=0
+    runtime_artifact_status "$state_file" || state_status=$?
+    [ "$state_status" -eq 1 ] || continue
     if rmdir -- "$lock_file"; then
       echo "Removed orphaned YubiKey setup lock $lock_file."
     else
@@ -3861,13 +4157,26 @@ yk_cleanup_lock_release() {
   local owner_pid=""
   local owner_token=""
   local lock_pid="${BASHPID:-$$}"
+  local path_status=0
 
   [ "$yk_cleanup_lock_owned" = "1" ] || return 0
-  if [ -f "$yk_cleanup_lock" ]; then
+  runtime_artifact_status "$yk_cleanup_lock" || path_status=$?
+  if [ "$path_status" -eq 2 ]; then
+    echo "YubiKey cleanup lock became unsafe; preserving $yk_cleanup_lock." >&2
+    return 1
+  fi
+  if [ "$path_status" -eq 0 ]; then
     IFS=$'\t' read -r owner_pid owner_token <"$yk_cleanup_lock" || true
     if [ "$owner_pid" != "$lock_pid" ] ||
       [ "$owner_token" != "$yk_cleanup_lock_token" ]; then
       echo "YubiKey cleanup lock ownership changed; preserving $yk_cleanup_lock." >&2
+      return 1
+    fi
+    path_status=0
+    runtime_artifact_status "$yk_cleanup_lock" || path_status=$?
+    if [ "$path_status" -ne 0 ] ||
+      [ "$(cat -- "$yk_cleanup_lock" 2>/dev/null || true)" != "$owner_pid	$owner_token" ]; then
+      echo "YubiKey cleanup lock changed before release; preserving $yk_cleanup_lock." >&2
       return 1
     fi
     if ! rm -f -- "$yk_cleanup_lock"; then
@@ -3889,11 +4198,12 @@ yk_cleanup_lock_acquire() {
   local attempt=0
   local lock_pid
   local lock_token
-  local owner_tmp
+  local owner_tmp=""
   local owner_pid=""
   local owner_token=""
   local current_owner
   local process_alive
+  local lock_status=0
 
   if [ -z "$yk_cleanup_lock" ] && [ -n "$yk_state_file" ]; then
     yk_cleanup_lock="${yk_state_file}.cleanup.lock"
@@ -3911,17 +4221,22 @@ yk_cleanup_lock_acquire() {
 
   while true; do
     lock_token="${lock_pid}.${RANDOM}.${SECONDS}.${attempt}"
-    owner_tmp="${yk_cleanup_lock}.owner.${lock_token}"
-    if printf '%s\t%s\n' "$lock_pid" "$lock_token" >"$owner_tmp" 2>/dev/null &&
-      ln -- "$owner_tmp" "$yk_cleanup_lock" 2>/dev/null; then
-      rm -f -- "$owner_tmp"
+    owner_tmp="$(umask 077; mktemp -- "${yk_cleanup_lock}.owner.XXXXXXXX" 2>/dev/null)" || owner_tmp=""
+    if [ -n "$owner_tmp" ] &&
+      printf '%s\t%s\n' "$lock_pid" "$lock_token" >"$owner_tmp" 2>/dev/null &&
+      ln -T -- "$owner_tmp" "$yk_cleanup_lock" 2>/dev/null; then
+      runtime_artifact_status "$owner_tmp" && rm -f -- "$owner_tmp"
       yk_cleanup_lock_owned=1
       yk_cleanup_lock_token="$lock_token"
       return 0
     fi
-    rm -f -- "$owner_tmp" 2>/dev/null || true
+    if [ -n "$owner_tmp" ]; then
+      runtime_artifact_status "$owner_tmp" && rm -f -- "$owner_tmp" 2>/dev/null || true
+    fi
 
-    if [ -f "$yk_cleanup_lock" ]; then
+    lock_status=0
+    runtime_artifact_status "$yk_cleanup_lock" || lock_status=$?
+    if [ "$lock_status" -eq 0 ]; then
       owner_pid=""
       owner_token=""
       IFS=$'\t' read -r owner_pid owner_token <"$yk_cleanup_lock" || true
@@ -3934,10 +4249,15 @@ yk_cleanup_lock_acquire() {
         # Confirm the owner record did not change while its process was being
         # checked.  Never remove a lock that may have been handed to a live
         # cleanup operation in the meantime.
-        current_owner="$(cat "$yk_cleanup_lock" 2>/dev/null || true)"
+        current_owner="$(cat -- "$yk_cleanup_lock" 2>/dev/null || true)"
+        lock_status=0
+        runtime_artifact_status "$yk_cleanup_lock" || lock_status=$?
         if [ "$current_owner" = "$owner_pid	$owner_token" ]; then
-          rm -f -- "$yk_cleanup_lock" 2>/dev/null || true
-          continue
+          if [ "$lock_status" -eq 0 ] &&
+            [ "$(cat -- "$yk_cleanup_lock" 2>/dev/null || true)" = "$current_owner" ] &&
+            rm -f -- "$yk_cleanup_lock" 2>/dev/null; then
+            continue
+          fi
         fi
       fi
     fi
@@ -3957,38 +4277,72 @@ yk_cleanup_lock_acquire() {
 }
 
 yk_release_attempt() {
-  local code=0
-  if [ -n "$yk_attempt_lock" ] && [ -d "$yk_attempt_lock" ]; then
+  local current_identity=""
+  if [ -n "$yk_attempt_lock" ] && runtime_path_present "$yk_attempt_lock"; then
+    if ! runtime_owned_directory "$yk_attempt_lock"; then
+      echo "Preserving unsafe YubiKey attempt lock $yk_attempt_lock." >&2
+      return 1
+    fi
+    if [ "$yk_attempt_owned" = "1" ] && [ -n "$yk_attempt_lock_identity" ]; then
+      current_identity="$(runtime_path_identity "$yk_attempt_lock")" || current_identity=""
+      if [ -z "$current_identity" ] || [ "$current_identity" != "$yk_attempt_lock_identity" ]; then
+        echo "YubiKey attempt lock generation changed; preserving $yk_attempt_lock." >&2
+        return 1
+      fi
+    fi
     if ! rmdir -- "$yk_attempt_lock" >/dev/null 2>&1; then
-      code=1
+      echo "Could not release YubiKey attempt lock $yk_attempt_lock." >&2
+      return 1
     fi
   fi
-  [ "$code" = "0" ] && yk_attempt_owned=0
-  return "$code"
+  yk_attempt_owned=0
+  yk_attempt_lock_identity=""
+  return 0
 }
 
 yk_release_orphan_attempt() {
+  local state_status=0
   # A lock is created before the first state write, so a lock with no state
   # cannot own any USB/IP resources yet.  Only remove the exact empty lock
   # directory; a non-empty or otherwise unusual path is left untouched.
   [ -n "$yk_attempt_lock" ] || return 0
-  [ -e "$yk_state_file" ] && return 0
-  [ -d "$yk_attempt_lock" ] || return 0
+  yk_state_path_status || state_status=$?
+  [ "$state_status" -eq 1 ] || return 0
+  runtime_path_present "$yk_attempt_lock" || return 0
+  runtime_owned_directory "$yk_attempt_lock" || return 1
+  if [ "$yk_attempt_owned" = "1" ] && [ -n "$yk_attempt_lock_identity" ]; then
+    local current_identity
+    current_identity="$(runtime_path_identity "$yk_attempt_lock")" || return 1
+    [ "$current_identity" = "$yk_attempt_lock_identity" ] || return 1
+  fi
   rmdir -- "$yk_attempt_lock"
 }
 
 yk_acquire_attempt() {
-  if [ -e "$yk_state_file" ]; then
+  local state_status=0
+  yk_state_path_status || state_status=$?
+  if [ "$state_status" -eq 0 ]; then
     echo "YubiKey forwarding already has managed state: $yk_state_file" >&2
     echo "Stop the existing $PROGRAM session for $yk_remote before starting it again." >&2
     return 1
   fi
-  if ! mkdir -- "$yk_attempt_lock" 2>/dev/null; then
+  if [ "$state_status" -eq 2 ]; then
+    echo "Refusing to use unsafe YubiKey state path: $yk_state_file" >&2
+    return 1
+  fi
+  if ! mkdir -m 700 -- "$yk_attempt_lock" 2>/dev/null; then
     echo "YubiKey forwarding setup is already being started (lock: $yk_attempt_lock)." >&2
     echo "Wait for that attempt or use stop $yk_remote to clean its managed state." >&2
     return 1
   fi
   yk_attempt_owned=1
+  yk_attempt_lock_identity="$(runtime_path_identity "$yk_attempt_lock")" || yk_attempt_lock_identity=""
+  if [ -z "$yk_attempt_lock_identity" ]; then
+    rmdir -- "$yk_attempt_lock" 2>/dev/null || true
+    yk_attempt_owned=0
+    echo "Could not record YubiKey attempt lock identity: $yk_attempt_lock" >&2
+    return 1
+  fi
   if [ -z "$yk_attempt_token" ]; then
     yk_attempt_token="${BASHPID:-$$}.${RANDOM}.${SECONDS}"
   fi
@@ -3996,17 +4350,31 @@ yk_acquire_attempt() {
 }
 
 yk_write_state() {
-  local state_tmp="${yk_state_file}.tmp.$$"
+  local state_tmp=""
   local old_umask
+  local state_status=0
 
   if [ "$yk_attempt_owned" = "1" ] &&
-    { [ -z "$yk_attempt_lock" ] || [ ! -d "$yk_attempt_lock" ]; }; then
+    { [ -z "$yk_attempt_lock" ] || ! runtime_owned_directory "$yk_attempt_lock" ||
+      [ -z "$yk_attempt_lock_identity" ] ||
+      [ "$(runtime_path_identity "$yk_attempt_lock")" != "$yk_attempt_lock_identity" ]; }; then
     echo "YubiKey attempt lock disappeared before state could be persisted: $yk_attempt_lock" >&2
+    return 1
+  fi
+
+  yk_state_path_status || state_status=$?
+  if [ "$state_status" -eq 2 ]; then
+    echo "Refusing to overwrite unsafe YubiKey state path: $yk_state_file" >&2
     return 1
   fi
 
   old_umask="$(umask)"
   umask 077
+  if ! state_tmp="$(mktemp -- "${yk_state_file}.tmp.XXXXXXXX")"; then
+    umask "$old_umask"
+    echo "Could not create a private temporary YubiKey state file beside $yk_state_file." >&2
+    return 1
+  fi
 
   if ! {
     printf 'remote\t%s\n' "$yk_remote"
@@ -4025,20 +4393,40 @@ yk_write_state() {
     printf 'usbipd_pid_file\t%s\n' "$yk_usbipd_pid_file"
   } >"$state_tmp"; then
     umask "$old_umask"
-    rm -f "$state_tmp"
+    runtime_artifact_status "$state_tmp" && rm -f -- "$state_tmp"
     return 1
   fi
 
-  if ! mv -f "$state_tmp" "$yk_state_file"; then
-    umask "$old_umask"
-    rm -f "$state_tmp"
-    return 1
+  if [ "$state_status" -eq 1 ]; then
+    if ! ln -T -- "$state_tmp" "$yk_state_file"; then
+      umask "$old_umask"
+      runtime_artifact_status "$state_tmp" && rm -f -- "$state_tmp"
+      echo "Could not safely publish YubiKey state to $yk_state_file." >&2
+      return 1
+    fi
+    rm -f -- "$state_tmp"
+  else
+    state_status=0
+    yk_state_path_status || state_status=$?
+    if [ "$state_status" -ne 0 ] || ! mv -fT -- "$state_tmp" "$yk_state_file"; then
+      umask "$old_umask"
+      runtime_artifact_status "$state_tmp" && rm -f -- "$state_tmp"
+      return 1
+    fi
   fi
   umask "$old_umask"
 }
 
 yk_load_state() {
-  [ -f "$yk_state_file" ] || return 1
+  local path_status=0
+  yk_state_path_status || path_status=$?
+  if [ "$path_status" -eq 1 ]; then
+    return 1
+  fi
+  if [ "$path_status" -ne 0 ]; then
+    echo "Refusing to read unsafe YubiKey state file: $yk_state_file" >&2
+    return 2
+  fi
 
   local key
   local value
@@ -4049,6 +4437,7 @@ yk_load_state() {
   local bind_state_present=0
   local modern_state=0
   yk_reset_runtime_state
+  yk_attempt_token=""
 
   while IFS=$'\t' read -r key value; do
     case "$key" in
@@ -4236,8 +4625,8 @@ yk_standard_pid_files() {
   local pid_file
 
   for pid_file in "$runtime_dir"/remote-chrome-usbipd-*.pid; do
-    [ -f "$pid_file" ] || continue
     yk_is_standard_pid_file "$pid_file" || continue
+    yk_pid_file_status "$pid_file" || continue
     printf '%s\n' "$pid_file"
   done
 }
@@ -4245,9 +4634,27 @@ yk_standard_pid_files() {
 yk_pid_file_pid() {
   local pid_file="$1"
   local pid
+  if ! yk_pid_file_status "$pid_file"; then
+    return 1
+  fi
   pid="$(cat "$pid_file" 2>/dev/null || true)"
   # A PID file is a single numeric line.  Do not trim arbitrary content into
   # a value that could accidentally identify a different process.
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+yk_pid_file_pid_for_cleanup() {
+  local pid_file="$1"
+  local pid
+  if pid="$(yk_pid_file_pid "$pid_file")"; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  if ! yk_pid_file_status "$pid_file"; then
+    return 1
+  fi
+  pid="$(sudo cat -- "$pid_file" 2>/dev/null || true)"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$pid"
 }
@@ -4279,6 +4686,10 @@ yk_validate_usbipd_pid_file() {
   local expected_pid="$1"
   local file_pid
 
+  if ! yk_pid_file_status "$yk_usbipd_pid_file"; then
+    echo "Preserving unsafe usbipd pid file: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
   file_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
   if [[ ! "$file_pid" =~ ^[0-9]+$ ]]; then
     echo "Preserving invalid owned usbipd pid file: $yk_usbipd_pid_file" >&2
@@ -4705,12 +5116,30 @@ chrome_doctor() {
 }
 
 yk_ensure_local_ready() {
+  local pid_file_status=0
+  local existing_pid=""
+  local reserved_pid_identity=""
+
+  yk_pid_file_status "$yk_usbipd_pid_file" || pid_file_status=$?
+  if [ "$pid_file_status" -eq 2 ]; then
+    echo "Refusing to use unsafe usbipd pid path: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+
   need ssh
   need usbip
   need ss
   need timeout
 
   sudo -v || return $?
+
+  if [ "$pid_file_status" -eq 0 ]; then
+    existing_pid="$(sudo cat -- "$yk_usbipd_pid_file" 2>/dev/null || true)"
+    if [[ ! "$existing_pid" =~ ^[0-9]+$ ]]; then
+      echo "An invalid usbipd pid file is present at $yk_usbipd_pid_file; preserving it." >&2
+      return 1
+    fi
+  fi
 
   yk_local_module_preflight || return $?
 
@@ -4721,13 +5150,7 @@ yk_ensure_local_ready() {
   fi
 
   if ! ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
-    if [ -f "$yk_usbipd_pid_file" ]; then
-      local existing_pid
-      existing_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
-      if [[ ! "$existing_pid" =~ ^[0-9]+$ ]]; then
-        echo "An invalid usbipd pid file is present at $yk_usbipd_pid_file; preserving it." >&2
-        return 1
-      fi
+    if [ "$pid_file_status" -eq 0 ]; then
       if yk_owned_usbipd_running "$existing_pid"; then
         echo "An owned usbipd process is recorded but not listening on port $yk_usbip_port; refusing to overwrite $yk_usbipd_pid_file." >&2
         return 1
@@ -4736,22 +5159,31 @@ yk_ensure_local_ready() {
         echo "An unverified process owns usbipd pid file $yk_usbipd_pid_file; preserving it." >&2
         return 1
       fi
-      if ! sudo rm -f "$yk_usbipd_pid_file"; then
-        echo "Could not remove stale usbipd pid file $yk_usbipd_pid_file." >&2
-        return 1
-      fi
+      yk_remove_pid_file "$yk_usbipd_pid_file" "$existing_pid" || return 1
     fi
+
+    yk_reserve_pid_file || return 1
+    reserved_pid_identity="$(runtime_path_identity "$yk_usbipd_pid_file")" || reserved_pid_identity=""
+    [ -n "$reserved_pid_identity" ] || return 1
     yk_started_usbipd=1
     yk_phase="usbipd-starting"
     # Record ownership before invoking the daemon so a signal during startup
     # still gives rollback a pid-file path to inspect.
-    yk_write_state || return $?
+    if ! yk_write_state; then
+      if [ "$(runtime_path_identity "$yk_usbipd_pid_file")" = "$reserved_pid_identity" ]; then
+        yk_remove_pid_file "$yk_usbipd_pid_file" || true
+      fi
+      yk_started_usbipd=0
+      return 1
+    fi
     if ! sudo usbipd --daemon --pid="$yk_usbipd_pid_file" \
       --tcp-port "$yk_usbip_port" >/dev/null 2>&1; then
       echo "Could not start usbipd on local port $yk_usbip_port." >&2
       return 1
     fi
-    yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
+    if ! yk_usbipd_pid="$(yk_validate_usbipd_pid_file "")"; then
+      return 1
+    fi
     if [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
       echo "usbipd started without recording a valid pid in $yk_usbipd_pid_file." >&2
       return 1
@@ -4765,12 +5197,9 @@ yk_ensure_local_ready() {
     # work so an interruption can still stop this daemon through `stop HOST`.
     yk_write_state || return $?
     yk_wait_local_usbipd || return $?
-  elif [ -f "$yk_usbipd_pid_file" ]; then
-    yk_usbipd_pid="$(sudo cat "$yk_usbipd_pid_file" 2>/dev/null || true)"
-    if [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
-      echo "An invalid usbipd pid file is present at $yk_usbipd_pid_file; preserving it." >&2
-      return 1
-    elif yk_owned_usbipd_running "$yk_usbipd_pid"; then
+  elif [ "$pid_file_status" -eq 0 ]; then
+    yk_usbipd_pid="$existing_pid"
+    if yk_owned_usbipd_running "$yk_usbipd_pid"; then
       yk_started_usbipd=1
     else
       yk_usbipd_pid=""
@@ -4857,20 +5286,32 @@ yk_local_candidate_exists() {
 
 yk_close_tunnel() {
   local code=0
+  local socket_status=0
 
-  if [ -S "$yk_control_socket" ]; then
+  yk_control_socket_status || socket_status=$?
+  if [ "$socket_status" -eq 2 ]; then
+    echo "Preserving unsafe SSH control socket path $yk_control_socket." >&2
+    return 1
+  fi
+  if [ "$socket_status" -eq 0 ]; then
     # -O exit may fail when the peer already died; unlinking the exact
     # recorded socket still completes cleanup in that case.  If the socket
     # survives, however, retain state so stop can be retried.
     ssh -S "$yk_control_socket" -O exit "$yk_remote" >/dev/null 2>&1 || true
+    socket_status=0
+    yk_control_socket_status || socket_status=$?
+    if [ "$socket_status" -eq 2 ]; then
+      echo "SSH control socket path changed during cleanup; preserving $yk_control_socket." >&2
+      return 1
+    fi
   fi
-  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
-    if ! unlink "$yk_control_socket" >/dev/null 2>&1; then
+  if [ "$socket_status" -eq 0 ]; then
+    if ! unlink -- "$yk_control_socket" >/dev/null 2>&1; then
       echo "Could not remove SSH control socket $yk_control_socket." >&2
       code=1
     fi
   fi
-  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+  if runtime_path_present "$yk_control_socket"; then
     echo "SSH control socket remains after cleanup: $yk_control_socket" >&2
     code=1
   else
@@ -4880,12 +5321,24 @@ yk_close_tunnel() {
 }
 
 yk_open_tunnel() {
-  if [ -S "$yk_control_socket" ]; then
+  local socket_status=0
+  yk_control_socket_status || socket_status=$?
+  if [ "$socket_status" -eq 2 ]; then
+    echo "Refusing to use unsafe SSH control socket path $yk_control_socket." >&2
+    return 1
+  fi
+  if [ "$socket_status" -eq 0 ]; then
     if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
       yk_tunnel_open=1
       return
     fi
-    unlink "$yk_control_socket" || true
+    socket_status=0
+    yk_control_socket_status || socket_status=$?
+    if [ "$socket_status" -eq 2 ] ||
+      { [ "$socket_status" -eq 0 ] && ! unlink -- "$yk_control_socket"; }; then
+      echo "Could not safely remove stale SSH control socket $yk_control_socket." >&2
+      return 1
+    fi
   fi
 
   ssh -M -S "$yk_control_socket" -fN \
@@ -5058,13 +5511,19 @@ yk_reconcile_local_bind() {
 
 yk_reconcile_tunnel() {
   local socket_output=""
+  local socket_status=0
 
+  yk_control_socket_status || socket_status=$?
+  if [ "$socket_status" -eq 2 ]; then
+    echo "Unsafe SSH control socket path; preserving recovery state: $yk_control_socket" >&2
+    return 2
+  fi
   if [ "$yk_tunnel_open" != "1" ] &&
-    [ ! -e "$yk_control_socket" ] && [ ! -L "$yk_control_socket" ]; then
+    [ "$socket_status" -eq 1 ]; then
     return 0
   fi
 
-  if [ -S "$yk_control_socket" ] &&
+  if [ "$socket_status" -eq 0 ] &&
     socket_output="$(ssh -S "$yk_control_socket" -O check "$yk_remote" 2>&1)"; then
     echo "Recorded SSH USB/IP tunnel is still alive ($yk_control_socket); retry stop before launching." >&2
     return 1
@@ -5073,14 +5532,21 @@ yk_reconcile_tunnel() {
   # A failed control-master check means the exact recorded socket no longer
   # has a live SSH peer.  Remove only that path; a live socket was handled
   # above and is never auto-cleaned during launch reconciliation.
-  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+  if [ "$socket_status" -eq 0 ]; then
+    socket_status=0
+    yk_control_socket_status || socket_status=$?
+    if [ "$socket_status" -ne 0 ]; then
+      [ -n "$socket_output" ] && printf '%s\n' "$socket_output" >&2
+      echo "SSH control socket changed during reconciliation: $yk_control_socket" >&2
+      return 2
+    fi
     if ! unlink -- "$yk_control_socket"; then
       [ -n "$socket_output" ] && printf '%s\n' "$socket_output" >&2
       echo "Could not remove stale SSH USB/IP control socket $yk_control_socket; preserving recovery state." >&2
       return 2
     fi
   fi
-  if [ -e "$yk_control_socket" ] || [ -L "$yk_control_socket" ]; then
+  if runtime_path_present "$yk_control_socket"; then
     echo "SSH USB/IP control socket remains after reconciliation: $yk_control_socket" >&2
     return 1
   fi
@@ -5089,13 +5555,19 @@ yk_reconcile_tunnel() {
 
 yk_reconcile_usbipd() {
   local pid_file_pid=""
+  local pid_file_status=0
 
   [ "$yk_started_usbipd" = "1" ] || return 0
   if [ -n "$yk_usbipd_pid" ] && [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
     echo "Owned usbipd has an invalid recorded PID; preserving recovery state." >&2
     return 2
   fi
-  if [ -f "$yk_usbipd_pid_file" ]; then
+  yk_pid_file_status "$yk_usbipd_pid_file" || pid_file_status=$?
+  if [ "$pid_file_status" -eq 2 ]; then
+    echo "Unsafe usbipd pid file; preserving recovery state: $yk_usbipd_pid_file" >&2
+    return 2
+  fi
+  if [ "$pid_file_status" -eq 0 ]; then
     if ! pid_file_pid="$(yk_validate_usbipd_pid_file "$yk_usbipd_pid")"; then
       return 2
     fi
@@ -5200,17 +5672,17 @@ yk_reconcile_cleanup_failed() {
   if [ "$initial_code" -eq 0 ] && [ "$yk_phase" = "cleanup-failed" ]; then
     yk_reconcile_cleanup_failed_unlocked || reconcile_code=$?
     if [ "$reconcile_code" -eq 0 ]; then
-      if [ -n "$yk_log_file" ] && [ -e "$yk_log_file" ] &&
-        ! rm -f -- "$yk_log_file"; then
+      if [ -n "$yk_log_file" ] && ! yk_remove_runtime_artifact "$yk_log_file"; then
         echo "Could not remove reconciled YubiKey cleanup log $yk_log_file; preserving recovery state." >&2
         reconcile_code=2
       fi
-      if [ "$reconcile_code" -eq 0 ] && [ -d "$yk_attempt_lock" ] &&
-        ! rmdir -- "$yk_attempt_lock"; then
-        echo "Could not remove reconciled YubiKey attempt lock $yk_attempt_lock; preserving recovery state." >&2
-        reconcile_code=2
+      if [ "$reconcile_code" -eq 0 ] && runtime_path_present "$yk_attempt_lock"; then
+        if ! runtime_owned_directory "$yk_attempt_lock" || ! rmdir -- "$yk_attempt_lock"; then
+          echo "Could not remove reconciled YubiKey attempt lock $yk_attempt_lock; preserving recovery state." >&2
+          reconcile_code=2
+        fi
       fi
-      if [ "$reconcile_code" -eq 0 ] && ! rm -f -- "$yk_state_file"; then
+      if [ "$reconcile_code" -eq 0 ] && ! yk_remove_runtime_artifact "$yk_state_file"; then
         echo "Could not remove reconciled YubiKey recovery state $yk_state_file; preserving recovery state." >&2
         reconcile_code=2
       fi
@@ -5249,6 +5721,7 @@ yk_other_exports_exist() {
 }
 
 yk_stop_owned_usbipd() {
+  local pid_file_status=0
   [ "$yk_started_usbipd" = "1" ] || return 0
 
   if [ -n "$yk_usbipd_pid" ] && [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
@@ -5256,7 +5729,12 @@ yk_stop_owned_usbipd() {
     return 1
   fi
 
-  if [ -f "$yk_usbipd_pid_file" ]; then
+  yk_pid_file_status "$yk_usbipd_pid_file" || pid_file_status=$?
+  if [ "$pid_file_status" -eq 2 ]; then
+    echo "Preserving unsafe usbipd pid file: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  if [ "$pid_file_status" -eq 0 ]; then
     local pid_file_pid
     if ! pid_file_pid="$(yk_validate_usbipd_pid_file "$yk_usbipd_pid")"; then
       return 1
@@ -5311,13 +5789,16 @@ yk_stop_owned_usbipd() {
     fi
   fi
 
-  if [ -f "$yk_usbipd_pid_file" ] &&
-    ! yk_validate_usbipd_pid_file "$yk_usbipd_pid" >/dev/null; then
+  pid_file_status=0
+  yk_pid_file_status "$yk_usbipd_pid_file" || pid_file_status=$?
+  if [ "$pid_file_status" -eq 2 ]; then
+    echo "Preserving unsafe usbipd pid file: $yk_usbipd_pid_file" >&2
     return 1
-  fi
-  if ! sudo rm -f "$yk_usbipd_pid_file" >/dev/null 2>&1; then
-    echo "Could not remove owned usbipd pid file $yk_usbipd_pid_file." >&2
-    return 1
+  elif [ "$pid_file_status" -eq 0 ]; then
+    if ! yk_validate_usbipd_pid_file "$yk_usbipd_pid" >/dev/null; then
+      return 1
+    fi
+    yk_remove_pid_file "$yk_usbipd_pid_file" "$yk_usbipd_pid" || return 1
   fi
   yk_started_usbipd=0
   yk_usbipd_pid=""
@@ -5347,7 +5828,7 @@ yk_stop_orphan_usbipd_files() {
     found=1
     yk_usbipd_pid_file="$pid_file"
 
-    if ! pid="$(yk_pid_file_pid "$pid_file")"; then
+    if ! pid="$(yk_pid_file_pid_for_cleanup "$pid_file")"; then
       echo "Preserving invalid tool-shaped usbipd pid file: $pid_file" >&2
       code=1
       continue
@@ -5363,8 +5844,7 @@ yk_stop_orphan_usbipd_files() {
         continue
       fi
       echo "Reconciling stale usbipd pid file: $pid_file."
-      if ! sudo rm -f "$pid_file" >/dev/null 2>&1; then
-        echo "Could not remove stale usbipd pid file $pid_file." >&2
+      if ! yk_remove_pid_file "$pid_file" "$pid"; then
         code=1
       fi
       continue
@@ -5381,7 +5861,7 @@ yk_stop_orphan_usbipd_files() {
 
     # Re-read immediately before kill/rm so a PID-file replacement race
     # cannot turn a previously verified path into authority over another PID.
-    if [ "$(yk_pid_file_pid "$pid_file" 2>/dev/null || true)" != "$pid" ]; then
+    if [ "$(yk_pid_file_pid_for_cleanup "$pid_file" 2>/dev/null || true)" != "$pid" ]; then
       echo "Preserving changed usbipd pid file during reconciliation: $pid_file" >&2
       code=1
       continue
@@ -5411,8 +5891,8 @@ yk_stop_orphan_usbipd_files() {
     # The daemon is gone, so an absent pid file is already reconciled.  If a
     # replacement remains, require the original verified PID before unlinking
     # it; invalid or changed evidence must be preserved for inspection.
-    if [ -e "$pid_file" ] || [ -L "$pid_file" ]; then
-      final_pid="$(yk_pid_file_pid "$pid_file" 2>/dev/null || true)"
+    if runtime_path_present "$pid_file"; then
+      final_pid="$(yk_pid_file_pid_for_cleanup "$pid_file" 2>/dev/null || true)"
       if [ "$final_pid" != "$pid" ]; then
         echo "Preserving replaced or invalid usbipd pid file after stop: $pid_file" >&2
         code=1
@@ -5420,8 +5900,7 @@ yk_stop_orphan_usbipd_files() {
       fi
     fi
 
-    if ! sudo rm -f "$pid_file" >/dev/null 2>&1; then
-      echo "Could not remove reconciled usbipd pid file $pid_file." >&2
+    if ! yk_remove_pid_file "$pid_file" "$pid"; then
       code=1
     else
       echo "Reconciled orphan usbipd pid file: $pid_file."
@@ -5574,7 +6053,7 @@ chrome_detached_cleanup() {
     chrome_remove_bootstrap_script "$chrome_detached_session"
   fi
   if [ "$chrome_detached_yk_owned" = "1" ]; then
-    if ! yk_stop; then
+    if ! yk_stop "$chrome_detached_yk_token"; then
       echo "YubiKey cleanup remains incomplete; retry with $PROGRAM stop $yk_remote." >&2
     fi
   fi
@@ -5589,7 +6068,7 @@ chrome_wait_for_yubikey_window() {
   local phase readiness pane_state
   local bootstrap_started="$SECONDS"
   local readiness_started=""
-  local pane_output log_output
+  local pane_output log_output state_path_status=0 log_path_status=0
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=15
   [ "$timeout" -gt 0 ] || timeout=1
   [[ "$bootstrap_timeout" =~ ^[0-9]+$ ]] || bootstrap_timeout=30
@@ -5601,7 +6080,9 @@ chrome_wait_for_yubikey_window() {
   readiness_grace="$((10#$readiness_grace))"
 
   while true; do
-    if [ -f "$yk_state_file" ]; then
+    state_path_status=0
+    runtime_artifact_status "$yk_state_file" || state_path_status=$?
+    if [ "$state_path_status" -eq 0 ]; then
       local state_token
       state_token="$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file" 2>/dev/null || true)"
       if [ "$state_token" != "$chrome_detached_yk_token" ]; then
@@ -5620,6 +6101,9 @@ chrome_wait_for_yubikey_window() {
           [ -n "$readiness_started" ] || readiness_started="$SECONDS"
           ;;
       esac
+    elif [ "$state_path_status" -eq 2 ]; then
+      echo "YubiKey state path became unsafe; refusing to read it: $yk_state_file" >&2
+      break
     fi
     if ! tmux has-session -t "=$session" 2>/dev/null; then
       break
@@ -5644,12 +6128,16 @@ chrome_wait_for_yubikey_window() {
     echo "YubiKey bootstrap pane output:" >&2
     printf '%s\n' "$pane_output" >&2
   fi
-  if [ -f "$yk_log_file" ]; then
+  log_path_status=0
+  runtime_artifact_status "$yk_log_file" || log_path_status=$?
+  if [ "$log_path_status" -eq 0 ]; then
     log_output="$(cat "$yk_log_file" 2>/dev/null || true)"
     if [ -n "$log_output" ] && [ "$log_output" != "$pane_output" ]; then
       echo "YubiKey bootstrap log:" >&2
       printf '%s\n' "$log_output" >&2
     fi
+  elif [ "$log_path_status" -eq 2 ]; then
+    echo "Preserving unsafe YubiKey log path: $yk_log_file" >&2
   fi
   echo "YubiKey forwarding failed or timed out before readiness on $host." >&2
   return 1
@@ -5675,7 +6163,7 @@ chrome_launch_detached_with_yubikey() {
   trap 'chrome_detached_cleanup; exit 143' TERM
   trap 'chrome_detached_cleanup; exit 129' HUP
 
-  if [ -e "$yk_state_file" ] || [ -e "$yk_attempt_lock" ]; then
+  if runtime_path_present "$yk_state_file" || runtime_path_present "$yk_attempt_lock"; then
     echo "YubiKey forwarding already has an active or provisional attempt for $yk_remote; stop it before launching again." >&2
     chrome_remove_bootstrap_script "$session"
     trap - INT TERM HUP
@@ -5713,7 +6201,7 @@ chrome_launch_detached_with_yubikey() {
 }
 
 yk_rollback_start() {
-  if yk_cleanup_resources 0; then
+  if yk_cleanup_resources 0 "$yk_attempt_token"; then
     yk_phase="failed"
     return 0
   fi
@@ -5920,18 +6408,19 @@ yk_cleanup_resources_unlocked() {
   # Do not discard the recovery ledger until every owned resource has been
   # released (or intentionally retained).  This ordering also keeps the log
   # available if state removal itself fails.
-  if [ -n "$yk_log_file" ] && [ -e "$yk_log_file" ]; then
-    if ! rm -f "$yk_log_file"; then
+  if [ -n "$yk_log_file" ]; then
+    if ! yk_remove_runtime_artifact "$yk_log_file"; then
       yk_cleanup_mark_failure "Could not remove YubiKey cleanup log $yk_log_file."
     fi
   fi
-  if [ "$yk_cleanup_unresolved" = "0" ] && [ -n "$yk_attempt_lock" ] && [ -d "$yk_attempt_lock" ]; then
+  if [ "$yk_cleanup_unresolved" = "0" ] && [ -n "$yk_attempt_lock" ] &&
+    runtime_path_present "$yk_attempt_lock"; then
     if ! yk_release_attempt; then
       yk_cleanup_mark_failure "Could not release YubiKey attempt lock $yk_attempt_lock."
     fi
   fi
   if [ "$yk_cleanup_unresolved" = "0" ]; then
-    if ! rm -f "$yk_state_file"; then
+    if ! yk_remove_runtime_artifact "$yk_state_file"; then
       yk_cleanup_mark_failure "Could not remove YubiKey recovery state $yk_state_file."
     fi
   fi
@@ -5956,6 +6445,11 @@ yk_cleanup_resources() {
   local cleanup_code=0
   local reload_code=0
   local previous_exit_trap
+  local expected_token="${2:-}"
+
+  if [ -n "$expected_token" ] && ! yk_attempt_is_current "$expected_token"; then
+    return 3
+  fi
 
   if ! yk_cleanup_lock_acquire; then
     return 1
@@ -5968,10 +6462,16 @@ yk_cleanup_resources() {
   previous_exit_trap="$(trap -p EXIT || true)"
   trap 'yk_cleanup_lock_release_on_exit' EXIT
 
-  if [ "$yk_cleanup_reload_state" = "1" ]; then
+  if [ "$yk_cleanup_reload_state" = "1" ] || [ -n "$expected_token" ]; then
     yk_load_state || reload_code=$?
     yk_cleanup_reload_state=0
-    if [ "$reload_code" -eq 1 ]; then
+    if [ -n "$expected_token" ] &&
+      { [ "$reload_code" -ne 0 ] || [ "$yk_attempt_token" != "$expected_token" ] ||
+        ! runtime_owned_directory "$yk_attempt_lock" ||
+        { [ -n "$yk_attempt_lock_identity" ] &&
+          [ "$(runtime_path_identity "$yk_attempt_lock")" != "$yk_attempt_lock_identity" ]; }; }; then
+      cleanup_code=3
+    elif [ "$reload_code" -eq 1 ]; then
       # Another caller completed cleanup while this stop waited for the
       # per-state lock.  stop is idempotent once the ledger is gone.
       yk_cleanup_lock_release || cleanup_code=1
@@ -5982,7 +6482,7 @@ yk_cleanup_resources() {
       fi
       return "$cleanup_code"
     fi
-    if [ "$reload_code" -ne 0 ]; then
+    if [ "$reload_code" -ne 0 ] && [ "$cleanup_code" -ne 3 ]; then
       cleanup_code=1
     fi
   fi
@@ -6002,17 +6502,36 @@ yk_cleanup_resources() {
 }
 
 yk_start() {
+  local socket_status=0
   yk_reset_runtime_state
   yk_attempt_owned=0
+  yk_attempt_lock_identity=""
   yk_attempt_token="${REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN:-}"
+  yk_control_socket_status || socket_status=$?
+  if [ "$socket_status" -eq 2 ]; then
+    echo "Refusing to use unsafe SSH control socket path $yk_control_socket." >&2
+    return 1
+  fi
   yk_acquire_attempt || return $?
-  if [ -S "$yk_control_socket" ]; then
+  if [ "$socket_status" -eq 0 ]; then
     if ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
       echo "YubiKey forwarding already has an active SSH tunnel: $yk_control_socket" >&2
       yk_release_attempt
       return 1
     fi
-    unlink "$yk_control_socket" || true
+    socket_status=0
+    yk_control_socket_status || socket_status=$?
+    if [ "$socket_status" -eq 0 ]; then
+      unlink -- "$yk_control_socket" || {
+        echo "Could not remove stale SSH control socket $yk_control_socket." >&2
+        yk_release_attempt
+        return 1
+      }
+    elif [ "$socket_status" -eq 2 ]; then
+      echo "SSH control socket path became unsafe: $yk_control_socket" >&2
+      yk_release_attempt
+      return 1
+    fi
   fi
 
   yk_phase="starting"
@@ -6031,10 +6550,39 @@ yk_start() {
 }
 
 yk_stop() {
+  local expected_token="${1:-}"
   local load_code=0
   local cleanup_code=0
+
+  if [ -n "$expected_token" ] && ! yk_attempt_is_current "$expected_token"; then
+    local state_status=0
+    yk_state_path_status || state_status=$?
+    if [ "$state_status" -eq 1 ] && [ "$yk_attempt_owned" = "1" ] &&
+      [ -n "$yk_attempt_lock_identity" ] && runtime_owned_directory "$yk_attempt_lock" &&
+      [ "$(runtime_path_identity "$yk_attempt_lock")" = "$yk_attempt_lock_identity" ]; then
+      yk_release_attempt || return 1
+    else
+      # A stale helper has no authority over a missing, replaced, or unsafe
+      # generation. In particular, it must leave a newer provisional lock.
+      yk_attempt_owned=0
+      yk_attempt_lock_identity=""
+    fi
+    return 0
+  fi
+
   yk_load_state || load_code=$?
   if [ "$load_code" -eq 1 ]; then
+    if [ -n "$expected_token" ]; then
+      if [ "$yk_attempt_owned" = "1" ] && [ -n "$yk_attempt_lock_identity" ] &&
+        runtime_owned_directory "$yk_attempt_lock" &&
+        [ "$(runtime_path_identity "$yk_attempt_lock")" = "$yk_attempt_lock_identity" ]; then
+        yk_release_attempt || return 1
+      else
+        yk_attempt_owned=0
+        yk_attempt_lock_identity=""
+      fi
+      return 0
+    fi
     echo "No managed YubiKey forwarding state for $yk_remote."
     if ! yk_release_orphan_attempt; then
       echo "Could not remove the provisional YubiKey attempt lock: $yk_attempt_lock" >&2
@@ -6046,10 +6594,20 @@ yk_stop() {
     return 0
   fi
   [ "$load_code" -eq 0 ] || return "$load_code"
+  if [ -n "$expected_token" ] && [ "$yk_attempt_token" != "$expected_token" ]; then
+    yk_attempt_owned=0
+    yk_attempt_lock_identity=""
+    return 0
+  fi
 
   yk_cleanup_reload_state=1
-  yk_cleanup_resources 1 || cleanup_code=$?
+  yk_cleanup_resources 1 "$expected_token" || cleanup_code=$?
   yk_cleanup_reload_state=0
+  if [ "$cleanup_code" -eq 3 ] && [ -n "$expected_token" ]; then
+    yk_attempt_owned=0
+    yk_attempt_lock_identity=""
+    return 0
+  fi
   return "$cleanup_code"
 }
 
@@ -6058,15 +6616,19 @@ yk_cleanup() {
   if [ "$yk_cleanup_done" = "0" ]; then
     yk_cleanup_done=1
     if [ "$yk_attempt_owned" = "1" ]; then
-      yk_stop
+      yk_stop "$yk_attempt_token"
     fi
   fi
 }
 
 yk_attempt_is_current() {
   local token="$1"
-  [[ -f "$yk_state_file" && -O "$yk_state_file" && ! -L "$yk_state_file" ]] || return 1
-  [ -d "$yk_attempt_lock" ] || return 1
+  runtime_artifact_status "$yk_state_file" || return 1
+  runtime_owned_directory "$yk_attempt_lock" || return 1
+  if [ -n "$yk_attempt_lock_identity" ] &&
+    [ "$(runtime_path_identity "$yk_attempt_lock")" != "$yk_attempt_lock_identity" ]; then
+    return 1
+  fi
   [ -n "$token" ] &&
     [ "$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file")" = "$token" ]
 }
@@ -6101,7 +6663,7 @@ yk_recover_returned_device() (
   if [ "$yk_started_usbipd" = 1 ]; then
     yk_owned_usbipd_running "$yk_usbipd_pid" || return 1
   fi
-  [ -S "$yk_control_socket" ] || return 1
+  yk_control_socket_status || return 1
   timeout --kill-after=1 3 ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1 || return 1
 
   # Recovery only covers the local hub reconnect. Never reopen the tunnel or
@@ -6165,9 +6727,15 @@ yk_monitor_local_usb() {
 }
 
 yk_run() {
+  local state_code=0
   yk_cleanup_done=0
   if [ -n "$yk_log_file" ]; then
-    mkdir -p -- "$(dirname -- "$yk_log_file")"
+    yk_load_state || state_code=$?
+    if [ "$state_code" -ne 0 ] && [ "$state_code" -ne 1 ]; then
+      echo "Refusing to start with invalid YubiKey state: $yk_state_file" >&2
+      return "$state_code"
+    fi
+    yk_prepare_log_file || return 1
     exec > >(tee -a "$yk_log_file") 2>&1
   fi
   trap yk_cleanup EXIT
