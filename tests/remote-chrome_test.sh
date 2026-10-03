@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../bin/remote-chrome
 source "$repo_root/bin/remote-chrome"
+test_yk_ssh_request_definition="$(declare -f yk_ssh_request)"
 
 # Keep any accidentally unmocked tmux or runtime-state access away from the
 # developer's live remote-chrome sessions. Individual tests use narrower
@@ -29,6 +30,9 @@ test_block_external_command() {
 
 tmux() { test_block_external_command tmux "$@"; }
 ssh() { test_block_external_command ssh "$@"; }
+# Keep the suite's function-based SSH mocks behind the transport boundary.
+# Deadline regressions restore the real leaf and use a private fake executable.
+yk_ssh_request() { ssh "$@"; }
 sudo() { test_block_external_command sudo "$@"; }
 
 fail() {
@@ -935,6 +939,258 @@ test_forwarding_preflight_requires_local_timeout() (
   output="$(yk_preflight_for_forwarding 2>&1)" || code=$?
   [ "$code" -eq 1 ] || fail "forwarding preflight did not reject missing local timeout"
   assert_contains "$output" "Missing required command: timeout"
+)
+
+test_yubikey_ssh_bounds_complete_request_and_preserves_stdin() (
+  local test_dir mode code started
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/ssh" <<'FAKE_YUBIKEY_SSH'
+#!/usr/bin/env bash
+cat >"$YUBIKEY_SSH_INPUT"
+printf '%s\n' "$*" >"$YUBIKEY_SSH_ARGS"
+case "$YUBIKEY_SSH_MODE" in
+  success) exit 0 ;;
+  ignore-term) trap '' TERM ;;
+esac
+exec sleep 30
+FAKE_YUBIKEY_SSH
+  chmod +x "$test_dir/bin/ssh"
+  export PATH="$test_dir/bin:$PATH"
+  export YUBIKEY_SSH_INPUT="$test_dir/input" YUBIKEY_SSH_ARGS="$test_dir/args"
+  REMOTE_CHROME_SSH_TIMEOUT=001
+  yk_remote=test-host
+  eval "$test_yk_ssh_request_definition"
+  for mode in success stall ignore-term; do
+    export YUBIKEY_SSH_MODE="$mode"
+    code=0
+    started="$SECONDS"
+    yk_ssh 'bash -s' <<< 'complete-input' >"$test_dir/output" 2>&1 || code=$?
+    [ "$(cat "$YUBIKEY_SSH_INPUT")" = complete-input ] || fail "bounded SSH lost command stdin"
+    assert_contains "$(cat "$YUBIKEY_SSH_ARGS")" 'BatchMode=yes -o ConnectTimeout=1 -o ConnectionAttempts=1 test-host bash -s'
+    if [ "$mode" = success ]; then
+      [ "$code" -eq 0 ] || fail "fast SSH request did not succeed"
+    else
+      yk_ssh_request_incomplete "$code" || fail "stalled SSH did not report an incomplete request: $code"
+      [ "$((SECONDS - started))" -le 4 ] || fail "SSH exceeded its request deadline and kill grace"
+    fi
+  done
+  for mode in 0 invalid -1; do
+    REMOTE_CHROME_SSH_TIMEOUT="$mode"
+    [ "$(yk_ssh_deadline)" = 5 ] || fail "invalid SSH deadline became unbounded: $mode"
+  done
+)
+
+test_yubikey_control_deadlines_preserve_socket_and_launch_ownership() (
+  local test_dir code operation
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote=test-host
+  yk_control_socket="$test_dir/control.sock"
+  yk_set_runtime_paths
+  python3 - "$yk_control_socket" <<'CREATE_CONTROL_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX) as control:
+    control.bind(sys.argv[1])
+CREATE_CONTROL_SOCKET
+  yk_phase=ready
+  yk_tunnel_open=1
+  yk_write_state
+  ssh() { return 124; }
+  for operation in yk_close_tunnel yk_open_tunnel yk_reconcile_tunnel; do
+    code=0
+    "$operation" >"$test_dir/output" 2>&1 || code=$?
+    [ "$code" -ne 0 ] || fail "$operation accepted a stalled control master"
+    [ -S "$yk_control_socket" ] || fail "$operation discarded the only control handle"
+    [ "$yk_tunnel_open" = 1 ] || fail "$operation claimed the uncertain tunnel was closed"
+    [ -f "$yk_state_file" ] || fail "$operation discarded recovery evidence"
+  done
+  rm -- "$yk_state_file"
+  code=0
+  yk_start >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "new start accepted a stalled existing control master"
+  [ -S "$yk_control_socket" ] || fail "new start removed an uncertain existing socket"
+  [ ! -e "$yk_state_file" ] || fail "new start published ownership over an uncertain tunnel"
+  [ ! -e "$yk_attempt_lock" ] || fail "new start left its own provisional lock"
+  code=0
+  chrome_validate_launch_artifacts remote-chrome-test-host 1 1 >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "launch preflight allowed an uncertain existing tunnel"
+)
+
+test_yubikey_tunnel_setup_and_readiness_requests_are_bounded() (
+  local test_dir mode code started
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/ssh" <<'STALLED_TUNNEL_SETUP'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$YUBIKEY_TUNNEL_ARGS"
+if [[ "$*" == *'-M -S'* ]]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -S ]; then socket_path="$2"; break; fi
+    shift
+  done
+  python3 - "$socket_path" <<'CREATE_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX) as control:
+    control.bind(sys.argv[1])
+CREATE_SOCKET
+  [ "$YUBIKEY_TUNNEL_MODE" = setup-stall ] || exit 0
+fi
+exec sleep 30
+STALLED_TUNNEL_SETUP
+  chmod +x "$test_dir/bin/ssh"
+  export PATH="$test_dir/bin:$PATH" YUBIKEY_TUNNEL_ARGS="$test_dir/args"
+  REMOTE_CHROME_SSH_TIMEOUT=1
+  eval "$test_yk_ssh_request_definition"
+  yk_remote=test-host
+  yk_control_socket="$test_dir/control.sock"
+  yk_set_runtime_paths
+  yk_phase=bound
+  yk_write_state
+  for mode in setup-stall readiness-stall; do
+    export YUBIKEY_TUNNEL_MODE="$mode"
+    code=0
+    started="$SECONDS"
+    yk_open_tunnel </dev/null >"$test_dir/output" 2>&1 || code=$?
+    [ "$code" -ne 0 ] || fail "stalled $mode tunnel request reported success"
+    [ "$((SECONDS - started))" -le 4 ] || fail "stalled tunnel request exceeded its deadline"
+    [ -S "$yk_control_socket" ] || fail "stalled setup discarded the uncertain socket"
+    [ -f "$yk_state_file" ] || fail "stalled setup discarded the provisional ledger"
+    rm -- "$yk_control_socket"
+  done
+  assert_contains "$(cat "$YUBIKEY_TUNNEL_ARGS")" '-o BatchMode=yes -o ConnectTimeout=1'
+  assert_contains "$(cat "$YUBIKEY_TUNNEL_ARGS")" '-R 127.0.0.1:3240:127.0.0.1:3240 test-host'
+)
+
+test_yubikey_stop_deadline_releases_local_resources_and_retains_remote_ledger() (
+  local test_dir events="" code=0 started
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/ssh" <<'STALLED_YUBIKEY_SSH'
+#!/usr/bin/env bash
+cat >/dev/null
+exec sleep 30
+STALLED_YUBIKEY_SSH
+  chmod +x "$test_dir/bin/ssh"
+  export PATH="$test_dir/bin:$PATH"
+  REMOTE_CHROME_SSH_TIMEOUT=1
+  eval "$test_yk_ssh_request_definition"
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote=test-host
+  yk_control_socket="$test_dir/control.sock"
+  yk_set_runtime_paths
+  python3 - "$yk_control_socket" <<'CREATE_CONTROL_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX) as control:
+    control.bind(sys.argv[1])
+CREATE_CONTROL_SOCKET
+  yk_phase=ready
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_tunnel_open=1
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_write_state
+  yk_unbind_owned_busid() { events+="unbind "; yk_bind_state=none; }
+  yk_stop_owned_usbipd() { events+="daemon "; yk_started_usbipd=0; }
+  started="$SECONDS"
+  yk_stop </dev/null >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "stop reported success for incomplete remote cleanup"
+  [ "$((SECONDS - started))" -le 6 ] || fail "stalled SSH prevented bounded stop"
+  [ "$events" = 'unbind daemon ' ] || fail "stalled remote cleanup blocked local release: $events"
+  [ -S "$yk_control_socket" ] || fail "stop removed the uncertain tunnel handle"
+  yk_load_state
+  [ "$yk_phase" = cleanup-failed ] || fail "stop discarded incomplete cleanup state"
+  [ "$yk_attach_state" = attached ] || fail "stop forgot the unresolved remote attachment"
+  [ "$yk_tunnel_open" = 1 ] || fail "stop forgot the unresolved tunnel"
+  [ "$yk_bind_state" = none ] || fail "stop forgot successful local unbind"
+  [ "$yk_started_usbipd" = 0 ] || fail "stop forgot successful local daemon cleanup"
+)
+
+test_yubikey_fast_control_cleanup_and_stale_socket_reconciliation() (
+  local test_dir code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  yk_remote=test-host
+  yk_control_socket="$test_dir/control.sock"
+  yk_set_runtime_paths
+  create_socket() {
+    python3 - "$yk_control_socket" <<'CREATE_CONTROL_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX) as control:
+    control.bind(sys.argv[1])
+CREATE_CONTROL_SOCKET
+  }
+  create_socket
+  ssh() { return 0; }
+  yk_open_tunnel
+  [ "$yk_tunnel_open" = 1 ] || fail "fast control request did not establish readiness"
+  chrome_validate_launch_artifacts remote-chrome-test-host 1 1 >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "launch preflight accepted an active existing tunnel"
+  yk_close_tunnel
+  [ ! -e "$yk_control_socket" ] || fail "successful control exit did not clean up"
+  [ "$yk_tunnel_open" = 0 ] || fail "successful control exit left stale tunnel ownership"
+  create_socket
+  ssh() { return 255; }
+  yk_reconcile_tunnel
+  [ ! -e "$yk_control_socket" ] || fail "confirmed dead control socket was not reconciled"
+)
+
+test_unsafe_bootstrap_cleanup_does_not_skip_other_owned_resources() (
+  local test_dir operation code bootstrap_path
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  export CLEANUP_TEST_DIR="$test_dir" CLEANUP_TEST_REPO="$repo_root"
+  XDG_RUNTIME_DIR="$test_dir"
+  bootstrap_path="$(chrome_bootstrap_script_path remote-chrome-test-host)"
+  printf '%s\n' preserved >"$test_dir/target"
+  ln -s "$test_dir/target" "$bootstrap_path"
+  cat >"$test_dir/driver" <<'BOOTSTRAP_CLEANUP_DRIVER'
+#!/usr/bin/env bash
+source "$CLEANUP_TEST_REPO/bin/remote-chrome"
+export XDG_RUNTIME_DIR="$CLEANUP_TEST_DIR"
+need() { :; }
+tmux() {
+  case "$1" in
+    list-sessions) printf 'remote-chrome-test-host\n' ;;
+    *) return 0 ;;
+  esac
+}
+notify_stop_listener() { printf 'notify\n' >>"$CLEANUP_TEST_DIR/events"; }
+notify_stop_all() { printf 'notify\n' >>"$CLEANUP_TEST_DIR/events"; }
+chrome_stop_incoming() { printf 'incoming\n' >>"$CLEANUP_TEST_DIR/events"; }
+yk_stop() { printf 'yubikey\n' >>"$CLEANUP_TEST_DIR/events"; }
+yk_stop_all() { printf 'yubikey\n' >>"$CLEANUP_TEST_DIR/events"; }
+case "$1" in
+  stop) chrome_stop test-host ;;
+  stop-all) chrome_stop_all ;;
+  rollback)
+    chrome_detached_session=remote-chrome-test-host
+    chrome_detached_yk_owned=1
+    chrome_detached_yk_token=test-owner
+    chrome_detached_cleanup
+    ;;
+esac
+BOOTSTRAP_CLEANUP_DRIVER
+  for operation in stop stop-all rollback; do
+    : >"$test_dir/events"
+    code=0
+    # A fresh shell preserves the normal CLI's errexit semantics even though
+    # this test captures its exit status for assertions.
+    command bash "$test_dir/driver" "$operation" >"$test_dir/output" 2>&1 || code=$?
+    assert_contains "$(cat "$test_dir/events")" yubikey
+    if [ "$operation" != rollback ]; then
+      [ "$code" -ne 0 ] || fail "stop hid unsafe bootstrap cleanup failure"
+      assert_contains "$(cat "$test_dir/events")" notify
+    fi
+    [ -L "$bootstrap_path" ] || fail "cleanup removed the unsafe bootstrap path"
+    [ "$(cat "$test_dir/target")" = preserved ] || fail "cleanup changed the bootstrap symlink target"
+  done
 )
 
 test_usbipd_state_write_failure_stops_before_daemon() (
@@ -5118,6 +5374,12 @@ test_reset_yubikey_and_chrome_only_recreation_sequence() (
 )
 
 tests=(
+  test_unsafe_bootstrap_cleanup_does_not_skip_other_owned_resources
+  test_yubikey_ssh_bounds_complete_request_and_preserves_stdin
+  test_yubikey_control_deadlines_preserve_socket_and_launch_ownership
+  test_yubikey_tunnel_setup_and_readiness_requests_are_bounded
+  test_yubikey_stop_deadline_releases_local_resources_and_retains_remote_ledger
+  test_yubikey_fast_control_cleanup_and_stale_socket_reconciliation
   test_tmux_targets_require_exact_sessions_and_windows
   test_notification_listener_isolates_bad_records_and_doctor_checks_delivery
   test_reset_preserves_explicit_yubikey_opt_out

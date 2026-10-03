@@ -593,6 +593,7 @@ REMOTE_CHROME_STOP_USBIPD=1
 REMOTE_CHROME_YUBIKEY_TIMEOUT=15
 REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT=30
 REMOTE_CHROME_YUBIKEY_READY_GRACE=5
+REMOTE_CHROME_SSH_TIMEOUT=5
 ```
 
 A non-default `REMOTE_CHROME_USBIP_PORT` or `--yubikey-port PORT` is used by
@@ -609,6 +610,11 @@ binding, tunnel setup, and attach. The parent launcher allows a small additional
 readiness grace period (5 seconds by default) after the child timeout so a final
 state write or in-flight SSH probe can be observed. Exact remote detach may use
 `sudo usbip port` because some hosts restrict USB/IP port visibility to root.
+YubiKey SSH commands and control requests have a complete request deadline
+(`REMOTE_CHROME_SSH_TIMEOUT`, 5 seconds by default) with a one-second kill grace.
+An incomplete control request preserves its socket and recovery ledger; cleanup
+still attempts the remaining local resources. Invalid or zero deadlines use the
+default. The background hub-recovery probes retain their existing bounded limits.
 
 Before tmux or Chrome starts, the launcher checks the running local and remote
 kernels, their `/lib/modules/<kernel>` trees, `usbip-host`/`vhci-hcd`, command

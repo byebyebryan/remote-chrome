@@ -148,6 +148,10 @@ Remote forwarding requires passwordless scoped sudo for `modprobe vhci-hcd`,
 records only to root. The local and remote `timeout` command (from coreutils)
 is also required when forwarding, so every remote USB/IP operation remains
 bounded; Chrome-only launches do not require the USB/IP or timeout prerequisites.
+YubiKey SSH commands and control requests are also bounded end to end by
+`REMOTE_CHROME_SSH_TIMEOUT` (5 seconds, plus at most one second of kill grace).
+Incomplete control requests retain their socket and recovery state for retry,
+while stop continues releasing the remaining local resources.
 For a non-default `--yubikey-port PORT` or `REMOTE_CHROME_USBIP_PORT`, the remote
 sudo rule must permit `usbip --tcp-port PORT attach` as well.
 
