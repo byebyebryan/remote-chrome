@@ -38,8 +38,15 @@ managed YubiKey forwarding; pre-1.3 sessions may fall back to a direct pane
 command, while wrapped pane metadata is never decoded. It does not transparently
 resume an old Waypipe stream.
 
-The normal `chrome` and `yubikey` windows can both be open. For stale YubiKey
-forwarding from Starship to Snap, run `remote-chrome reset snap` on Starship;
+The normal `chrome` and `yubikey` windows can both be open. A key disconnected
+by a display-powered hub is automatically forwarded again when it returns to
+the recorded USB port with the configured USB ID. The helper checks every five
+seconds, verifies the owning session and existing SSH tunnel, and attempts
+recovery only when the old remote import is confirmed absent. Chrome stays
+running. A failed attempt retains the ledger and falls back to manual reset;
+network failures and moving the key to another USB port still require reset.
+
+For stale YubiKey forwarding from Starship to Snap, run `remote-chrome reset snap` on Starship;
 this tears down the old forwarding and waits for the new FIDO attachment before
 restarting Chrome. Save in-page work before resetting.
 

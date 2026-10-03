@@ -6063,6 +6063,107 @@ yk_cleanup() {
   fi
 }
 
+yk_attempt_is_current() {
+  local token="$1"
+  [[ -f "$yk_state_file" && -O "$yk_state_file" && ! -L "$yk_state_file" ]] || return 1
+  [ -d "$yk_attempt_lock" ] || return 1
+  [ -n "$token" ] &&
+    [ "$(awk -F '\t' '$1 == "attempt_token" {print $2; exit}' "$yk_state_file")" = "$token" ]
+}
+
+yk_recovery_bind() {
+  timeout --kill-after=1 5 sudo -n usbip bind -b "$1"
+}
+
+yk_recovery_ssh() {
+  timeout --kill-after=1 6 ssh -S "$yk_control_socket" \
+    -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 "$yk_remote" "$@"
+}
+
+yk_recover_returned_device() (
+  local token="$1" busid="$2" attachment_code=0 client_port_option=""
+
+  # Serialize with stop. A busy lock means try later; missing/replaced state
+  # means this helper must retire without acquiring anything for the new owner.
+  yk_attempt_is_current "$token" || return 3
+  if ! REMOTE_CHROME_YUBIKEY_CLEANUP_LOCK_TIMEOUT=0 yk_cleanup_lock_acquire >/dev/null 2>&1; then
+    return 2
+  fi
+  trap yk_cleanup_lock_release_on_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  yk_attempt_is_current "$token" || return 3
+  yk_load_state || return 1
+  [[ "$yk_phase" = ready && "$yk_active_busid" = "$busid" && "$yk_bound_before" = 0 ]] || return 1
+  yk_local_busid_bound "$busid" && return 0
+  yk_sysfs_busids | grep -Fxq -- "$busid" || return 2
+  if [ "$yk_started_usbipd" = 1 ]; then
+    yk_owned_usbipd_running "$yk_usbipd_pid" || return 1
+  fi
+  [ -S "$yk_control_socket" ] || return 1
+  timeout --kill-after=1 3 ssh -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1 || return 1
+
+  # Recovery only covers the local hub reconnect. Never reopen the tunnel or
+  # detach a surviving/ambiguous import. Each SSH request is bounded as a whole.
+  yk_ssh() { yk_recovery_ssh "$@"; }
+  yk_remote_probe_attachment "$busid" || attachment_code=$?
+  [ "$attachment_code" = 1 ] || return 1
+  yk_bind_state=attempting
+  yk_attach_state=none
+  yk_phase=bind-starting
+  yk_readiness=waiting
+  yk_write_state || return 1
+  yk_recovery_bind "$busid" || return 1
+  yk_bind_state=bound
+  yk_phase=bound
+  yk_write_state || return 1
+  [ "$yk_usbip_port" = 3240 ] || client_port_option=" --tcp-port $yk_usbip_port"
+  yk_attach_state=attempting
+  yk_phase=attach-starting
+  yk_write_state || return 1
+  yk_ssh "timeout 5 sudo -n usbip$client_port_option attach -r 127.0.0.1 -b '$busid'" || return 1
+  yk_attach_state=attached
+  yk_phase=attached
+  yk_write_state || return 1
+  yk_wait_remote_ready || return 1
+  yk_phase=ready
+  yk_write_state || return 1
+  echo "Restored YubiKey forwarding after USB reconnect: $busid ($yk_readiness). Chrome was kept running."
+)
+
+yk_monitor_local_usb() {
+  local token="$yk_attempt_token" busid="$yk_active_busid"
+  local waiting=0 disabled=0 recovery_code=0
+
+  while true; do
+    sleep 5 &
+    wait "$!"
+    if ! yk_attempt_is_current "$token"; then
+      yk_attempt_owned=0
+      return 0
+    fi
+    [ "$disabled" = 0 ] || continue
+    yk_local_busid_bound "$busid" && continue
+    if [ "$waiting" = 0 ]; then
+      echo "YubiKey USB export disappeared; waiting for $yk_usb_id at port $busid. Chrome is still running."
+      waiting=1
+    fi
+    yk_sysfs_busids | grep -Fxq -- "$busid" || continue
+    recovery_code=0
+    yk_recover_returned_device "$token" "$busid" || recovery_code=$?
+    case "$recovery_code" in
+      0) waiting=0 ;;
+      2) continue ;;
+      3) yk_attempt_owned=0; return 0 ;;
+      *)
+        disabled=1
+        echo "Automatic YubiKey recovery could not complete; state retained. Use remote-chrome reset $yk_remote to retry." >&2
+        ;;
+    esac
+  done
+}
+
 yk_run() {
   yk_cleanup_done=0
   if [ -n "$yk_log_file" ]; then
@@ -6074,13 +6175,9 @@ yk_run() {
   trap 'yk_cleanup; exit 143' TERM
   trap 'yk_cleanup; exit 129' HUP
 
-  yk_start
+  yk_start || return $?
   echo "YubiKey forwarding is active. Press Ctrl-C to stop and clean up."
-
-  while true; do
-    sleep 86400 &
-    wait "$!"
-  done
+  yk_monitor_local_usb
 }
 
 _yubikey_run_main() {

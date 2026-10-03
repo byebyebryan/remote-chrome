@@ -501,6 +501,14 @@ waits for readiness (up to 15 seconds by default), and only then creates the
 `chrome` window. A timeout or child failure removes the session and rolls back
 the exact resources it acquired.
 
+If a display-powered hub disconnects the key, the helper checks for its return
+every five seconds and attempts to restore forwarding without restarting Chrome.
+Recovery requires the recorded USB port and configured USB ID, the original
+session's state and SSH tunnel, and confirmed absence of the old remote import.
+It never detaches a surviving import or selects a key at another port. A failed
+attempt retains the recovery ledger and prints a `remote-chrome reset HOST`
+fallback; it does not keep retrying or request a sudo password in the background.
+
 Closing the remote Chrome browser only exits the `chrome` tmux window. The
 `yubikey` window and forwarding keep running until you stop the whole session.
 Stopping the session is the explicit teardown for both:

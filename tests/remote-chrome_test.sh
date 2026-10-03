@@ -134,6 +134,196 @@ test_second_start_cannot_clean_existing_attempt() (
   [ -z "$events" ] || fail "failed second start cleaned existing resources: $events"
 )
 
+setup_usb_recovery_test() {
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  export XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_host_sysfs="$test_dir/exports"
+  mkdir "$yk_usbip_host_sysfs"
+  yk_prepare_for_launch test-host
+  yk_reset_runtime_state
+  yk_attempt_owned=0
+  yk_attempt_token=recovery-test
+  yk_acquire_attempt
+  yk_active_busid=5-1.2.2
+  yk_bind_state=bound
+  yk_attach_state=attached
+  yk_tunnel_open=1
+  yk_started_usbipd=1
+  yk_usbipd_pid=4242
+  yk_phase=ready
+  yk_readiness=verified-fido
+  yk_write_state
+  : >"$test_dir/events"
+  python3 - "$yk_control_socket" <<'RECOVERY_CONTROL_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+    server.bind(sys.argv[1])
+RECOVERY_CONTROL_SOCKET
+  yk_sysfs_busids() { printf '%s\n' 5-1.2.2; }
+  yk_owned_usbipd_running() { [ "$1" = 4242 ]; }
+  timeout() { shift 2; "$@"; }
+  ssh() { printf 'control\n' >>"$test_dir/events"; }
+  yk_remote_probe_attachment() { printf 'probe\n' >>"$test_dir/events"; return 1; }
+  yk_recovery_bind() {
+    printf 'bind:%s\n' "$1" >>"$test_dir/events"
+    : >"$yk_usbip_host_sysfs/$1"
+  }
+  yk_recovery_ssh() { printf 'remote:%s\n' "$*" >>"$test_dir/events"; }
+  yk_wait_remote_ready() {
+    printf 'ready\n' >>"$test_dir/events"
+    yk_readiness=verified-fido
+  }
+}
+
+test_usb_return_recovers_only_the_recorded_export() (
+  local test_dir output events
+  setup_usb_recovery_test
+  output="$(yk_recover_returned_device recovery-test 5-1.2.2)"
+  events="$(cat "$test_dir/events")"
+  assert_contains "$events" 'bind:5-1.2.2'
+  assert_contains "$events" "remote:timeout 5 sudo -n usbip attach -r 127.0.0.1 -b '5-1.2.2'"
+  assert_contains "$events" ready
+  assert_contains "$output" 'Chrome was kept running'
+  yk_load_state
+  [ "$yk_phase" = ready ] || fail "recovery did not commit ready state"
+  [ "$yk_readiness" = verified-fido ] || fail "recovery did not verify FIDO"
+  [ "$yk_attempt_token" = recovery-test ] || fail "recovery changed session ownership"
+  assert_file_missing "$yk_cleanup_lock"
+  : >"$test_dir/events"
+  yk_recover_returned_device recovery-test 5-1.2.2
+  [ ! -s "$test_dir/events" ] || fail "a surviving export was disturbed"
+)
+
+test_usb_recovery_waits_for_same_port_and_stop_lock() (
+  local test_dir code=0 state_before
+  setup_usb_recovery_test
+  state_before="$(cat "$yk_state_file")"
+  yk_sysfs_busids() { printf '%s\n' 5-1.2.3; }
+  yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+  [ "$code" = 2 ] || fail "recovery did not wait for its own port"
+  [ ! -s "$test_dir/events" ] || fail "recovery touched another USB device"
+  yk_cleanup_lock_acquire
+  yk_cleanup_lock_owned=0
+  code=0
+  yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+  [ "$code" = 2 ] || fail "recovery did not defer to stop's lock"
+  [ "$(cat "$yk_state_file")" = "$state_before" ] || fail "deferred recovery changed state"
+  [ ! -s "$test_dir/events" ] || fail "deferred recovery acquired resources"
+)
+
+test_usb_recovery_retires_when_state_is_stopped_or_replaced() (
+  local test_dir code=0
+  setup_usb_recovery_test
+  yk_attempt_token=another-session
+  yk_write_state
+  yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+  [ "$code" = 3 ] || fail "recovery accepted another session's ledger"
+  rm "$yk_state_file"
+  code=0
+  yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+  [ "$code" = 3 ] || fail "recovery did not retire after stop"
+  assert_file_missing "$yk_state_file"
+  [ ! -s "$test_dir/events" ] || fail "retired recovery acquired resources"
+)
+
+test_usb_recovery_preserves_surviving_or_ambiguous_imports() (
+  local test_dir probe_code code=0 state_before
+  setup_usb_recovery_test
+  state_before="$(cat "$yk_state_file")"
+  yk_remote_probe_attachment() { return "$probe_code"; }
+  for probe_code in 0 2; do
+    code=0
+    yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+    [ "$code" = 1 ] || fail "recovery proceeded with a surviving/ambiguous import"
+    [ "$(cat "$yk_state_file")" = "$state_before" ] || fail "refused recovery changed state"
+    [[ "$(cat "$test_dir/events")" != *bind:* ]] || fail "refused recovery rebound a USB device"
+  done
+)
+
+test_usb_recovery_retains_partial_attach_for_reset() (
+  local test_dir code=0 events
+  setup_usb_recovery_test
+  yk_usbip_port=3300
+  yk_set_runtime_paths
+  yk_write_state
+  yk_recovery_ssh() { printf 'remote:%s\n' "$*" >>"$test_dir/events"; return 1; }
+  yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+  [ "$code" = 1 ] || fail "failed attach was accepted"
+  events="$(cat "$test_dir/events")"
+  assert_contains "$events" "usbip --tcp-port 3300 attach -r 127.0.0.1 -b '5-1.2.2'"
+  [[ "$events" != *ready* ]] || fail "recovery checked readiness after failed attach"
+  yk_load_state
+  [ "$yk_bind_state" = bound ] || fail "recovery forgot its acquired local bind"
+  [ "$yk_attach_state" = attempting ] || fail "ambiguous attach was forgotten"
+  assert_file_missing "$yk_cleanup_lock"
+)
+
+test_usb_monitor_attempts_once_and_does_not_resurrect_stopped_state() (
+  local test_dir events
+  setup_usb_recovery_test
+  yk_recovery_bind() { printf 'bind-failed\n' >>"$test_dir/events"; return 1; }
+  printf '0\n' >"$test_dir/polls"
+  sleep() {
+    local polls
+    polls="$(cat "$test_dir/polls")"
+    polls=$((polls + 1))
+    printf '%s\n' "$polls" >"$test_dir/polls"
+    if [ "$polls" = 3 ]; then
+      rm "$yk_state_file"
+      rmdir "$yk_attempt_lock"
+    fi
+  }
+  yk_monitor_local_usb >"$test_dir/output" 2>&1
+  events="$(cat "$test_dir/events")"
+  [ "$(printf '%s\n' "$events" | grep -c '^bind-failed$')" = 1 ] ||
+    fail "monitor retried a failed recovery"
+  assert_contains "$(cat "$test_dir/output")" 'Use remote-chrome reset test-host'
+  [ "$yk_attempt_owned" = 0 ] || fail "retired helper still owns stopped resources"
+  assert_file_missing "$yk_state_file"
+)
+
+test_stop_waits_for_usb_recovery_then_releases_its_resources() (
+  local test_dir recovery_pid="" stop_pid="" attempt code=0
+  setup_usb_recovery_test
+  trap 'if [ -n "$recovery_pid" ]; then kill "$recovery_pid" 2>/dev/null || true; wait "$recovery_pid" 2>/dev/null || true; fi; if [ -n "$stop_pid" ]; then kill "$stop_pid" 2>/dev/null || true; wait "$stop_pid" 2>/dev/null || true; fi; rm -rf "$test_dir"' EXIT
+  yk_recovery_bind() {
+    : >"$test_dir/recovering"
+    while [ ! -f "$test_dir/continue" ]; do command sleep 0.01; done
+    : >"$yk_usbip_host_sysfs/$1"
+  }
+  yk_remote_detach_busid() { printf 'detach\n' >>"$test_dir/events"; }
+  yk_close_tunnel() { yk_tunnel_open=0; }
+  yk_stop_owned_usbipd() { :; }
+  sudo() {
+    [ "$*" = 'usbip unbind -b 5-1.2.2' ] || fail "unexpected cleanup command: $*"
+    rm "$yk_usbip_host_sysfs/5-1.2.2"
+  }
+  yk_recover_returned_device recovery-test 5-1.2.2 >"$test_dir/recovery-output" 2>&1 &
+  recovery_pid=$!
+  for ((attempt = 0; attempt < 200; attempt++)); do
+    [ -f "$test_dir/recovering" ] && break
+    command sleep 0.01
+  done
+  [ -f "$test_dir/recovering" ] || fail "recovery never reached the controlled bind"
+  (trap - EXIT; yk_stop >"$test_dir/stop-output" 2>&1) &
+  stop_pid=$!
+  command sleep 0.1
+  [[ "$(cat "$test_dir/events")" != *detach* ]] || fail "stop bypassed recovery's lock"
+  : >"$test_dir/continue"
+  wait "$recovery_pid" || fail "controlled recovery failed"
+  recovery_pid=""
+  wait "$stop_pid" || fail "stop failed after recovery released its lock"
+  stop_pid=""
+  assert_file_missing "$yk_state_file"
+  assert_file_missing "$yk_usbip_host_sysfs/5-1.2.2"
+  assert_file_missing "$yk_cleanup_lock"
+  yk_recover_returned_device recovery-test 5-1.2.2 || code=$?
+  [ "$code" = 3 ] || fail "a stopped recovery could resume"
+  assert_file_missing "$yk_state_file"
+)
+
 test_stop_removes_orphan_attempt_lock_without_state() (
   local test_dir
   test_dir="$(mktemp -d)"
@@ -4437,6 +4627,13 @@ tests=(
   test_yubikey_remote_clients_use_configured_port
   test_start_rolls_back_partial_setup
   test_second_start_cannot_clean_existing_attempt
+  test_usb_return_recovers_only_the_recorded_export
+  test_usb_recovery_waits_for_same_port_and_stop_lock
+  test_usb_recovery_retires_when_state_is_stopped_or_replaced
+  test_usb_recovery_preserves_surviving_or_ambiguous_imports
+  test_usb_recovery_retains_partial_attach_for_reset
+  test_usb_monitor_attempts_once_and_does_not_resurrect_stopped_state
+  test_stop_waits_for_usb_recovery_then_releases_its_resources
   test_stop_removes_orphan_attempt_lock_without_state
   test_non_owner_cleanup_preserves_existing_attempt_lock
   test_active_attempt_cannot_write_state_after_lock_removal
