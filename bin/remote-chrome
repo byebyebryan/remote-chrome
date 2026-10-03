@@ -4234,7 +4234,9 @@ yk_cleanup_lock_acquire() {
       return 0
     fi
     if [ -n "$owner_tmp" ]; then
-      runtime_artifact_status "$owner_tmp" && rm -f -- "$owner_tmp" 2>/dev/null || true
+      if runtime_artifact_status "$owner_tmp"; then
+        rm -f -- "$owner_tmp" 2>/dev/null || true
+      fi
     fi
 
     lock_status=0
