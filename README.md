@@ -159,7 +159,8 @@ logged next to the session state in
 
 Run `remote-chrome stop` on the browser host at office handoff to stop incoming
 sessions and release an owned endpoint. A desktop notification daemon can then
-acquire the name. After upgrading an already running session, `remote-chrome
+acquire the name. Update the launcher on both hosts before resetting an
+upgraded session. After upgrading an already running session, `remote-chrome
 reset` restarts Chrome with the new bootstrap; Chrome does not reliably retry
 native notification setup after choosing its fallback.
 

@@ -936,10 +936,14 @@ class NotificationEndpoint:
         if not self.valid_id(source_id):
             return
         state = self.active.get(source_id)
+        if (state is None or not self.valid_id(record.get("revision"))
+                or record["revision"] != state["revision"]):
+            return
         if kind == "mapped":
             local_id = record.get("local_id")
             if state is not None and self.valid_id(local_id):
                 state["local_id"] = local_id
+                state["mapped_revision"] = state["revision"]
                 self.active[source_id] = state
         elif kind == "action":
             local_id = record.get("local_id")
@@ -980,9 +984,13 @@ class NotificationEndpoint:
         if source_id not in self.active and len(self.active) >= MAX_ACTIVE:
             raise self.dbus.DBusException("notification active-ID limit reached")
         old_state = self.active.get(source_id, {})
+        revision = old_state.get("revision", 0) + 1
+        if not self.valid_id(revision):
+            raise self.dbus.DBusException("notification revision limit reached")
         self.active[source_id] = {
             "actions": raw_actions[::2], "local_id": old_state.get("local_id", 0),
-            "close_requested": False,
+            "close_requested": False, "revision": revision,
+            "mapped_revision": old_state.get("mapped_revision", 0),
         }
         urgency = 1
         try:
@@ -992,7 +1000,7 @@ class NotificationEndpoint:
         if urgency not in (0, 1, 2):
             urgency = 1
         record = self.envelope(
-            "notify", source_id=source_id, replaces_id=replaces if replaces == source_id else 0,
+            "notify", source_id=source_id, revision=revision, replaces_id=replaces if replaces == source_id else 0,
             app_name=str(app_name)[:128], summary=str(summary)[:512], body=str(body)[:4096],
             actions=raw_actions, urgency=urgency, expires=int(expire_timeout),
             desktop_entry=str(hints.get("desktop-entry", ""))[:128],
@@ -1013,7 +1021,8 @@ class NotificationEndpoint:
             return
         state["close_requested"] = True
         self.active[source_id] = state
-        self.queue(self.envelope("close", source_id=source_id, local_id=state.get("local_id", 0)))
+        local_id = state["local_id"] if state["mapped_revision"] == state["revision"] else 0
+        self.queue(self.envelope("close", source_id=source_id, revision=state["revision"], local_id=local_id))
 
     def disconnect(self, reason):
         if self.closed:
@@ -1093,7 +1102,8 @@ def main(argv):
     session_id = os.environ.get("REMOTE_CHROME_ORIGIN_SESSION", "remote-chrome")[:256] or "remote-chrome"
     generation = secrets.token_hex(24)
     try:
-        send_frame(channel, {"v": PROTOCOL_VERSION, "type": "hello", "session_id": session_id, "generation": generation})
+        send_frame(channel, {"v": PROTOCOL_VERSION, "type": "hello", "session_id": session_id,
+                             "generation": generation, "notification_revisions": True})
         response = read_frame(channel, time.monotonic() + 1.2)
         if (not isinstance(response, dict) or type(response.get("v")) is not int
                 or response["v"] != PROTOCOL_VERSION or response.get("type") != "ready" or response.get("session_id") != session_id
@@ -1110,6 +1120,11 @@ def main(argv):
                 or not response["destination_owner"].startswith(":")):
             write_status(status_path, "unavailable")
             print("notify-endpoint: destination does not support body/actions or pinned ownership", file=sys.stderr)
+            return 1
+        if response.get("notification_revisions") is not True:
+            write_status(status_path, "unavailable")
+            print("notify-endpoint: notification listener lacks revision support; update the forwarding host before resetting",
+                  file=sys.stderr)
             return 1
     except Exception as error:
         write_status(status_path, "unavailable")
@@ -1257,8 +1272,6 @@ def extract(message):
     if not isinstance(data, list) or len(data) < 8:
         return None
     app_name = data[0] if isinstance(data[0], str) else ""
-    if not app_name:
-        return None
     return {
         "app_name": app_name,
         "replaces_id": data[1] if isinstance(data[1], int) else 0,
@@ -2082,7 +2095,7 @@ notify_stop_state_file() {
   local host="$2"
   local listener_pid listener_starttime local_socket remote_socket
 
-  [ -f "$state_file" ] || return 0
+  [[ -f "$state_file" && -O "$state_file" && ! -L "$state_file" ]] || return 0
   [ -n "$host" ] || host="$(notify_state_field "$state_file" host)"
   listener_pid="$(notify_state_field "$state_file" listener_pid)"
   listener_starttime="$(notify_state_field "$state_file" listener_starttime)"
@@ -2090,10 +2103,13 @@ notify_stop_state_file() {
   remote_socket="$(notify_state_field "$state_file" remote_socket)"
   notify_stop_process "$listener_pid" "$listener_starttime"
 
-  if [ -n "$local_socket" ]; then
+  if [[ -S "$local_socket" && -O "$local_socket" && ! -L "$local_socket" ]]; then
     rm -f -- "$local_socket" 2>/dev/null || true
   fi
-  rm -f -- "$state_file" "${state_file}.log" 2>/dev/null || true
+  if [[ -f "${state_file}.log" && -O "${state_file}.log" && ! -L "${state_file}.log" ]]; then
+    rm -f -- "${state_file}.log" 2>/dev/null || true
+  fi
+  rm -f -- "$state_file" 2>/dev/null || true
   notify_remove_remote_socket "$host" "$remote_socket"
   return 0
 }
@@ -2110,22 +2126,32 @@ notify_stop_all() {
   runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
 
   for state_file in "$runtime_dir"/remote-chrome-notify-*.state; do
-    [ -f "$state_file" ] || continue
+    [[ -f "$state_file" && -O "$state_file" && ! -L "$state_file" ]] || continue
     notify_stop_state_file "$state_file" "$(notify_state_field "$state_file" host)"
   done
 }
 
 notify_start_listener() {
-  local self pid starttime attempt
+  local self pid starttime attempt pending_state pending_log candidate
 
   [ -n "$notify_local_socket" ] || return 0
   if ! command -v python3 >/dev/null 2>&1; then
     echo "remote-chrome notify: python3 is required to forward notifications; notifications are not forwarded." >&2
     return 1
   fi
+  for candidate in "$notify_state_file" "$notify_log_file"; do
+    if { [ -e "$candidate" ] || [ -L "$candidate" ]; } &&
+       ! [[ -f "$candidate" && -O "$candidate" && ! -L "$candidate" ]]; then
+      echo "remote-chrome notify: could not record listener state: refusing unowned or non-regular artifact $candidate." >&2
+      return 1
+    fi
+  done
   notify_stop_listener "${notify_host:-}"
-  : >"$notify_log_file" 2>/dev/null || true
-  chmod 600 -- "$notify_log_file" 2>/dev/null || true
+  pending_log="$(mktemp -- "${notify_log_file}.tmp.XXXXXX")" || return 1
+  if ! mv -fT -- "$pending_log" "$notify_log_file"; then
+    rm -f -- "$pending_log" 2>/dev/null || true
+    return 1
+  fi
   self="$(script_path)"
   nohup "$self" _notify-listener "$notify_local_socket" "$notify_log_file" \
     </dev/null >/dev/null 2>&1 &
@@ -2146,7 +2172,8 @@ notify_start_listener() {
     echo "remote-chrome notify: listener did not create $notify_local_socket (see $notify_log_file); notifications are not forwarded." >&2
     return 1
   fi
-  if ! (
+  pending_state="$(mktemp -- "${notify_state_file}.tmp.XXXXXX")" || pending_state=""
+  if [ -z "$pending_state" ] || ! (
     umask 077
     {
       printf 'listener_pid\t%s\n' "$pid"
@@ -2156,9 +2183,9 @@ notify_start_listener() {
       printf 'apps\t%s\n' "$notify_apps"
       printf 'session\t%s\n' "$notify_session"
       printf 'host\t%s\n' "$notify_host"
-    } >"${notify_state_file}.tmp"
-  ) || ! mv -fT -- "${notify_state_file}.tmp" "$notify_state_file"; then
-    rm -f -- "${notify_state_file}.tmp" 2>/dev/null || true
+    } >"$pending_state"
+  ) || ! mv -fT -- "$pending_state" "$notify_state_file"; then
+    [ -z "$pending_state" ] || rm -f -- "$pending_state" 2>/dev/null || true
     # State was never committed, so roll back using the identity captured when
     # spawning the child instead of trying to reload a missing state file.
     notify_stop_process "$pid" "$starttime"
@@ -6338,7 +6365,9 @@ class InteractiveClient:
         self.dbus, self.GLib = dbus, GLib
         self.connection, self.log_path = connection, log_path
         self.session_id, self.generation = hello.get("session_id"), hello.get("generation")
+        self.revisions = hello.get("notification_revisions", False)
         if (type(hello.get("v")) is not int or hello["v"] != PROTOCOL_VERSION
+                or type(self.revisions) is not bool
                 or not isinstance(self.session_id, str) or not 0 < len(self.session_id) <= 256
                 or not isinstance(self.generation, str) or not 0 < len(self.generation) <= 128):
             raise ValueError("invalid protocol or session identity")
@@ -6351,6 +6380,7 @@ class InteractiveClient:
         self.states = {}
         self.recent = []
         self.inflight = None
+        self.inflight_events = []
         self.cleanup_ids = set()
         self.drain_timer = 0
         self.drain_expired = False
@@ -6403,6 +6433,7 @@ class InteractiveClient:
 
     def run(self):
         self.queue(self.envelope("ready", destination_owner=self.owner,
+            notification_revisions=self.revisions,
             capabilities=sorted(self.capabilities & {"body", "actions", "body-markup"}),
             server_information=self.server_information))
         log_line(self.log_path, f"interactive-ready\towner {self.owner}\tcaps {','.join(sorted(self.capabilities))}")
@@ -6491,6 +6522,11 @@ class InteractiveClient:
         if not positive_id(source_id):
             self.queue(self.envelope("error", code="invalid-id"))
             return
+        revision = record.get("revision") if self.revisions else 0
+        if self.revisions and not positive_id(revision):
+            self.queue(self.envelope("error", code="invalid-notification-revision"))
+            return
+        size = len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
         if kind == "notify":
             replaces = record.get("replaces_id", 0)
             actions = record.get("actions", [])
@@ -6502,6 +6538,10 @@ class InteractiveClient:
                     or type(expires) is not int or not -1 <= expires <= 0x7FFFFFFF):
                 self.fail_record(record, "invalid notification")
                 return
+            if (self.revisions and source_id in self.states
+                    and revision <= self.states[source_id]["latest_revision"]):
+                self.queue(self.envelope("error", code="stale-notification-revision"))
+                return
             now = time.monotonic()
             self.recent = [stamp for stamp in self.recent if now - stamp < RATE_WINDOW]
             if len(self.recent) >= RATE_LIMIT:
@@ -6510,9 +6550,11 @@ class InteractiveClient:
             self.recent.append(now)
             if source_id not in self.states:
                 if len(self.states) >= MAX_ACTIVE:
-                    self.queue(self.envelope("delivery-error", source_id=source_id, error="active limit"))
+                    self.queue(self.envelope("delivery-error", source_id=source_id,
+                        revision=revision, error="active limit"))
                     return
-                self.states[source_id] = {"local_id": 0, "actions": [], "closing": False}
+                self.states[source_id] = {"local_id": 0, "actions": [], "closing": False,
+                                          "pending_notifies": 0, "revision": 0, "latest_revision": 0}
             if self.states[source_id]["closing"]:
                 self.queue(self.envelope("error", code="closed-source-id"))
                 return
@@ -6521,6 +6563,9 @@ class InteractiveClient:
             local_id = record.get("local_id", 0)
             if state is None:
                 self.queue(self.envelope("error", code="unknown-source-id"))
+                return
+            if self.revisions and revision != state["latest_revision"]:
+                self.queue(self.envelope("error", code="stale-notification-revision"))
                 return
             if (type(local_id) is not int or local_id < 0 or local_id > 0xFFFFFFFF
                     or (local_id and local_id != state["local_id"])):
@@ -6532,12 +6577,14 @@ class InteractiveClient:
         else:
             self.queue(self.envelope("error", code="unknown-message"))
             return
-        size = len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
         if len(self.operations) >= MAX_QUEUE or self.operation_bytes + size > MAX_QUEUE_BYTES:
             self.disconnect("operation-queue-limit")
             return
         self.operations.append((record, size))
         self.operation_bytes += size
+        if kind == "notify":
+            self.states[source_id]["pending_notifies"] += 1
+            self.states[source_id]["latest_revision"] = revision
         self.pump()
 
     def pump(self):
@@ -6551,6 +6598,7 @@ class InteractiveClient:
             if state is None:
                 continue
             self.inflight = record
+            self.inflight_events = []
             try:
                 if record["type"] == "close":
                     if not state["local_id"]:
@@ -6581,6 +6629,7 @@ class InteractiveClient:
 
     def on_notify_reply(self, local_id):
         record, self.inflight = self.inflight, None
+        early_events, self.inflight_events = self.inflight_events, []
         local_id = int(local_id)
         if not positive_id(local_id):
             if record is not None:
@@ -6596,10 +6645,20 @@ class InteractiveClient:
         if state is None:
             self.cleanup_local(local_id)
         else:
-            state.update(local_id=local_id, actions=record.get("actions", [])[::2])
-            self.queue(self.envelope("mapped", source_id=source_id, local_id=local_id))
+            state["pending_notifies"] -= 1
+            state.update(local_id=local_id, actions=record.get("actions", [])[::2], revision=record.get("revision", 0))
+            self.queue(self.envelope("mapped", source_id=source_id, local_id=local_id, revision=state["revision"]))
             summary = clean_text(record["summary"], MAX_SUMMARY)
             log_line(self.log_path, f"delivered\t{source_id}\t{local_id}\t{summary}")
+            # The daemon may expose the popup before replying to Notify.
+            # Replay only events for its returned ID, after publishing the map.
+            for kind, event_id, value in early_events:
+                if event_id != local_id:
+                    continue
+                if kind == "action":
+                    self.on_action(event_id, value, sender=self.owner)
+                else:
+                    self.on_closed(event_id, value, sender=self.owner)
         self.pump()
 
     def on_close_reply(self):
@@ -6608,7 +6667,7 @@ class InteractiveClient:
             state = self.states.pop(record["source_id"], None)
             if state is not None:
                 self.queue(self.envelope("closed", source_id=record["source_id"],
-                    local_id=state["local_id"], reason=3))
+                    local_id=state["local_id"], revision=record.get("revision", 0), reason=3))
         self.pump()
         self.finish_drain()
 
@@ -6616,36 +6675,64 @@ class InteractiveClient:
         state = self.states.pop(record["source_id"], None)
         if state and state["local_id"]:
             self.cleanup_local(state["local_id"])
-        self.queue(self.envelope("delivery-error", source_id=record["source_id"], error=str(error)[:256]))
+        self.queue(self.envelope("delivery-error", source_id=record["source_id"],
+            revision=record.get("revision", 0), error=str(error)[:256]))
         log_line(self.log_path, f"delivery-failed\t{record['source_id']}\t{type(error).__name__}: {error}")
 
     def on_operation_error(self, error):
         record, self.inflight = self.inflight, None
+        self.inflight_events = []
         if record is not None and not self.closed:
             self.fail_record(record, error)
         self.pump()
         self.finish_drain()
 
+    def defer_inflight_event(self, kind, local_id, value, source_id=None):
+        if (self.inflight is None or self.inflight["type"] != "notify"
+                or (source_id is not None and self.inflight["source_id"] != source_id)):
+            return False
+        if kind == "action" and len(value) > 256:
+            return True
+        if len(self.inflight_events) >= MAX_QUEUE:
+            self.disconnect("early-event-queue-limit")
+        else:
+            self.inflight_events.append((kind, local_id, value))
+        return True
+
     def on_action(self, notification_id, key, sender=None):
         local_id, key = int(notification_id), str(key)
-        if self.closed or sender != self.owner:
+        if self.closed or sender != self.owner or not positive_id(local_id):
             return
         for source_id, state in self.states.items():
-            if state["local_id"] == local_id and not state["closing"] and key in state["actions"]:
-                self.queue(self.envelope("action", source_id=source_id, local_id=local_id, key=key))
-                log_line(self.log_path, f"action\t{source_id}\t{local_id}\t{key[:128]}")
+            if state["local_id"] == local_id:
+                if self.defer_inflight_event("action", local_id, key, source_id):
+                    return
+                if not state["closing"] and key in state["actions"]:
+                    self.queue(self.envelope("action", source_id=source_id, local_id=local_id,
+                        revision=state["revision"], key=key))
+                    log_line(self.log_path, f"action\t{source_id}\t{local_id}\t{key[:128]}")
                 return
+        self.defer_inflight_event("action", local_id, key)
 
     def on_closed(self, notification_id, reason, sender=None):
         local_id, reason = int(notification_id), int(reason)
-        if self.closed or sender != self.owner or not 1 <= reason <= 4:
+        if self.closed or sender != self.owner or not positive_id(local_id) or not 1 <= reason <= 4:
             return
         for source_id, state in list(self.states.items()):
             if state["local_id"] == local_id:
+                if self.defer_inflight_event("closed", local_id, reason, source_id):
+                    return
+                if state["pending_notifies"]:
+                    # An accepted replacement is still queued. The old popup
+                    # closing must not invalidate it; deliver it with a fresh ID.
+                    state.update(local_id=0, actions=[])
+                    return
                 self.states.pop(source_id)
-                self.queue(self.envelope("closed", source_id=source_id, local_id=local_id, reason=reason))
+                self.queue(self.envelope("closed", source_id=source_id, local_id=local_id,
+                    revision=state["revision"], reason=reason))
                 log_line(self.log_path, f"closed\t{source_id}\t{local_id}\t{reason}")
                 return
+        self.defer_inflight_event("closed", local_id, reason)
 
     def on_owner_changed(self, name, old_owner, new_owner):
         if str(name) == self.name and str(new_owner) != self.owner:

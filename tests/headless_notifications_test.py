@@ -11,6 +11,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 
 import dbus
@@ -154,6 +155,15 @@ class Endpoint(dbus.service.Object):
         if nid in active:
             active.remove(nid)
             event("closed", id=nid, reason=2)
+            self.NotificationClosed(dbus.UInt32(nid), dbus.UInt32(2))
+
+    @dbus.service.method(CONTROL, in_signature="u", out_signature="")
+    def Expire(self, nid):
+        nid = int(nid)
+        if nid in active:
+            active.remove(nid)
+            event("closed", id=nid, reason=1)
+            self.NotificationClosed(dbus.UInt32(nid), dbus.UInt32(1))
 
 endpoint = Endpoint()
 loop = GLib.MainLoop()
@@ -480,6 +490,164 @@ class HeadlessNotificationProtocol(unittest.TestCase):
         )
         pump_for(0.1)
         self.assertNotIn(("action", source_id, "not-offered"), self.signal_events)
+
+    def test_queued_replacement_survives_old_destination_expiry(self):
+        self.start_delayed_destination()
+        source = self.start_endpoint()
+        source_id = self.notify("original")
+        wait_for(lambda: len(rows(self.events_path)) == 1, "original was not received")
+        original_id = rows(self.events_path)[0]["id"]
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(original_id)))
+        wait_for(lambda: f"delivered\t{source_id}\t{original_id}" in self.listener_log.read_text(),
+                 "original was not mapped")
+
+        self.notify("hold unrelated delivery")
+        held = wait_for(lambda: next((row for row in rows(self.events_path)
+                        if row.get("summary") == "hold unrelated delivery"), None), "held request missing")
+        self.assertEqual(self.notify("queued replacement", replaces=source_id), source_id)
+        self.control.Expire(dbus.UInt32(original_id))
+        pump_for(0.1)
+        self.assertNotIn(("closed", source_id, 1), self.signal_events)
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(held["id"])))
+        replacement = wait_for(lambda: next((row for row in rows(self.events_path)
+                               if row.get("summary") == "queued replacement"), None),
+                               "accepted replacement was discarded after the old popup expired")
+        self.assertEqual(replacement["replaces"], 0)
+        self.assertNotEqual(replacement["id"], original_id)
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(replacement["id"])))
+        wait_for(lambda: f"delivered\t{source_id}\t{replacement['id']}" in self.listener_log.read_text(),
+                 "replacement was not mapped")
+        self.control.RawAction(dbus.UInt32(replacement["id"]), "default")
+        self.wait_signal(("action", source_id, "default"), "replacement action did not return")
+        source.CloseNotification(dbus.UInt32(source_id))
+        self.wait_signal(("closed", source_id, 3), "replacement did not close")
+
+    def test_click_and_dismiss_before_initial_notify_reply_are_replayed(self):
+        self.start_delayed_destination()
+        source = self.start_endpoint()
+        source_id = self.notify("early callbacks")
+        requested = wait_for(lambda: next((row for row in rows(self.events_path)
+                            if row.get("event") == "notify-received"), None), "request missing")
+        local_id = requested["id"]
+        self.control.RawAction(dbus.UInt32(local_id + 1), "default")
+        self.control.RawAction(dbus.UInt32(local_id), "not-offered")
+        self.control.RawAction(dbus.UInt32(local_id), "default")
+        self.control.Dismiss(dbus.UInt32(local_id))
+        pump_for(0.1)
+        self.assertEqual(self.signal_events, [])
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(local_id)))
+        self.wait_signal(("closed", source_id, 2), "early dismissal was lost")
+        self.assertEqual(self.signal_events, [("action", source_id, "default"), ("closed", source_id, 2)])
+        with self.assertRaises(dbus.DBusException):
+            source.CloseNotification(dbus.UInt32(source_id))
+
+    def test_early_replacement_callbacks_use_the_new_offered_actions(self):
+        self.start_delayed_destination()
+        self.start_endpoint()
+        source_id = self.notify("original actions")
+        requested = wait_for(lambda: next((row for row in rows(self.events_path)
+                            if row.get("event") == "notify-received"), None), "request missing")
+        local_id = requested["id"]
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(local_id)))
+        wait_for(lambda: f"delivered\t{source_id}\t{local_id}" in self.listener_log.read_text(),
+                 "original was not mapped")
+        self.assertEqual(self.notify("new actions", replaces=source_id, actions=("reply", "Reply")), source_id)
+        wait_for(lambda: any(row.get("summary") == "new actions" for row in rows(self.events_path)),
+                 "replacement missing")
+        self.control.RawAction(dbus.UInt32(local_id), "default")
+        self.control.RawAction(dbus.UInt32(local_id), "reply")
+        self.control.Dismiss(dbus.UInt32(local_id))
+        pump_for(0.1)
+        self.assertEqual(self.signal_events, [])
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(local_id)))
+        self.wait_signal(("closed", source_id, 2), "replacement dismissal was lost")
+        self.assertEqual(self.signal_events, [("action", source_id, "reply"), ("closed", source_id, 2)])
+
+    def test_legacy_all_apps_accepts_blank_application_names(self):
+        source = (REPO / "bin/remote-chrome").read_text()
+        match = re.search(r"cat >\"\$notify_forwarder_script\" <<'REMOTE_CHROME_NOTIFY_FORWARDER'\n"
+                          r"(.*?)\nREMOTE_CHROME_NOTIFY_FORWARDER", source, re.S)
+        self.assertIsNotNone(match)
+        namespace = {"__name__": "notification_forwarder_test"}
+        exec(compile(match.group(1), "notify-forwarder", "exec"), namespace)
+        record = namespace["extract"]({
+            "type": "method_call", "interface": NAME, "member": "Notify",
+            "payload": {"data": ["", 0, "", "summary", "body", [], {}, 0]},
+        })
+        self.assertIsNotNone(record)
+        self.assertEqual((record["app_name"], record["summary"], record["body"]), ("", "summary", "body"))
+        self.assertTrue(namespace["matches"](record["app_name"], namespace["parse_apps"]("*")))
+        self.assertFalse(namespace["matches"](record["app_name"], namespace["parse_apps"]("chrome")))
+
+    def test_source_ignores_callbacks_for_an_update_superseded_in_transit(self):
+        namespace = {"__name__": "notification_endpoint_test"}
+        exec(compile(helper_source(), "notify-endpoint", "exec"), namespace)
+        endpoint = object.__new__(namespace["NotificationEndpoint"])
+        endpoint.dbus = dbus
+        endpoint.session_id, endpoint.generation = "revision-test", "generation"
+        emitted = []
+        endpoint.object = SimpleNamespace(
+            ActionInvoked=lambda nid, key: emitted.append(("action", int(nid), str(key))),
+            NotificationClosed=lambda nid, reason: emitted.append(("closed", int(nid), int(reason))),
+        )
+        # Revision two was accepted locally, but only revision one is mapped.
+        endpoint.active = {1: {"revision": 2, "mapped_revision": 1, "local_id": 700,
+                               "actions": ["default"], "close_requested": False}}
+        base = {"v": 1, "session_id": endpoint.session_id, "generation": endpoint.generation,
+                "source_id": 1, "revision": 1, "local_id": 700}
+        for kind in ("mapped", "action", "closed", "delivery-error"):
+            endpoint.handle(base | {"type": kind, "key": "default", "reason": 1})
+        self.assertEqual(emitted, [])
+        self.assertEqual(endpoint.active[1]["mapped_revision"], 1)
+        current = base | {"revision": 2, "local_id": 701}
+        endpoint.handle(current | {"type": "mapped"})
+        self.assertEqual(endpoint.active[1]["mapped_revision"], 2)
+        endpoint.handle(current | {"type": "action", "key": "default"})
+        endpoint.handle(current | {"type": "closed", "reason": 2})
+        self.assertEqual(emitted, [("action", 1, "default"), ("closed", 1, 2)])
+        self.assertEqual(endpoint.active, {})
+
+    def test_listener_rejects_stale_notification_revisions_without_closing_current(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.raw_connections.append(connection)
+        connection.connect(str(self.relay))
+        identity = {"v": 1, "session_id": "revision-protocol-test", "generation": "generation"}
+        def send(kind, **fields):
+            connection.sendall((json.dumps(identity | {"type": kind} | fields) + "\n").encode())
+        send("hello", notification_revisions=True)
+        self.assertTrue(self.recv_frame(connection)["notification_revisions"])
+        send("active")
+        notification = {"source_id": 1, "revision": 2, "replaces_id": 0, "app_name": "Chrome",
+                        "summary": "current", "body": "body", "actions": [], "expires": 0}
+        send("notify", **notification)
+        mapped = self.recv_frame(connection)
+        self.assertEqual((mapped["type"], mapped["revision"]), ("mapped", 2))
+        send("notify", **(notification | {"revision": 1, "replaces_id": 1, "summary": "stale"}))
+        self.assertEqual(self.recv_frame(connection)["code"], "stale-notification-revision")
+        send("close", source_id=1, revision=1, local_id=mapped["local_id"])
+        self.assertEqual(self.recv_frame(connection)["code"], "stale-notification-revision")
+        send("close", source_id=1, revision=True, local_id=mapped["local_id"])
+        self.assertEqual(self.recv_frame(connection)["code"], "invalid-notification-revision")
+        self.assertEqual(len(self.destination_notifications()), 1)
+        send("close", source_id=1, revision=2, local_id=mapped["local_id"])
+        closed = self.recv_frame(connection)
+        self.assertEqual((closed["type"], closed["revision"], closed["reason"]), ("closed", 2, 3))
+
+    def test_excess_early_callbacks_disconnect_and_drain_the_owned_delivery(self):
+        self.start_delayed_destination()
+        self.start_endpoint()
+        self.notify("bounded early callbacks")
+        requested = wait_for(lambda: next((row for row in rows(self.events_path)
+                            if row.get("event") == "notify-received"), None), "request missing")
+        for offset in range(1, 66):
+            self.control.RawAction(dbus.UInt32(requested["id"] + offset), "default")
+        wait_for(lambda: self.endpoint.poll() is not None, "early callback queue did not enforce its limit")
+        self.assertFalse(self.has_source_owner())
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(requested["id"])))
+        wait_for(lambda: any(row.get("event") == "closed" and row.get("id") == requested["id"]
+                            for row in rows(self.events_path)), "overflow did not drain the owned destination ID")
+        self.assertEqual(self.signal_events, [])
+        self.assertIsNone(self.listener.poll())
 
     def test_destination_owner_replacement_invalidates_old_ids_and_actions(self):
         source = self.start_endpoint()

@@ -233,8 +233,12 @@ An existing remote notification daemon is preserved and monitored for
 informational forwarding. On a headless bus without an owner, the launcher
 starts an owned endpoint before Chrome. It implements the notification contract
 and negotiates body/action capabilities with the local daemon, including default
-clicks, offered action buttons, replacement IDs, and close callbacks. There is
-one owned endpoint per remote user bus. Another managed launch is rejected
+clicks, offered action buttons, replacement IDs, and close callbacks. Each
+notification update has a revision so callbacks from an older update cannot
+invalidate a newer accepted replacement. Update both hosts before resetting an
+upgraded session; an older listener without this support warns and lets Chrome
+start securely without the owned endpoint. Only one owned endpoint can use a
+remote user bus. Another managed launch is rejected
 before Chrome starts if that endpoint is already in use. Stop the first session
 or pass `--no-notifications` for the second launch.
 

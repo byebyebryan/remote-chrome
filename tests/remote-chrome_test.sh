@@ -883,7 +883,11 @@ test_notify_stop_listener_reaps_recorded_process() (
   sleep 600 &
   pid=$!
   starttime="$(notify_pid_starttime "$pid")"
-  : >"$socket"
+  python3 - "$socket" <<'CREATE_NOTIFICATION_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+    server.bind(sys.argv[1])
+CREATE_NOTIFICATION_SOCKET
   : >"$log"
   {
     printf 'listener_pid\t%s\n' "$pid"
@@ -952,7 +956,11 @@ FAKE_NOTIFICATION_CLEANUP_SSH
       printf 'remote_socket\t%s\n' /tmp/isolated-notification-cleanup.sock
     } >"$notify_state_file"
     : >"$notify_log_file"
-    : >"$test_dir/listener.sock"
+    python3 - "$test_dir/listener.sock" <<'CREATE_NOTIFICATION_SOCKET'
+import socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+    server.bind(sys.argv[1])
+CREATE_NOTIFICATION_SOCKET
     : >"$REMOTE_CHROME_TEST_NOTIFY_EVENTS"
     started="$SECONDS"
     chrome_stop test-host >"$test_dir/output" 2>&1 <<<"caller input" ||
@@ -976,7 +984,7 @@ FAKE_NOTIFICATION_CLEANUP_SSH
 
 test_notify_state_failure_reaps_startup_listener() (
   local test_dir fake_bin failure pid="" code
-  test_dir="$(mktemp -d)"
+  test_dir="$(command mktemp -d)"
   trap 'if [ -f "$test_dir/pid" ]; then pid="$(cat "$test_dir/pid")"; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; rm -rf "$test_dir"' EXIT
   fake_bin="$test_dir/bin"
   mkdir "$fake_bin"
@@ -997,16 +1005,23 @@ LISTENER_WRAPPER
   notify_apps=chrome
   notify_session=isolated-test
   notify_host=""
+  mktemp() {
+    if [ "$failure" = write ] && [ "${*: -1}" = "${notify_state_file}.tmp.XXXXXX" ]; then
+      return 1
+    fi
+    command mktemp "$@"
+  }
+  mv() {
+    if [ "$failure" = rename ] && [ "${*: -1}" = "$notify_state_file" ]; then
+      return 1
+    fi
+    command mv "$@"
+  }
 
   for failure in write rename; do
     notify_state_file="$test_dir/$failure.state"
     notify_log_file="${notify_state_file}.log"
     notify_local_socket="$test_dir/$failure.sock"
-    if [ "$failure" = write ]; then
-      mkdir "${notify_state_file}.tmp"
-    else
-      mkdir "$notify_state_file"
-    fi
     code=0
     notify_start_listener >"$test_dir/output" 2>&1 || code=$?
     [ "$code" -eq 1 ] || fail "$failure failure was not reported"
@@ -1015,17 +1030,93 @@ LISTENER_WRAPPER
     if kill -0 "$pid" 2>/dev/null; then
       fail "listener survived $failure failure"
     fi
-    if [ "$failure" = write ]; then
-      assert_file_missing "$notify_state_file"
-    else
-      [ -d "$notify_state_file" ] || fail "startup removed a pre-existing directory"
-    fi
+    assert_file_missing "$notify_state_file"
     assert_file_missing "$notify_local_socket"
     assert_file_missing "$notify_log_file"
-    if [ "$failure" = rename ]; then
-      assert_file_missing "${notify_state_file}.tmp"
-    fi
+    [ -z "$(find "$test_dir" -name "${failure}.state.tmp.*" -print -quit)" ] ||
+      fail "startup leaked its unique pending state file"
   done
+)
+
+test_notify_cleanup_ignores_untrusted_state() (
+  local test_dir state_file pid birth
+  test_dir="$(mktemp -d)"
+  sleep 600 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$test_dir"' EXIT
+  export XDG_RUNTIME_DIR="$test_dir"
+  birth="$(notify_pid_starttime "$pid")"
+  printf 'unrelated\n' >"$test_dir/document"
+  printf 'listener_pid\t%s\nlistener_starttime\t%s\nlocal_socket\t%s\n' \
+    "$pid" "$birth" "$test_dir/document" >"$test_dir/ledger"
+  state_file="$test_dir/remote-chrome-notify-untrusted.state"
+  ln -s "$test_dir/ledger" "$state_file"
+  notify_remove_remote_socket() { fail "untrusted state requested remote cleanup"; }
+  notify_stop_state_file "$state_file" ""
+  notify_stop_all
+  kill -0 "$pid" || fail "untrusted state killed an unrelated process"
+  [ -L "$state_file" ] || fail "cleanup removed an untrusted state symlink"
+  [ "$(cat "$test_dir/document")" = unrelated ] || fail "cleanup changed an unrelated document"
+  # Check the ownership boundary without requiring privileged fixture creation.
+  if [[ -f /etc/passwd && ! -O /etc/passwd ]]; then
+    notify_state_field() { fail "cleanup read a foreign-owned state file"; }
+    notify_stop_state_file /etc/passwd ""
+  fi
+)
+
+test_notify_cleanup_preserves_changed_artifacts() (
+  local test_dir state_file pid birth
+  test_dir="$(mktemp -d)"
+  sleep 600 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$test_dir"' EXIT
+  birth="$(notify_pid_starttime "$pid")"
+  state_file="$test_dir/remote-chrome-notify-owned.state"
+  printf 'unrelated\n' >"$test_dir/document"
+  ln -s "$test_dir/document" "${state_file}.log"
+  printf 'listener_pid\t%s\nlistener_starttime\t%s\nlocal_socket\t%s\n' \
+    "$pid" "$birth" "$test_dir/document" >"$state_file"
+  notify_remove_remote_socket() { :; }
+  notify_stop_state_file "$state_file" ""
+  assert_file_missing "$state_file"
+  [ -L "${state_file}.log" ] || fail "cleanup removed a replacement log symlink"
+  [ "$(cat "$test_dir/document")" = unrelated ] || fail "cleanup deleted a non-socket artifact"
+)
+
+test_notify_startup_uses_safe_runtime_files() (
+  local test_dir candidate code
+  test_dir="$(mktemp -d)"
+  trap 'notify_stop_listener; rm -rf "$test_dir"' EXIT
+  export XDG_RUNTIME_DIR="$test_dir"
+  notify_prepare_session safe-files ""
+  script_path() { printf '%s\n' "$repo_root/bin/remote-chrome"; }
+  notify_remove_remote_socket() { :; }
+  printf 'unrelated\n' >"$test_dir/document"
+  for candidate in "$notify_state_file" "$notify_log_file"; do
+    ln -s "$test_dir/document" "$candidate"
+    code=0
+    notify_start_listener >"$test_dir/output" 2>&1 || code=$?
+    [ "$code" -eq 1 ] || fail "startup accepted a state/log symlink"
+    [ "$(cat "$test_dir/document")" = unrelated ] || fail "startup overwrote a symlink target"
+    [ -L "$candidate" ] || fail "startup removed an unmanaged symlink"
+    rm -- "$candidate"
+  done
+  mkdir "$notify_state_file"
+  code=0
+  notify_start_listener >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -eq 1 ] || fail "startup accepted an existing state directory"
+  [ -d "$notify_state_file" ] || fail "startup removed an unmanaged directory"
+  rmdir "$notify_state_file"
+  ln -s "$test_dir/document" "${notify_state_file}.tmp"
+  notify_start_listener
+  [ "$(cat "$test_dir/document")" = unrelated ] || fail "pending state write followed a predictable symlink"
+  [ -L "${notify_state_file}.tmp" ] || fail "startup removed an unrelated pending symlink"
+  [[ -f "$notify_state_file" && ! -L "$notify_state_file" ]] || fail "startup did not publish regular state"
+  [ "$(stat -c %a "$notify_state_file")" = 600 ] || fail "listener state is not private"
+  [ "$(stat -c %a "$notify_log_file")" = 600 ] || fail "listener log is not private"
+  notify_stop_listener
+  assert_file_missing "$notify_local_socket"
+  assert_file_missing "$notify_state_file"
 )
 
 test_notify_stop_preserves_reused_pid_during_wait() (
@@ -4377,6 +4468,9 @@ tests=(
   test_notify_stop_listener_reaps_recorded_process
   test_notify_cleanup_bounds_ssh_and_continues_stop
   test_notify_state_failure_reaps_startup_listener
+  test_notify_cleanup_ignores_untrusted_state
+  test_notify_cleanup_preserves_changed_artifacts
+  test_notify_startup_uses_safe_runtime_files
   test_notify_stop_preserves_reused_pid_during_wait
   test_launch_with_notifications_plumbs_relay
   test_notify_launch_failure_stops_listener
