@@ -403,6 +403,9 @@ remote_secure_remove_notify_file() {
 
 remote_secure_cleanup() {
   [ "$cleanup_done" = "0" ] || return "$cleanup_status"
+  # Protect both normal Chrome exit and EXIT-trap cleanup from teardown signals.
+  # Finish the bounded ledger before accepting another termination.
+  trap '' INT TERM HUP
   cleanup_done=1
   local cleanup_failed=0
   local process_stopped=0
@@ -528,9 +531,6 @@ remote_secure_cleanup() {
 remote_secure_on_exit() {
   local exit_status="$?"
   local final_status="$exit_status"
-  # SSH/Waypipe teardown can deliver another HUP/TERM during owned cleanup.
-  # Finish the bounded cleanup ledger before accepting another termination.
-  trap '' INT TERM HUP
   remote_secure_cleanup || true
   if [ "$final_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
     final_status="$cleanup_status"

@@ -305,6 +305,40 @@ class SecureNotifications(unittest.TestCase):
         self.assertEqual(bootstrap.wait(timeout=8), 143)
         self.clean_source()
 
+    def test_natural_chrome_exit_cleanup_survives_hup(self):
+        self.listener()
+        bootstrap, _ = self.holding_bootstrap(tracked=True)
+        children = Path(f"/proc/{bootstrap.pid}/task/{bootstrap.pid}/children").read_text().split()
+        owned = {}
+        for pid in map(int, children):
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            if Path(os.fsdecode(argv[0])).name == "xdg-dbus-proxy":
+                owned["proxy"] = pid
+            elif os.fsencode(str(self.fakebin / "fake-chrome")) in argv:
+                owned["chrome"] = pid
+        self.assertEqual(set(owned), {"proxy", "chrome"})
+        proxy_pid = owned["proxy"]
+        # Hold a real owned proxy so cleanup is still running when HUP arrives.
+        os.kill(proxy_pid, signal.SIGSTOP)
+        try:
+            os.kill(owned["chrome"], signal.SIGTERM)
+
+            def cleanup_reached_proxy():
+                fields = dict(line.split(":", 1) for line in Path(f"/proc/{proxy_pid}/status").read_text().splitlines())
+                pending = int(fields["SigPnd"], 16) | int(fields["ShdPnd"], 16)
+                return bool(pending & (1 << (signal.SIGTERM - 1)))
+
+            wait_for(cleanup_reached_proxy, "natural-exit cleanup did not send proxy TERM")
+            bootstrap.send_signal(signal.SIGHUP)
+            os.kill(proxy_pid, signal.SIGCONT)
+            self.assertEqual(bootstrap.wait(timeout=8), 143)
+            self.clean_source()
+        finally:
+            try:
+                os.kill(proxy_pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+
     def stop_incoming(self, env):
         return subprocess.run(["bash", "-c", 'source "$1"; chrome_stop_incoming',
             "fixture", str(REPO / "bin/remote-chrome")], env=env,
