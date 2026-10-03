@@ -630,6 +630,31 @@ test_yubikey_run_refuses_unsafe_log_before_tee_or_start() (
   assert_contains "$(cat "$test_dir/output")" "unsafe YubiKey log path"
 )
 
+test_yubikey_run_creates_private_log_for_nested_helper_socket() (
+  local test_dir output code=0 events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_control_socket="$test_dir/new-parent/control.sock"
+  yk_start() { events+="start "; }
+  yk_monitor_local_usb() { return 0; }
+
+  if _yubikey_run_main test-host >"$test_dir/output" 2>&1; then
+    code=0
+  else
+    code=$?
+  fi
+  trap 'rm -rf "$test_dir"' EXIT
+  output="$(cat "$test_dir/output")"
+
+  [ "$code" -eq 0 ] || fail "nested custom YubiKey helper path failed: $output"
+  [ -d "$test_dir/new-parent" ] || fail "nested custom YubiKey path parent was not created"
+  [ -f "$yk_log_file" ] || fail "nested custom YubiKey log was not created"
+  [ "$(stat -c '%a' -- "$yk_log_file")" = "600" ] || fail "nested custom YubiKey log is not private"
+  [ "$(stat -c '%a' -- "$test_dir/new-parent")" = "700" ] || fail "new YubiKey log parent is not private"
+  assert_contains "$events" "start"
+)
+
 test_successful_start_records_exact_state() (
   local test_dir
   test_dir="$(mktemp -d)"
@@ -3934,6 +3959,258 @@ test_stop_provisional_invalid_pid_file_preserves_evidence() (
   [[ "$events" != *"rm -f"* ]] || fail "provisional invalid pid file was removed"
 )
 
+test_failed_usbipd_start_retains_retryable_reservation() (
+  local test_dir events="" code=0 allow_pid_rm=0 ledger
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  need() { :; }
+  yk_local_module_preflight() { :; }
+  yk_close_tunnel() { :; }
+  ss() { return 0; }
+  rm() {
+    local final_arg="${!#}"
+    if [ "$final_arg" = "$yk_usbipd_pid_file" ]; then
+      if [ "$allow_pid_rm" = "0" ]; then
+        events+="pid-rm-failed "
+        return 1
+      fi
+      events+="pid-rm-retried "
+    fi
+    command rm "$@"
+  }
+  sudo() {
+    case "${1:-}" in
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
+      -v|modprobe) events+="sudo:${1} " ;;
+      usbipd) events+="usbipd-failed " ; return 1 ;;
+      *) events+="sudo:${*} " ;;
+    esac
+    return 0
+  }
+
+  if yk_start; then
+    fail "failed local usbipd startup unexpectedly succeeded"
+  else
+    code=$?
+  fi
+  [ "$code" -ne 0 ] || fail "failed local usbipd startup returned success"
+  [ -f "$yk_usbipd_pid_file" ] || fail "failed first cleanup removed the PID reservation"
+  [ ! -s "$yk_usbipd_pid_file" ] || fail "mock usbipd unexpectedly wrote the PID reservation"
+  ledger="$(cat "$yk_state_file")"
+  assert_contains "$ledger" $'phase\tcleanup-failed'
+  assert_contains "$ledger" $'usbipd_pid_file_identity\t'
+  assert_contains "$ledger" $'usbipd_start_failed\t1'
+  assert_contains "$events" "pid-rm-failed"
+
+  # Clear in-memory state so stop must reload the durable reservation identity.
+  yk_reset_runtime_state
+  yk_attempt_owned=0
+  yk_attempt_lock_identity=""
+  yk_load_state || fail "fresh state load rejected failed-start cleanup ledger"
+  [ "$yk_usbipd_start_failed" = "1" ] || fail "fresh state load lost failed-start evidence"
+  [ -n "$yk_usbipd_pid_file_identity" ] || fail "fresh state load lost reservation identity"
+  allow_pid_rm=1
+  yk_stop || fail "fresh stop could not retry exact empty PID reservation"
+  assert_contains "$events" "pid-rm-retried"
+  assert_file_missing "$yk_usbipd_pid_file"
+  assert_file_missing "$yk_state_file"
+)
+
+test_stop_preserves_changed_empty_usbipd_reservation_identity() (
+  local test_dir code=0 original_identity current_identity events="" inode_before inode_after
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="cleanup-failed"
+  yk_started_usbipd=1
+  yk_usbipd_start_failed=1
+  : >"$yk_usbipd_pid_file"
+  yk_usbipd_pid_file_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")"
+  original_identity="$yk_usbipd_pid_file_identity"
+  yk_write_state
+
+  mv -- "$yk_usbipd_pid_file" "$test_dir/original-reservation"
+  : >"$yk_usbipd_pid_file"
+  current_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")"
+  [ "$current_identity" != "$original_identity" ] || fail "replacement fixture reused the reservation identity"
+  yk_close_tunnel() { :; }
+  rm() {
+    local final_arg="${!#}"
+    if [ "$final_arg" = "$yk_usbipd_pid_file" ]; then
+      events+="pid-rm "
+    fi
+    command rm "$@"
+  }
+
+  yk_stop >"$test_dir/replaced-output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "stop removed a replaced empty PID reservation"
+  [ -f "$yk_state_file" ] || fail "replaced reservation removed recovery state"
+  [ -f "$yk_usbipd_pid_file" ] || fail "replaced empty reservation was removed"
+  [ -z "$events" ] || fail "replaced reservation reached the removal command"
+
+  # Rebind the ledger to this new reservation, then rewrite it in place and
+  # change mtime. Device/inode alone would mistake it for the original file.
+  yk_usbipd_pid_file_identity="$current_identity"
+  yk_write_state
+  inode_before="$(stat -c '%d:%i' -- "$yk_usbipd_pid_file")"
+  printf '%s' x >"$yk_usbipd_pid_file"
+  : >"$yk_usbipd_pid_file"
+  touch -d '2001-01-01 00:00:00 UTC' -- "$yk_usbipd_pid_file"
+  current_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")"
+  inode_after="$(stat -c '%d:%i' -- "$yk_usbipd_pid_file")"
+  [ "$inode_after" = "$inode_before" ] || fail "mtime fixture replaced the reservation inode"
+  [ "$current_identity" != "$yk_usbipd_pid_file_identity" ] || fail "mtime fixture did not change the reservation identity"
+  events=""
+  code=0
+
+  yk_stop >"$test_dir/mtime-output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "stop removed a modified empty PID reservation"
+  [ -f "$yk_state_file" ] || fail "changed reservation removed recovery state"
+  [ -f "$yk_usbipd_pid_file" ] || fail "changed reservation was removed"
+  [ -z "$events" ] || fail "changed reservation reached the removal command"
+)
+
+test_retained_late_usbipd_pid_clears_reservation_evidence() (
+  local test_dir code=0 ledger events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="cleanup-failed"
+  yk_started_usbipd=1
+  yk_usbipd_pid=""
+  yk_usbipd_start_failed=1
+  : >"$yk_usbipd_pid_file"
+  yk_usbipd_pid_file_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")"
+  printf '%s\n' 4242 >"$yk_usbipd_pid_file"
+  yk_write_state
+  yk_stop_usbipd=0
+  yk_close_tunnel() { events+="close "; return 1; }
+  yk_owned_usbipd_running() { [ "$1" = "4242" ]; }
+  sudo() {
+    case "${1:-}" in
+      cat)
+        shift
+        [ "${1:-}" != "--" ] || shift
+        command cat "$@"
+        ;;
+      kill) events+="kill " ; return 1 ;;
+      *) events+="sudo:${*} " ;;
+    esac
+    return 0
+  }
+
+  yk_stop >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "cleanup failure fixture unexpectedly completed"
+  [[ "$events" != *"kill"* ]] || fail "policy-retained daemon was signaled"
+  ledger="$(cat "$yk_state_file")"
+  assert_contains "$ledger" $'started_usbipd\t0'
+  assert_contains "$ledger" $'usbipd_pid_file_identity\t'
+  assert_contains "$ledger" $'usbipd_start_failed\t0'
+  yk_reset_runtime_state
+  yk_attempt_owned=0
+  yk_attempt_lock_identity=""
+  yk_load_state || fail "fresh loader rejected cleanup state after retaining late PID"
+  [ "$yk_started_usbipd" = "0" ] || fail "late PID retained stale daemon ownership"
+  [ -z "$yk_usbipd_pid_file_identity" ] || fail "late PID retained stale reservation identity"
+  [ "$yk_usbipd_start_failed" = "0" ] || fail "late PID retained failed-start outcome"
+  [ "$(cat "$yk_usbipd_pid_file")" = "4242" ] || fail "policy-retained daemon PID file changed"
+)
+
+test_usbipd_reconciliation_persists_before_log_retry() (
+  local test_dir code=0 allow_log_rm=0 ledger
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  yk_phase="cleanup-failed"
+  yk_started_usbipd=1
+  yk_usbipd_start_failed=1
+  : >"$yk_usbipd_pid_file"
+  yk_usbipd_pid_file_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")"
+  : >"$yk_log_file"
+  chmod 600 -- "$yk_log_file"
+  yk_write_state
+  rm() {
+    local final_arg="${!#}"
+    if [ "$final_arg" = "$yk_log_file" ] && [ "$allow_log_rm" = "0" ]; then
+      return 1
+    fi
+    command rm "$@"
+  }
+
+  yk_reconcile_cleanup_failed >"$test_dir/first-output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "reconciliation ignored the first log removal failure"
+  assert_file_missing "$yk_usbipd_pid_file"
+  [ -f "$yk_log_file" ] || fail "first reconciliation removed the retained log"
+  ledger="$(cat "$yk_state_file")"
+  assert_contains "$ledger" $'started_usbipd\t0'
+  assert_contains "$ledger" $'usbipd_pid_file_identity\t'
+  assert_contains "$ledger" $'usbipd_start_failed\t0'
+
+  yk_reset_runtime_state
+  yk_attempt_owned=0
+  yk_attempt_lock_identity=""
+  yk_load_state || fail "fresh loader rejected progress persisted before log cleanup"
+  [ "$yk_started_usbipd" = "0" ] || fail "fresh load restored retired daemon ownership"
+  allow_log_rm=1
+  yk_reconcile_cleanup_failed || fail "fresh reconciliation could not retry ancillary log removal"
+  assert_file_missing "$yk_state_file"
+  assert_file_missing "$yk_log_file"
+)
+
+test_stop_keeps_legacy_empty_cleanup_state_conservative() (
+  local test_dir code=0 events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  yk_remote="test-host"
+  yk_control_socket="$test_dir/control.sock"
+  yk_usbip_port=3240
+  yk_set_runtime_paths
+  : >"$yk_usbipd_pid_file"
+  printf '%s\n' \
+    $'remote\ttest-host' \
+    $'phase\tcleanup-failed' \
+    $'started_usbipd\t1' \
+    $'usbipd_pid\t' \
+    $'usbip_port\t3240' \
+    $'usbipd_pid_file\t'"$yk_usbipd_pid_file" >"$yk_state_file"
+  yk_close_tunnel() { :; }
+  rm() {
+    local final_arg="${!#}"
+    if [ "$final_arg" = "$yk_usbipd_pid_file" ]; then
+      events+="pid-rm "
+    fi
+    command rm "$@"
+  }
+
+  yk_stop >"$test_dir/output" 2>&1 || code=$?
+  [ "$code" -ne 0 ] || fail "legacy empty cleanup ledger authorized reservation removal"
+  [ -f "$yk_state_file" ] || fail "legacy empty cleanup ledger was removed"
+  [ -f "$yk_usbipd_pid_file" ] || fail "legacy empty PID reservation was removed"
+  [ -z "$events" ] || fail "legacy ledger without reservation evidence reached removal"
+)
+
 test_stop_state_pid_file_mismatch_preserves_evidence() (
   local test_dir events="" output code=0
   test_dir="$(mktemp -d)"
@@ -5404,6 +5681,7 @@ tests=(
   test_yubikey_state_publication_uses_private_unique_temp
   test_yubikey_stop_refuses_symlink_state_without_resource_cleanup
   test_yubikey_run_refuses_unsafe_log_before_tee_or_start
+  test_yubikey_run_creates_private_log_for_nested_helper_socket
   test_successful_start_records_exact_state
   test_stop_cleans_only_recorded_busid
   test_stop_cleans_yubikey_without_yubikey_window
@@ -5520,6 +5798,11 @@ tests=(
   test_status_degrades_cleanup_failed_phase
   test_status_reports_fresh_readiness_without_changing_ledger
   test_stop_provisional_invalid_pid_file_preserves_evidence
+  test_failed_usbipd_start_retains_retryable_reservation
+  test_stop_preserves_changed_empty_usbipd_reservation_identity
+  test_retained_late_usbipd_pid_clears_reservation_evidence
+  test_usbipd_reconciliation_persists_before_log_retry
+  test_stop_keeps_legacy_empty_cleanup_state_conservative
   test_stop_state_pid_file_mismatch_preserves_evidence
   test_stop_pid_file_replacement_before_rm_preserves_evidence
   test_start_rejects_unverified_usbipd_pid

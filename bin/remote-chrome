@@ -3796,6 +3796,8 @@ yk_bound_before=0
 yk_attach_state="none"
 yk_started_usbipd=0
 yk_usbipd_pid=""
+yk_usbipd_pid_file_identity=""
+yk_usbipd_start_failed=0
 yk_cleanup_unresolved=0
 yk_cleanup_messages=""
 
@@ -3862,6 +3864,10 @@ yk_state_path_status() {
 
 yk_log_path_status() {
   runtime_artifact_status "$yk_log_file"
+}
+
+yk_pid_file_reservation_identity() {
+  runtime_path_identity "$1"
 }
 
 yk_prepare_log_file() {
@@ -3962,6 +3968,57 @@ yk_remove_pid_file() {
   fi
 }
 
+yk_remove_failed_usbipd_reservation() {
+  local path_status=0
+  local current_identity=""
+  local file_size=""
+
+  if [ "$yk_usbipd_start_failed" != "1" ] ||
+    [ -z "$yk_usbipd_pid_file_identity" ]; then
+    echo "No confirmed failed-start reservation authority for $yk_usbipd_pid_file; preserving it." >&2
+    return 1
+  fi
+
+  yk_pid_file_status "$yk_usbipd_pid_file" || path_status=$?
+  if [ "$path_status" -ne 0 ]; then
+    echo "Preserving missing or unsafe usbipd pid reservation: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  if [ ! -O "$yk_usbipd_pid_file" ]; then
+    echo "Preserving usbipd pid reservation not owned by this user: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  current_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")" || current_identity=""
+  if [ -z "$current_identity" ] || [ "$current_identity" != "$yk_usbipd_pid_file_identity" ]; then
+    echo "Preserving replaced usbipd pid reservation: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  file_size="$(stat -c '%s' -- "$yk_usbipd_pid_file" 2>/dev/null)" || file_size=""
+  if [ "$file_size" != "0" ]; then
+    echo "Preserving non-empty usbipd pid reservation: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+
+  path_status=0
+  yk_pid_file_status "$yk_usbipd_pid_file" || path_status=$?
+  current_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")" || current_identity=""
+  file_size="$(stat -c '%s' -- "$yk_usbipd_pid_file" 2>/dev/null)" || file_size=""
+  if [ "$path_status" -ne 0 ] || [ ! -O "$yk_usbipd_pid_file" ] ||
+    [ "$current_identity" != "$yk_usbipd_pid_file_identity" ] || [ "$file_size" != "0" ]; then
+    echo "Usbipd pid reservation changed before removal; preserving $yk_usbipd_pid_file." >&2
+    return 1
+  fi
+  if ! rm -f -- "$yk_usbipd_pid_file"; then
+    echo "Could not remove failed usbipd pid reservation $yk_usbipd_pid_file." >&2
+    return 1
+  fi
+  if runtime_path_present "$yk_usbipd_pid_file"; then
+    echo "Usbipd pid path reappeared after reservation removal; preserving recovery state: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  return 0
+}
+
 yk_reserve_pid_file() {
   local path_status=0
   yk_pid_file_status "$yk_usbipd_pid_file" || path_status=$?
@@ -3975,6 +4032,13 @@ yk_reserve_pid_file() {
   fi
   if ! yk_pid_file_status "$yk_usbipd_pid_file"; then
     echo "Reserved usbipd pid path is not a safe regular file: $yk_usbipd_pid_file" >&2
+    return 1
+  fi
+  yk_usbipd_pid_file_identity="$(yk_pid_file_reservation_identity "$yk_usbipd_pid_file")" ||
+    yk_usbipd_pid_file_identity=""
+  if [[ ! "$yk_usbipd_pid_file_identity" =~ ^[0-9]+:[0-9]+:[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+[[:space:]][+-][0-9]{4}$ ]]; then
+    yk_usbipd_pid_file_identity=""
+    echo "Could not record the reserved usbipd pid file identity: $yk_usbipd_pid_file" >&2
     return 1
   fi
 }
@@ -4154,6 +4218,8 @@ yk_reset_runtime_state() {
   yk_attach_state="none"
   yk_started_usbipd=0
   yk_usbipd_pid=""
+  yk_usbipd_pid_file_identity=""
+  yk_usbipd_start_failed=0
 }
 
 yk_cleanup_lock_release() {
@@ -4394,6 +4460,8 @@ yk_write_state() {
     printf 'tunnel_open\t%s\n' "$yk_tunnel_open"
     printf 'started_usbipd\t%s\n' "$yk_started_usbipd"
     printf 'usbipd_pid\t%s\n' "$yk_usbipd_pid"
+    printf 'usbipd_pid_file_identity\t%s\n' "$yk_usbipd_pid_file_identity"
+    printf 'usbipd_start_failed\t%s\n' "$yk_usbipd_start_failed"
     printf 'usbip_port\t%s\n' "$yk_usbip_port"
     printf 'usbipd_pid_file\t%s\n' "$yk_usbipd_pid_file"
   } >"$state_tmp"; then
@@ -4439,6 +4507,7 @@ yk_load_state() {
   local state_usbip_port=""
   local state_usb_id=""
   local state_pid_file=""
+  local state_pid_file_identity=""
   local bind_state_present=0
   local modern_state=0
   yk_reset_runtime_state
@@ -4458,6 +4527,8 @@ yk_load_state() {
       tunnel_open) modern_state=1; yk_tunnel_open="$value" ;;
       started_usbipd) yk_started_usbipd="$value" ;;
       usbipd_pid) yk_usbipd_pid="$value" ;;
+      usbipd_pid_file_identity) state_pid_file_identity="$value" ;;
+      usbipd_start_failed) yk_usbipd_start_failed="$value" ;;
       usbip_port) state_usbip_port="$value" ;;
       usbipd_pid_file) state_pid_file="$value" ;;
     esac
@@ -4496,6 +4567,13 @@ yk_load_state() {
     yk_usbipd_pid_file="$state_pid_file"
   elif [ -n "$state_usbip_port" ]; then
     yk_usbipd_pid_file="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-usbipd-${yk_usbip_port}.pid"
+  fi
+  if [ -n "$state_pid_file_identity" ]; then
+    if [[ ! "$state_pid_file_identity" =~ ^[0-9]+:[0-9]+:[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+[[:space:]][+-][0-9]{4}$ ]]; then
+      echo "YubiKey state has an invalid usbipd pid file identity: $yk_state_file" >&2
+      return 2
+    fi
+    yk_usbipd_pid_file_identity="$state_pid_file_identity"
   fi
   if [ "$modern_state" = "0" ]; then
     yk_readiness="unknown"
@@ -4554,13 +4632,26 @@ yk_load_state() {
       return 2
       ;;
   esac
+  case "$yk_usbipd_start_failed" in
+    0|1) ;;
+    *)
+      echo "YubiKey state has an invalid usbipd startup result: $yk_state_file" >&2
+      return 2
+      ;;
+  esac
+  if [ "$yk_usbipd_start_failed" = "1" ] &&
+    { [ "$yk_started_usbipd" != "1" ] || [ -z "$yk_usbipd_pid_file_identity" ]; }; then
+    echo "YubiKey state has incomplete failed usbipd startup evidence: $yk_state_file" >&2
+    return 2
+  fi
   if [ -n "$yk_usbipd_pid" ] && [[ ! "$yk_usbipd_pid" =~ ^[0-9]+$ ]]; then
     echo "YubiKey state has an invalid usbipd pid: $yk_state_file" >&2
     return 2
   fi
   if [ "$yk_started_usbipd" = "1" ] && [ -z "$yk_usbipd_pid" ] &&
     [ "$yk_phase" != "usbipd-starting" ] &&
-    [ "$yk_phase" != "usbipd-started" ] && [ "$yk_phase" != "starting" ]; then
+    [ "$yk_phase" != "usbipd-started" ] && [ "$yk_phase" != "starting" ] &&
+    [ "$yk_phase" != "cleanup-failed" ]; then
     echo "YubiKey state is missing the owned usbipd pid: $yk_state_file" >&2
     return 2
   fi
@@ -5207,6 +5298,10 @@ yk_ensure_local_ready() {
     fi
     if ! sudo usbipd --daemon --pid="$yk_usbipd_pid_file" \
       --tcp-port "$yk_usbip_port" >/dev/null 2>&1; then
+      yk_usbipd_start_failed=1
+      if ! yk_write_state; then
+        echo "Could not persist the failed usbipd startup result; preserving its PID reservation." >&2
+      fi
       echo "Could not start usbipd on local port $yk_usbip_port." >&2
       return 1
     fi
@@ -5217,6 +5312,8 @@ yk_ensure_local_ready() {
       echo "usbipd started without recording a valid pid in $yk_usbipd_pid_file." >&2
       return 1
     fi
+    yk_usbipd_pid_file_identity=""
+    yk_usbipd_start_failed=0
     if ! yk_owned_usbipd_running "$yk_usbipd_pid"; then
       echo "usbipd started with pid $yk_usbipd_pid but exact ownership could not be verified; preserving recovery state." >&2
       return 1
@@ -5616,6 +5713,12 @@ yk_reconcile_usbipd() {
     echo "Owned usbipd has an invalid recorded PID; preserving recovery state." >&2
     return 2
   fi
+  if [ -z "$yk_usbipd_pid" ] && [ "$yk_usbipd_start_failed" = "1" ]; then
+    if yk_stop_owned_usbipd; then
+      return 0
+    fi
+    return 2
+  fi
   yk_pid_file_status "$yk_usbipd_pid_file" || pid_file_status=$?
   if [ "$pid_file_status" -eq 2 ]; then
     echo "Unsafe usbipd pid file; preserving recovery state: $yk_usbipd_pid_file" >&2
@@ -5726,6 +5829,12 @@ yk_reconcile_cleanup_failed() {
   if [ "$initial_code" -eq 0 ] && [ "$yk_phase" = "cleanup-failed" ]; then
     yk_reconcile_cleanup_failed_unlocked || reconcile_code=$?
     if [ "$reconcile_code" -eq 0 ]; then
+      if ! yk_write_state; then
+        echo "Could not persist reconciled YubiKey cleanup progress; preserving recovery state." >&2
+        reconcile_code=2
+      fi
+    fi
+    if [ "$reconcile_code" -eq 0 ]; then
       if [ -n "$yk_log_file" ] && ! yk_remove_runtime_artifact "$yk_log_file"; then
         echo "Could not remove reconciled YubiKey cleanup log $yk_log_file; preserving recovery state." >&2
         reconcile_code=2
@@ -5789,6 +5898,18 @@ yk_stop_owned_usbipd() {
     return 1
   fi
   if [ "$pid_file_status" -eq 0 ]; then
+    if [ -z "$yk_usbipd_pid" ]; then
+      local file_size=""
+      file_size="$(stat -c '%s' -- "$yk_usbipd_pid_file" 2>/dev/null)" || file_size=""
+      if [ "$file_size" = "0" ]; then
+        yk_remove_failed_usbipd_reservation || return 1
+        yk_started_usbipd=0
+        yk_usbipd_pid=""
+        yk_usbipd_pid_file_identity=""
+        yk_usbipd_start_failed=0
+        return 0
+      fi
+    fi
     local pid_file_pid
     if ! pid_file_pid="$(yk_validate_usbipd_pid_file "$yk_usbipd_pid")"; then
       return 1
@@ -5856,6 +5977,8 @@ yk_stop_owned_usbipd() {
   fi
   yk_started_usbipd=0
   yk_usbipd_pid=""
+  yk_usbipd_pid_file_identity=""
+  yk_usbipd_start_failed=0
   return 0
 }
 
@@ -6442,6 +6565,8 @@ yk_cleanup_resources_unlocked() {
       # can discover its standard PID file later.
       yk_started_usbipd=0
       yk_usbipd_pid=""
+      yk_usbipd_pid_file_identity=""
+      yk_usbipd_start_failed=0
       yk_cleanup_persist_state || true
     else
       yk_cleanup_mark_failure "Could not stop owned usbipd pid ${yk_usbipd_pid:-unknown}."
@@ -6796,6 +6921,10 @@ yk_run() {
     if [ "$state_code" -ne 0 ] && [ "$state_code" -ne 1 ]; then
       echo "Refusing to start with invalid YubiKey state: $yk_state_file" >&2
       return "$state_code"
+    fi
+    if ! (umask 077; mkdir -p -- "$(dirname -- "$yk_log_file")"); then
+      echo "Could not create YubiKey log directory for $yk_log_file." >&2
+      return 1
     fi
     yk_prepare_log_file || return 1
     exec > >(tee -a "$yk_log_file") 2>&1
