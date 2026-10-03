@@ -6730,7 +6730,7 @@ class InteractiveClient:
         local_id = int(local_id)
         if not positive_id(local_id):
             if record is not None:
-                self.fail_record(record, "invalid destination ID")
+                self.fail_record(record, "invalid destination ID", enqueued=True)
             self.pump()
             return
         if self.closed:
@@ -6768,19 +6768,34 @@ class InteractiveClient:
         self.pump()
         self.finish_drain()
 
-    def fail_record(self, record, error):
-        state = self.states.pop(record["source_id"], None)
+    def fail_record(self, record, error, *, enqueued=False):
+        source_id = record["source_id"]
+        state = self.states.get(source_id)
+        if enqueued and record.get("type") == "notify" and state is not None:
+            # Count only notifications that made it onto the operation queue.
+            # A failed earlier delivery must leave any accepted replacements
+            # available for pump() to deliver.
+            if state["pending_notifies"] > 0:
+                state["pending_notifies"] -= 1
+            if state["pending_notifies"]:
+                local_id = state["local_id"]
+                state.update(local_id=0, actions=[])
+                if local_id:
+                    self.cleanup_local(local_id)
+                log_line(self.log_path, f"delivery-failed\t{source_id}\t{type(error).__name__}: {error}")
+                return
+        state = self.states.pop(source_id, None)
         if state and state["local_id"]:
             self.cleanup_local(state["local_id"])
-        self.queue(self.envelope("delivery-error", source_id=record["source_id"],
+        self.queue(self.envelope("delivery-error", source_id=source_id,
             revision=record.get("revision", 0), error=str(error)[:256]))
-        log_line(self.log_path, f"delivery-failed\t{record['source_id']}\t{type(error).__name__}: {error}")
+        log_line(self.log_path, f"delivery-failed\t{source_id}\t{type(error).__name__}: {error}")
 
     def on_operation_error(self, error):
         record, self.inflight = self.inflight, None
         self.inflight_events = []
         if record is not None and not self.closed:
-            self.fail_record(record, error)
+            self.fail_record(record, error, enqueued=True)
         self.pump()
         self.finish_drain()
 

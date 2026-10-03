@@ -467,6 +467,146 @@ class HeadlessNotificationProtocol(unittest.TestCase):
         )
         self.assertFalse(self.has_source_owner())
 
+    def test_queued_replacement_survives_older_notify_timeout(self):
+        self.start_delayed_destination()
+        source = self.start_endpoint()
+        source_id = self.notify("older delivery")
+        older = wait_for(
+            lambda: next((row for row in rows(self.events_path)
+                          if row.get("event") == "notify-received"), None),
+            "delayed destination did not receive the older Notify",
+        )
+
+        self.assertEqual(self.notify("queued replacement", replaces=source_id), source_id)
+        replacement = wait_for(
+            lambda: next((row for row in rows(self.events_path)
+                          if row.get("event") == "notify-received"
+                          and row.get("summary") == "queued replacement"), None),
+            "accepted replacement was discarded after the older Notify timed out",
+            timeout=4,
+        )
+        self.assertNotEqual(replacement["id"], older["id"])
+        self.assertEqual(replacement["replaces"], 0)
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(replacement["id"])))
+        wait_for(
+            lambda: self.listener_log.exists()
+            and f"\tdelivered\t{source_id}\t{replacement['id']}\t" in self.listener_log.read_text(),
+            "replacement was not mapped after the older delivery failed",
+        )
+
+        self.control.RawAction(dbus.UInt32(replacement["id"]), "default")
+        self.wait_signal(("action", source_id, "default"), "replacement action did not return")
+        source.CloseNotification(dbus.UInt32(source_id))
+        self.wait_signal(("closed", source_id, 3), "replacement did not close")
+
+    def test_final_notify_timeout_returns_closed_reason_four(self):
+        self.start_delayed_destination()
+        self.start_endpoint()
+        source_id = self.notify("final delivery failure")
+        wait_for(
+            lambda: any(row.get("event") == "notify-received"
+                        and row.get("summary") == "final delivery failure"
+                        for row in rows(self.events_path)),
+            "delayed destination did not receive the final Notify",
+        )
+
+        self.wait_signal(("closed", source_id, 4), "final Notify failure did not close with reason 4")
+        self.assertFalse(any("\tdelivered\t" in line and f"\t{source_id}\t" in line
+                             for line in self.listener_log.read_text().splitlines()))
+
+    def test_queued_replacement_after_mapped_notify_timeout_cleans_old_id(self):
+        self.start_delayed_destination()
+        source = self.start_endpoint()
+        source_id = self.notify("mapped first delivery")
+        first = wait_for(
+            lambda: next((row for row in rows(self.events_path)
+                          if row.get("event") == "notify-received"
+                          and row.get("summary") == "mapped first delivery"), None),
+            "delayed destination did not receive the first Notify",
+        )
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(first["id"])))
+        wait_for(
+            lambda: self.listener_log.exists()
+            and f"\tdelivered\t{source_id}\t{first['id']}\t" in self.listener_log.read_text(),
+            "first destination ID was not mapped",
+        )
+
+        self.notify("intermediate delivery", replaces=source_id)
+        intermediate = wait_for(
+            lambda: next((row for row in rows(self.events_path)
+                          if row.get("event") == "notify-received"
+                          and row.get("summary") == "intermediate delivery"), None),
+            "destination did not receive the intermediate replacement",
+        )
+        self.assertEqual(intermediate["id"], first["id"])
+        self.assertEqual(intermediate["replaces"], first["id"])
+
+        self.assertEqual(self.notify("latest replacement", replaces=source_id,
+                                     actions=("reply", "Reply")), source_id)
+        latest = wait_for(
+            lambda: next((row for row in rows(self.events_path)
+                          if row.get("event") == "notify-received"
+                          and row.get("summary") == "latest replacement"), None),
+            "accepted latest replacement was discarded after the intermediate timeout",
+            timeout=4,
+        )
+        self.assertEqual(latest["replaces"], 0)
+        self.assertNotEqual(latest["id"], first["id"])
+        wait_for(
+            lambda: any(row.get("event") == "closed" and row.get("id") == first["id"]
+                        and row.get("reason") == 3 for row in rows(self.events_path)),
+            "failed replacement did not close its stale mapped destination ID",
+        )
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(latest["id"])))
+        wait_for(
+            lambda: self.listener_log.exists()
+            and f"\tdelivered\t{source_id}\t{latest['id']}\t" in self.listener_log.read_text(),
+            "latest replacement was not mapped",
+        )
+
+        self.control.RawAction(dbus.UInt32(latest["id"]), "default")
+        pump_for(0.1)
+        self.assertNotIn(("action", source_id, "default"), self.signal_events)
+        self.control.RawAction(dbus.UInt32(latest["id"]), "reply")
+        self.wait_signal(("action", source_id, "reply"), "latest offered action did not return")
+        source.CloseNotification(dbus.UInt32(source_id))
+        self.wait_signal(("closed", source_id, 3), "latest replacement did not close")
+        wait_for(
+            lambda: any(row.get("event") == "closed" and row.get("id") == latest["id"]
+                        and row.get("reason") == 3 for row in rows(self.events_path)),
+            "destination did not close the latest mapped ID",
+        )
+
+    def test_queued_close_finishes_after_older_notify_timeout(self):
+        self.start_delayed_destination()
+        source = self.start_endpoint()
+        source_id = self.notify("older delivery before close")
+        wait_for(
+            lambda: any(row.get("event") == "notify-received"
+                        and row.get("summary") == "older delivery before close"
+                        for row in rows(self.events_path)),
+            "delayed destination did not receive the older Notify",
+        )
+
+        self.assertEqual(self.notify("replacement before close", replaces=source_id), source_id)
+        source.CloseNotification(dbus.UInt32(source_id))
+        replacement = wait_for(
+            lambda: next((row for row in rows(self.events_path)
+                          if row.get("event") == "notify-received"
+                          and row.get("summary") == "replacement before close"), None),
+            "accepted replacement was stranded ahead of the queued source close",
+            timeout=4,
+        )
+        self.assertEqual(replacement["replaces"], 0)
+        self.assertTrue(self.control.ReleaseReply(dbus.UInt32(replacement["id"])))
+        wait_for(
+            lambda: any(row.get("event") == "closed" and row.get("id") == replacement["id"]
+                        and row.get("reason") == 3 for row in rows(self.events_path)),
+            "queued source close did not close the delivered replacement",
+        )
+        self.wait_signal(("closed", source_id, 3),
+                         "queued source close did not return the latest revision's close callback")
+
     def test_unoffered_destination_action_is_not_forwarded(self):
         self.start_delayed_destination()
         self.start_endpoint()
