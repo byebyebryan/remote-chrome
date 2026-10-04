@@ -2,8 +2,10 @@
 
 ## Supported Versions
 
-`remote-chrome` does not currently publish versioned releases. Security fixes
-are made on the latest `main` branch.
+Security fixes are made on the latest `main` branch; older commits and
+historical tags are not maintained release lines. Report the exact Git commit
+on both hosts. The launcher's `--version` string is diagnostic metadata and
+does not identify every fix on `main`.
 
 ## Reporting a Vulnerability
 
@@ -23,7 +25,9 @@ Security-sensitive areas include:
 - YubiKey device selection, binding, attachment, and cleanup
 - local and remote `sudo` boundaries
 - lifecycle state and process ownership
-- the notification relay socket, its payload handling, and reverse-forward construction
+- the filtered browser bus and Secret Service ownership
+- notification name ownership, relay sockets, untrusted payload handling,
+  reverse-forward construction, and session-scoped action/close callbacks
 
 Reports will be acknowledged as soon as practical. Validation and remediation
 timelines depend on severity and reproducibility.

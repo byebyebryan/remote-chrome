@@ -1,6 +1,11 @@
 Headless notifications: implementation and host acceptance
 2026-10-02
 
+Historical implementation/acceptance snapshot. Counts, commit references,
+host observations, and rollback below describe their dated checkpoints.
+README.md in this directory records later validation and acceptance limits;
+../../usage.md and ../../architecture.md describe the current implementation.
+
 Implemented release boundary
 
 The owned headless endpoint implements org.freedesktop.Notifications and

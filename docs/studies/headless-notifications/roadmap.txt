@@ -1,6 +1,10 @@
 Headless notifications: implementation roadmap
 2026-10-02 | planning only | based on report.txt and results.json
 
+Historical design snapshot. Milestones 0-3 were subsequently implemented,
+with bounded milestone-4 acceptance. README.md in this directory records
+their current disposition; this file is not the active implementation backlog.
+
 Outcome and compatibility boundary
 
 When Starship runs remote-chrome snap and Snap has no notification daemon,

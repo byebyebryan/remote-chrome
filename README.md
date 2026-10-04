@@ -2,203 +2,94 @@
 
 [![CI](https://github.com/byebyebryan/remote-chrome/actions/workflows/ci.yml/badge.svg)](https://github.com/byebyebryan/remote-chrome/actions/workflows/ci.yml)
 
-`remote-chrome` starts Google Chrome on a remote Linux host over Waypipe and can
-temporarily forward a local YubiKey to that host for WebAuthn/FIDO prompts.
+`remote-chrome` runs Chrome on another Linux machine over Waypipe, displays its
+notifications locally, and can temporarily forward a local YubiKey for
+WebAuthn/FIDO prompts. The browser profile stays on the remote machine.
 
-The common use case is a browser profile that must live on another machine, but
-still needs a physical security key attached to the local machine.
+The **display host** runs the command and has the Wayland desktop and physical
+key. The **browser host** runs Chrome. For `remote-chrome snap` on Starship,
+Starship is the display host and Snap is the browser host.
+
+This README covers installation and host setup. See:
+
+- [Usage and troubleshooting](docs/usage.md) for launch, reset, handoff, and cleanup.
+- [Configuration](docs/configuration.md) for options and environment defaults.
+- [Architecture](docs/architecture.md) for lifecycle ownership and notification contracts.
+- [Notification study and acceptance index](docs/studies/headless-notifications/README.md)
+  for dated evidence, roadmap reconciliation, and remaining acceptance limits.
+- [Contributing](CONTRIBUTING.md) for development dependencies and checks.
 
 ## Requirements
 
-### SSH
+### SSH and browser transport
 
-You need SSH access from the local host to the remote host.
+Configure SSH from the display host to the browser host. Detached launches and
+YubiKey forwarding require noninteractive authentication through a key, agent,
+or existing control connection. `launch --foreground` can use interactive SSH
+for Chrome transport; forwarding still needs noninteractive SSH.
 
-- `remote-chrome launch --foreground HOST` can use normal interactive SSH.
-- The default detached tmux launch requires noninteractive SSH, such as an SSH
-  key, agent, or an already-open SSH control connection.
-- YubiKey forwarding requires noninteractive SSH because USB/IP setup runs
-  multiple remote commands.
+| Host | Required commands and environment |
+| --- | --- |
+| Display | `bash`, `ssh`, `waypipe`, a graphical Wayland session, and `tmux` for detached mode |
+| Browser | `bash`, `waypipe`, `xdg-dbus-proxy`, `secret-tool` (libsecret), `ksecretd` (KWallet/Secret Service), `busctl` (systemd), and the selected Chrome executable |
+| Both, with notifications enabled | `python3` |
+| Both, for interactive headless notifications | Python D-Bus and GLib bindings (`python-dbus` and `python-gobject` on Arch; `python3-dbus` and `python3-gi` on Debian) |
+| Display, for existing-daemon informational forwarding | `notify-send` (libnotify); `busctl` detects body markup support |
+| Display, for bounded notification diagnostics, cleanup, and incoming stop requests | `timeout` (coreutils) |
+| Browser, for `stop` at desktop handoff | `tmux`, `ssh`, and `timeout`; SSH back to the display host enables its cleanup request |
 
-### Chrome Over Waypipe
+Interactive notifications also need a display-host notification daemon that
+advertises body and action support. Missing bindings or unsupported capabilities
+produce a warning and let the secure browser launch continue. Disabling
+notifications removes their Python requirement.
 
-Local host requirements:
+Chrome starts with `--ozone-platform=wayland --disable-gpu
+--disable-features=Vulkan --new-window`. Waypipe and the browser are installed by
+the user; the launcher does not install packages.
 
-- `bash`
-- `ssh`
-- `waypipe`
-- `tmux`
-- `python3` and `notify-send` (from `libnotify`) for the notification relay
-- Optional Python D-Bus and GLib bindings (`python-dbus`, `python-gobject` on Arch;
-  `python3-dbus`, `python3-gi` on Debian) enable interactive notifications
-- `busctl` (from `systemd`) to detect local notification markup support;
-  without it, relayed bodies use plain text
-- a graphical Wayland session
+### Secure browser storage
 
-Remote host requirements:
+Every launch uses a filtered proxy to the browser host's normal user session
+bus. It permits Secret Service and notifications while hiding desktop portals,
+so the GTK file chooser travels over Waypipe. Before Chrome starts, a Safe
+Storage lookup must succeed; secret output is discarded. Chrome always receives
+`--password-store=gnome-libsecret`, and caller overrides are rejected.
 
-- `bash`
-- `waypipe`
-- `xdg-dbus-proxy`
-- `secret-tool` (from `libsecret`)
-- `ksecretd` (from the remote desktop's Secret Service/KWallet package)
-- `busctl` (from `systemd`)
-- `python3` for the notification relay
-- Optional Python D-Bus and GLib bindings enable the headless notification endpoint
-- `google-chrome-stable`
+A missing key/service or canceled wallet prompt aborts launch. Unlock the wallet
+and retry. An existing Secret Service owner is preserved; otherwise the
+bootstrap owns and cleans the `ksecretd` it starts. See the
+[secure-session contract](docs/architecture.md#secure-browser-bootstrap) and
+[browser identity configuration](docs/configuration.md#browser-and-session).
 
-The launcher starts Chrome with:
+### YubiKey forwarding
 
-```bash
---ozone-platform=wayland --disable-gpu --disable-features=Vulkan --new-window
-```
+Forwarding is automatic when a local key matches the configured USB ID
+(`1050:0407` by default). Chrome-only sessions do not need USB/IP tools.
 
-Waypipe is intentionally kept as a prerequisite rather than installed by this
-script. Package names and setup differ enough across distros that automatic
-installation would add churn and surprising behavior.
+| Host | Additional forwarding requirements |
+| --- | --- |
+| Display | `usbip`, `ss` (iproute2), `timeout` (coreutils), and sudo for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and starting/stopping `usbipd` |
+| Browser | `usbip`, `timeout`, passwordless scoped sudo for `modprobe vhci-hcd`, `usbip attach`, `usbip port`, and `usbip detach` |
+| Browser, for verified FIDO readiness | `fido2-token` (libfido2) and read/write access to the matching FIDO hidraw device as the Chrome user |
 
-### Secure Chrome Session
+Without `fido2-token`, an accessible matching udev/hidraw device is a
+lower-confidence USB-only fallback. A detected or explicitly required key makes
+forwarding a launch prerequisite: failed module, sudo, SSH, or readiness checks
+abort before Chrome starts.
 
-Every launch runs an embedded bootstrap inside the remote Waypipe environment.
-It connects `xdg-dbus-proxy` to the normal remote user session bus (normally
-`DBUS_SESSION_BUS_ADDRESS=/run/user/1000/bus`, normalized to the D-Bus
-`unix:path=` form) with a filtered policy that permits only
-`org.freedesktop.secrets` and `org.freedesktop.Notifications`. The portal
-service `org.freedesktop.portal.Desktop` is intentionally hidden, so
-Chromium's GTK file chooser remains a Waypipe-rendered chooser instead of
-using the remote desktop portal.
+USB/IP gives the browser host access to the key. The reverse SSH listener binds
+to browser-host loopback, but the display host's `usbipd` may listen on network
+interfaces, depending on the installed daemon. Use trusted hosts and inspect
+the daemon's exposure. See [Security policy](SECURITY.md).
 
-Before Chrome starts, the bootstrap looks up Chrome Safe Storage through that
-proxy with `secret-tool lookup application chrome xdg:schema
-chrome_libsecret_os_crypt_password_v2`; the secret output is discarded. A
-missing service/key, a canceled KWallet prompt, a missing proxy, or any failed
-lookup aborts the launch. There is no basic/password-file fallback, and the
-bootstrap always passes `--password-store=gnome-libsecret`. User-supplied
-`--password-store` arguments are rejected. A nonzero Chrome status is
-preserved; a successful Chrome exit becomes nonzero if exact owned cleanup
-remains unresolved.
+#### Headless remote hosts
 
-An existing `org.freedesktop.secrets` owner is reused and is never stopped. If
-there is no owner, the bootstrap starts `ksecretd` inside the Waypipe remote
-environment and cleans only that exact process, together with its exact proxy
-socket, on success, failure, `INT`, `TERM`, or `HUP`. The `doctor` command only
-checks command availability and SSH reachability; it never performs a wallet
-lookup or unlocks a wallet.
+On a desktop, systemd-logind normally grants token access to the active seat
+through `uaccess`. After a headless reboot, that seat may belong to a greeter
+such as `sddm`, leaving an SSH-launched browser unable to open the FIDO device.
 
-After a cold boot, the first launch may show a KWallet/Secret Service unlock
-prompt. Unlock it and retry if the prompt is canceled; secure failure is
-deliberate so Chrome cannot silently fall back to weaker storage. An unattended
-reboot also needs a pre-login network connection so SSH can reach the host;
-the current working assumption is that wired networking provides this path, but
-unattended reboot reachability has not been reboot-tested and remains a risk.
-Wi-Fi/NetworkManager remediation is outside this launcher and deferred.
-
-Google Chrome and Chromium use separate built-in Safe Storage identities:
-
-```text
-google-chrome-stable, google-chrome, chrome -> application=chrome
-  xdg:schema=chrome_libsecret_os_crypt_password_v2
-chromium, chromium-browser -> application=chromium
-  xdg:schema=chromium_libsecret_os_crypt_password_v2
-```
-
-The Chromium values are the conventional libsecret mapping and can be
-overridden with the two environment variables below if an existing profile
-uses different metadata.
-
-For an unknown custom executable, set both values explicitly before launching:
-
-```bash
-export REMOTE_CHROME_SECRET_APPLICATION=my-browser
-export REMOTE_CHROME_SECRET_SCHEMA=my_browser_libsecret_os_crypt_password_v2
-remote-chrome launch remote-host --chrome-command /opt/my-browser
-```
-
-The launcher fails with actionable guidance when an unknown executable has no
-explicit mapping.
-
-### Remote Notifications
-
-Notifications are enabled by default and travel through a per-session `ssh -R`
-unix socket to this machine's notification daemon. Chrome needs a compatible
-notification service behind its filtered D-Bus proxy; permitting the name
-alone does not enable native notifications.
-
-If the remote user bus already has a notification daemon, the launcher
-preserves it and uses the existing informational relay. If no daemon owns the
-name, the launcher starts a session-owned endpoint before Chrome. This endpoint
-negotiates body and action support with the local daemon and relays default
-clicks, offered buttons, replacements, and closes in both directions. It never
-steals a service name. Only one headless endpoint can be active per remote user
-bus; a second managed launch must stop the first session or disable notifications.
-
-```bash
-remote-chrome remote-host --no-notifications   # keep remote notifications off this machine
-export REMOTE_CHROME_NOTIFICATIONS=0           # same, for every launch
-export REMOTE_CHROME_NOTIFICATION_APPS=chrome,chromium  # substring allowlist, default: chrome
-```
-
-Allowlist terms are comma-separated, case-insensitive substrings and must not
-contain spaces. `--no-notifications` disables the relay and session-owned
-endpoint. The proxy permission stays in place; if the remote bus has no
-compatible daemon, Chrome may use its own notification windows. Missing
-bindings, unsupported local capabilities, or a broken socket produce a warning
-while allowing the secure browser launch to continue.
-
-Forwarding from an existing remote daemon is informational: clicks and buttons
-are not routed back. The session-owned headless endpoint supports them when
-the local daemon advertises actions. Inline replies and remote icon files are
-not transferred. Bodies retain `<b>`, `<i>`,
-and `<u>` formatting when the local daemon supports markup; line breaks and
-`<br>` are preserved. Other tags and all attributes are removed, while literal
-text and entities are escaped for display. Summaries stay plain text. If local
-markup support cannot be detected, bodies fall back to plain text. A live
-relay session is probed end to end by `doctor HOST`; per-session activity is
-logged next to the session state in
-`${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-notify-<session>.state.log`.
-
-Run `remote-chrome stop` on the browser host at office handoff to stop incoming
-sessions and release an owned endpoint. A desktop notification daemon can then
-acquire the name. Update the launcher on both hosts before resetting an
-upgraded session. After upgrading an already running session, `remote-chrome
-reset` restarts Chrome with the new bootstrap; Chrome does not reliably retry
-native notification setup after choosing its fallback.
-
-### YubiKey Forwarding
-
-Local host requirements:
-
-- `usbip` (only when a configured key is detected or forwarding is forced)
-- `ss` from `iproute2` (only when forwarding)
-- `timeout` from `coreutils` (only when forwarding)
-- a local YubiKey with the configured vendor/product (default `1050:0407`)
-- `sudo` access for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and
-  starting/stopping `usbipd`
-
-Remote host requirements:
-
-- `usbip`
-- `timeout` from `coreutils` for bounded USB/IP list/attach/detach operations
-- passwordless remote `sudo` for `modprobe vhci-hcd`, `usbip attach`,
-  `usbip port`, and `usbip detach`
-- `libfido2` for preferred `fido2-token` verification (a lower-confidence
-  hidraw/udev check is used when it is unavailable)
-- read/write access to the matching FIDO `hidraw` device for the remote Chrome
-  user
-
-Passwordless remote `sudo` is a hard requirement for YubiKey forwarding. The
-remote commands run over noninteractive SSH and cannot complete a sudo prompt.
-
-#### Headless Remote Hosts
-
-On a normal desktop, systemd-logind grants security-token access to the active
-graphical-seat user through the `uaccess` tag. After a headless reboot, the
-active seat may instead belong to a display-manager greeter such as `sddm`, so
-an SSH-launched Chrome process cannot open the forwarded FIDO device.
-
-For a dedicated remote Chrome host, use a narrow system group and udev rule
-instead of enabling graphical autologin. The example below covers the default
-YubiKey USB ID; adjust the IDs when `--yubikey-usb-id` is customized:
+For a dedicated browser host, use a narrow system group and udev rule. This
+example covers the default USB ID; adjust it for a different key:
 
 ```bash
 getent group remote-chrome >/dev/null || sudo groupadd --system remote-chrome
@@ -209,21 +100,19 @@ EOF
 sudo udevadm control --reload-rules
 ```
 
-Reconnect the forwarded device (or reboot) and start a new SSH/Chrome session
-so the new supplementary group is present. `fido2-token -L` on the remote host
-must list the exact YubiKey as that user before Chrome starts.
+Reconnect the forwarded device (or reboot), then start a new SSH/Chrome session
+so the supplementary group is present. As the Chrome user, `fido2-token -L`
+must list the exact forwarded key. Graphical autologin is unnecessary.
 
-#### Expire Reverse Tunnels After a Forwarding-Host Reboot
+#### Expire reverse tunnels after a forwarding-host reboot
 
-The forwarding SSH client sends keepalives while it is running. A hard reboot
-of that client cannot close its connection, however, and the remote SSH server
-may otherwise retain the old reverse-forward listener until TCP eventually
-times out. A later launch then cannot bind the default port `3240`.
+A hard reboot cannot close the display host's SSH connection. The browser
+host's SSH server may retain the reverse listener until TCP times out, blocking
+a later bind to port `3240`.
 
-On a dedicated remote host, add a narrowly matched server-side keepalive. For
-example, create `/etc/ssh/sshd_config.d/60-remote-chrome-keepalive.conf` on the
-remote host, replacing both placeholders with the remote Chrome account and a
-stable address for the forwarding host (such as its Tailscale IP):
+On a dedicated browser host, create
+`/etc/ssh/sshd_config.d/60-remote-chrome-keepalive.conf`, replacing the account
+and stable display-host address (for example, its Tailscale IP):
 
 ```text
 Match User <remote-user> Address <forwarding-host-ip>
@@ -232,444 +121,107 @@ Match User <remote-user> Address <forwarding-host-ip>
 Match all
 ```
 
-Validate and reload the server without dropping healthy sessions:
+Validate and reload without dropping healthy sessions:
 
 ```bash
 sudo sshd -t
 sudo systemctl reload sshd
 ```
 
-These settings make `sshd` probe only matching sessions and normally bound the
-lifetime of a stale listener to roughly one minute after an unclean client
-restart. The launcher also checks the remote port before stopping an existing
-Chrome; when it finds a listener, it reports the collision and leaves Chrome
-untouched.
+Matching stale listeners normally expire in roughly a minute. The launcher
+also checks for a port collision before stopping existing Chrome and leaves
+Chrome untouched when the forwarding port is occupied.
 
-### Remote Host Setup (Arch)
+## Installation
 
-On an Arch-family remote host, install the remote-side packages:
+### Arch package examples
 
-```bash
-ssh remote-host 'sudo pacman -S --needed waypipe xdg-dbus-proxy libsecret systemd usbip coreutils libfido2 python3'
-```
-
-Install Google Chrome on the remote host through the appropriate channel for
-that machine. Package names for `ksecretd` vary by desktop/KWallet version;
-`remote-chrome doctor HOST` checks the actual executable names before launch.
-
-## Local Setup
-
-On an Arch-family local host, install the runtime dependencies:
+On the display host, install transport and notification dependencies:
 
 ```bash
-sudo pacman -S --needed waypipe tmux usbip iproute2 coreutils python3 libnotify
+sudo pacman -S --needed openssh waypipe tmux coreutils python python-dbus python-gobject libnotify
 ```
 
-Clone the repository:
+On the browser host:
+
+```bash
+sudo pacman -S --needed openssh waypipe tmux coreutils xdg-dbus-proxy libsecret systemd python python-dbus python-gobject
+```
+
+Install Chrome and the package supplying `ksecretd` through the appropriate
+channels for that host. If forwarding is wanted, also install `usbip` and
+`coreutils` on both hosts, `iproute2` on the display host, and `libfido2` on the
+browser host. Configure scoped sudo and FIDO access as described above.
+
+### Install the launcher
+
+Install the launcher on **both hosts** so incoming stop requests can ask the
+display host to clean up. Clone the repository:
 
 ```bash
 git clone https://github.com/byebyebryan/remote-chrome.git
 cd remote-chrome
 ```
 
-For an editable checkout, link the launcher into the user-local executable
-directory:
+Link an editable checkout, or install a standalone copy:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
 ln -s "$PWD/bin/remote-chrome" "$HOME/.local/bin/remote-chrome"
 ```
 
-Alternatively, install a standalone copy:
-
 ```bash
 install -Dm755 bin/remote-chrome "$HOME/.local/bin/remote-chrome"
 ```
 
-Make sure `$HOME/.local/bin` is on `PATH`. Add this to the appropriate shell
-startup file if it is not already configured:
+Ensure `$HOME/.local/bin` is on `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-Verify the local setup:
-
-```bash
 command -v remote-chrome
 remote-chrome --help
 ```
 
-When forwarding is expected, check the configured key with `usbip list -l`.
-Chrome-only sessions do not require a YubiKey or the `usbip` tools.
+## Everyday workflow
 
-## Launch Chrome
-
-Start Chrome on the remote host in a detached tmux session:
+On the display host:
 
 ```bash
 remote-chrome remote-host
-```
-
-The bare form is the everyday "make this connection usable" command. If its
-managed tmux session already exists, a repeated invocation resets that exact
-Chrome/Waypipe stream instead of trying to determine whether a suspended stream
-is still healthy.
-
-Use the explicit `launch` subcommand when you require a fresh session. It
-refuses to reuse an existing tmux session:
-
-```bash
-remote-chrome launch remote-host
-```
-
-The default tmux session name is `remote-chrome-HOST`, with characters that are
-awkward for tmux targets replaced by underscores. For example, `remote.example`
-becomes `remote-chrome-remote_example`.
-
-Check, attach to, or stop the session:
-
-```bash
 remote-chrome status remote-host
-remote-chrome doctor remote-host
 remote-chrome attach remote-host
 remote-chrome reset remote-host
 remote-chrome stop remote-host
 ```
 
-`status HOST` performs read-only checks for the current tmux
-windows, recorded USB/IP bind, owned `usbipd`, SSH control socket, remote
-YubiKey readiness, and notification listener/helper ownership. Notification
-status reports the selected backend, capabilities, lost transport, and recent
-delivery failures. It sends no notifications. It returns nonzero and identifies
-the failing check when a resource is stale or unreachable. `status` without a host is the managed-state
-overview. `doctor HOST` checks prerequisites
-for local display/commands, detached SSH, remote Waypipe/Chrome plus the
-secure-session dependencies, and USB/IP module prerequisites; it never loads
-modules, performs a Secret Service lookup, unlocks a wallet, or changes USB/IP
-state. When a notification relay is live, it also sends a visible probe
-notification and checks its delivery through the local daemon.
-
-Pass extra Chrome arguments after `--`:
-
-```bash
-remote-chrome launch remote-host -- --profile-directory=Default
-```
-
-Do not pass `--password-store`; the launcher rejects that option and supplies
-`--password-store=gnome-libsecret` only after the proxied Safe Storage check
-passes.
-
-Run in the foreground instead of tmux:
-
-```bash
-remote-chrome launch remote-host --foreground
-```
-
-Detached tmux mode is the default because it keeps Chrome and Waypipe alive if
-the launching terminal exits, and it gives you a stable place to inspect logs:
-
-```bash
-remote-chrome attach remote-host
-tmux capture-pane -pt remote-chrome-remote-host:chrome
-```
-
-To force that reset explicitly after suspend or network loss:
-
-```bash
-remote-chrome reset remote-host
-```
-
-For example, run `remote-chrome reset snap` on Starship when the forwarded
-YubiKey needs reconnecting. Reset supports the normal `chrome` and `yubikey`
-windows together: it cleans up the old USB/IP forwarding, starts it again,
-waits for FIDO readiness, and recreates Chrome. It restarts the browser, so
-save any in-page work first.
-
-`reset` is a managed restart, not transparent Waypipe stream resumption. It
-uses the exact Waypipe SSH reverse socket and remote process group from the
-selected `chrome` pane, warns that unsaved in-page state may be lost, then
-recreates the recorded canonical Waypipe command in the same tmux session. A
-legacy pre-1.3 session may fall back to its direct pane command; wrapped pane
-metadata is never decoded. It refuses ambiguous
-or unreachable identities and never broad-kills remote Chrome; use `--yes` only
-to skip the restart or narrowly-confirmed-absence warning (ownership checks and
-safety refusals still apply). `remote-chrome reset` without a host selects the
-sole default managed session, and asks for a host or `--session NAME` when
-several exist. The bare `remote-chrome HOST` form passes `--yes` automatically
-only after it has found that exact managed tmux session.
-
-New sessions record their YubiKey mode, so reset preserves `--no-yubikey`,
-automatic detection, or required forwarding. Recorded forwarding state also
-restores the USB device ID and port. Older sessions without mode metadata keep
-the legacy automatic detection behavior.
-
-When run from inside tmux, `attach` switches the current client instead of
-trying to create a nested tmux client. A successful detached launch prints the
-exact attach, status, and stop commands, including a custom session name.
-
-A user systemd service would also work, but tmux keeps this tool dependency-light
-and easy to inspect.
-
-### Return To The Remote Host's Desktop
-
-If Chrome is still remoted from Starship to Snap when you return to Snap,
-opening local links can send them to that existing browser. On Snap, run:
-
-```bash
-remote-chrome stop
-```
-
-New launches leave a private runtime record on the browser host. Bare `stop`
-stops local outgoing sessions and discovers recorded incoming sessions. For
-each live incoming session, it makes one SSH stop request with a two-second
-limit. An accepted request runs the display host's normal cleanup independently.
-It then signals the exact recorded browser bootstrap locally if still needed,
-letting its existing Chrome/proxy cleanup run even if the display host could
-not be reached. Dead records and records from a previous boot are discarded.
-
-Tracking is best effort and never blocks a launch. There is no background
-service or automatic retry. If display host cleanup could not be requested or
-completed, its own USB/IP recovery state remains available for a later `stop`
-there. `status` shows incoming records as live or stale without changing them.
-
-Stop and launch once with the updated launcher to register incoming sessions. For an
-older untracked session, or to explicitly select a display host, use:
-
-```bash
-remote-chrome stop snap --from starship
-```
-
-The target name must match the original launch's SSH name. Omit it to stop
-every managed session on Starship; `--session NAME` selects a custom session.
-This explicit form requires noninteractive SSH to Starship and returns failure
-if SSH or source cleanup fails.
-
-### Existing Remote Chrome Processes
-
-Chrome has single-instance behavior per user-data directory. If Chrome is
-already running on the remote host, a new invocation can delegate to that
-existing browser process, which means the tab or window opens in the remote
-host's normal desktop session instead of the Waypipe session.
-
-`--new-window` does not fully solve this because the existing browser process
-can still handle the request.
-
-By default, `remote-chrome launch` checks for an existing remote Chrome browser
-process and asks before killing it. Confirm the prompt to kill it, or answer no
-to cancel the launch. Use these options to change that:
-
-```bash
-remote-chrome launch remote-host --allow-existing
-remote-chrome launch remote-host --yes
-```
-
-Use `--allow-existing` only when you know the existing browser process uses a
-different `--user-data-dir`. Use `--yes` to skip the prompt and always kill the
-existing browser, after saving anything important in it.
-
-## Forward A YubiKey
-
-Launches use a tri-state YubiKey mode. By default, the launcher checks local
-sysfs for the configured USB vendor/product and automatically forwards a
-detected key. A detected key makes forwarding an expected prerequisite; module,
-sudo, SSH, or readiness failures abort the launch with diagnostics. If no key is
-detected, Chrome starts without the USB/IP prerequisites.
-
-Force forwarding (and fail if the key or prerequisites are unavailable) with:
-
-```bash
-remote-chrome remote-host --with-yubikey
-```
-
-Explicitly skip detection and forwarding, even when a key is connected, with:
-
-```bash
-remote-chrome remote-host --no-yubikey
-```
-
-For a foreground session, forwarding starts before Chrome, waits until the
-remote key enumerates as FIDO/hidraw, and cleans up when Chrome exits:
-
-```bash
-remote-chrome launch remote-host --foreground --with-yubikey
-```
-
-While forwarding is active, the YubiKey is attached to the remote host, so local
-apps may not be able to use it. Detached mode starts the `yubikey` tmux window,
-waits for readiness (up to 15 seconds by default), and only then creates the
-`chrome` window. A timeout or child failure removes the session and rolls back
-the exact resources it acquired.
-
-If a display-powered hub disconnects the key, the helper checks for its return
-every five seconds and attempts to restore forwarding without restarting Chrome.
-Recovery requires the recorded USB port and configured USB ID, the original
-session's state and SSH tunnel, and confirmed absence of the old remote import.
-It never detaches a surviving import or selects a key at another port. A failed
-attempt retains the recovery ledger and prints a `remote-chrome reset HOST`
-fallback; it does not keep retrying or request a sudo password in the background.
-
-Closing the remote Chrome browser only exits the `chrome` tmux window. The
-`yubikey` window and forwarding keep running until you stop the whole session.
-Stopping the session is the explicit teardown for both:
-
-```bash
-remote-chrome stop HOST
-```
-
-That sends the forwarding process a signal, and it detaches/unbinds the YubiKey
-during cleanup.
-
-To stop every default managed session and every YubiKey forwarding using the
-default runtime state path on the local machine, omit the host:
-
-```bash
-remote-chrome stop
-```
-
-Use the matching read-only overview before teardown to list default managed
-tmux sessions, their windows, recorded YubiKey forwarding, provisional setup
-locks, and standard-runtime orphan `usbipd` PID files:
-
-```bash
-remote-chrome status
-```
-
-This only kills tmux sessions named with the configured
-`REMOTE_CHROME_SESSION_PREFIX` followed by `-` (by default,
-`remote-chrome-*`), so it leaves an exact-name `remote-chrome` session and
-unrelated tmux sessions alone. YubiKey state files are cleaned independently,
-which also tears down forwarding whose tmux session has already disappeared.
-Use `stop HOST` for a custom `--session` name that does not use the default
-prefix, or when using a custom YubiKey control socket.
-
-The tool records provisional lifecycle state, the exact local bus ID, and any
-`usbipd` process it started in a state file beside the SSH control socket.
-Cleanup handles interrupted setup, only detaches/unbinds that recorded device,
-never stops a pre-existing or unverified `usbipd`, and leaves a tool-started
-daemon running while other USB/IP exports still exist. If any owned cleanup
-step fails, stop reports the failure, keeps the state/log for a later retry,
-and returns nonzero. `status HOST` reports tmux windows and the managed YubiKey
-phase/readiness without changing anything; it also exposes a provisional setup
-lock that exists before the first state write. Cleanup callers for one state
-serialize, so a parent stop waits for a detached forwarding child to finish
-before taking over. If the remote host rebooted and its `vhci_hcd` import
-controller no longer exists, cleanup treats that as proof that its prior USB/IP
-attachment is gone; an unreachable host or unreadable sysfs remains ambiguous
-and keeps recovery state. Hostless stop may reconcile only a daemon whose
-standard PID file, `/proc` command name, and exact `--pid` path all verify as
-tool-owned,
-with no remaining USB/IP exports. If a prior cleanup leaves a
-`phase=cleanup-failed` ledger, a later launch performs bounded reconciliation
-probes (and removes only exact stale evidence) and clears it only when the
-recorded remote attachment, local bind, tunnel, and owned daemon are
-demonstrably gone (or intentionally retained by policy).
-Active/ready forwarding state remains a launch duplicate and must be stopped
-explicitly; unreachable or ambiguous probes keep the ledger for a retry.
-
-Runtime state, logs, bootstrap scripts, and locks must have the expected type
-and belong to the current user. Unsafe paths are preserved and rejected before
-launch or reset can stop Chrome. State and bootstrap publication use private
-temporary files, and retiring helpers can clean up only their own attempt.
-Daemon PID files may also belong to root; cleanup still verifies the exact
-daemon before using them.
-
-## Configuration
-
-Chrome defaults:
-
-```bash
-REMOTE_CHROME_COMMAND=google-chrome-stable
-REMOTE_CHROME_SESSION_PREFIX=remote-chrome
-```
-
-YubiKey defaults:
-
-```bash
-REMOTE_CHROME_YUBIKEY_USB_ID=1050:0407
-REMOTE_CHROME_USBIP_PORT=3240
-REMOTE_CHROME_YUBIKEY_SOCKET=${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-remote-host.sock
-REMOTE_CHROME_STOP_USBIPD=1
-REMOTE_CHROME_YUBIKEY_TIMEOUT=15
-REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT=30
-REMOTE_CHROME_YUBIKEY_READY_GRACE=5
-REMOTE_CHROME_SSH_TIMEOUT=5
-```
-
-A non-default `REMOTE_CHROME_USBIP_PORT` or `--yubikey-port PORT` is used by
-the daemon, SSH tunnel, and remote USB/IP clients. Scoped remote sudo rules
-must also permit `usbip --tcp-port PORT attach` for that port; the default
-port keeps the existing `usbip attach` command.
-
-Set `REMOTE_CHROME_STOP_USBIPD=0` to leave a tool-started daemon running after
-cleanup.
-
-The readiness timeout starts after remote USB/IP attach; detached mode also has
-a separate bounded bootstrap timeout for module loading, daemon startup,
-binding, tunnel setup, and attach. The parent launcher allows a small additional
-readiness grace period (5 seconds by default) after the child timeout so a final
-state write or in-flight SSH probe can be observed. Exact remote detach may use
-`sudo usbip port` because some hosts restrict USB/IP port visibility to root.
-YubiKey SSH commands and control requests have a complete request deadline
-(`REMOTE_CHROME_SSH_TIMEOUT`, 5 seconds by default) with a one-second kill grace.
-An incomplete control request preserves its socket and recovery ledger; cleanup
-still attempts the remaining local resources. Invalid or zero deadlines use the
-default. The background hub-recovery probes retain their existing bounded limits.
-
-Before tmux or Chrome starts, the launcher checks the running local and remote
-kernels, their `/lib/modules/<kernel>` trees, `usbip-host`/`vhci-hcd`, command
-prerequisites, and required sudo paths. Module mismatch diagnostics include the
-running kernel and available module directories and recommend rebooting after a
-kernel upgrade. The launcher never installs packages, copies modules, or
-reboots automatically. When `fido2-token` is installed, it must confirm the
-exact device. The hidraw/udev fallback is used only when `fido2-token` is
-unavailable, requires read/write access, and is labeled USB-only.
-
-## Security Notes
-
-USB/IP gives the remote host access to the forwarded USB device. Only forward to
-hosts you trust.
-
-The script uses an SSH reverse tunnel bound to `127.0.0.1` on the remote side.
-The local `usbipd` daemon may still listen on the local host's network
-interfaces while forwarding is active, depending on your distro's `usbipd`
-behavior. `remote-chrome stop HOST` tears the forwarding down together with the
-Chrome session.
-
-The secure-session proxy is deliberately scoped to the remote user's existing
-session bus, Secret Service, and notifications. It does not grant Chrome access
-to desktop portals, does not print or persist the Safe Storage value, and does
-not stop a pre-existing Secret Service owner. If Chrome exits or the Waypipe
-process group is reset, only proxy/ksecretd resources owned by that bootstrap
-are cleaned.
-
-The notification relay adds a per-session reverse unix socket that carries
-notification records and, for the owned endpoint, scoped action/close callbacks;
-no general D-Bus access crosses that socket, and it is removed with the
-session. Any same-user process on the remote host can send records to it, so
-relayed notifications are treated as untrusted input: bodies permit only basic
-formatting tags without attributes, other text is sanitized, content is
-length-limited, delivered without shell interpolation, and rate-limited.
-
-## Development
-
-Install the check dependencies and run the repository checks:
-
-```bash
-sudo pacman -S --needed shellcheck tmux python python-dbus python-gobject dbus xdg-dbus-proxy
-./scripts/check
-```
-
-The check script runs Bash syntax validation, ShellCheck, the command-level
-test suite, and `git diff --check`. The same checks run in GitHub Actions.
-The suite checks real tmux pane formats and exact session/window targeting on
-private sockets with empty configurations. Notification tests exercise real
-private D-Bus daemons, endpoint/listener processes, and the generated secure
-bootstrap with a disposable notification fixture and fake browser. SSH and
-USB/IP operations remain mocked; graphical host acceptance is recorded separately.
-The [headless notification acceptance record](docs/studies/headless-notifications/implementation.txt)
-describes the real-host checks and their scope.
-
-## License
+Repeating `remote-chrome HOST` resets its existing managed session. Reset
+restarts Chrome and forwarding using the recorded settings, so save in-page
+work first. To change settings, stop and explicitly `launch` again; adding
+launch options to a repeated bare command does not reconfigure that session.
+
+At the browser host's desktop, run `remote-chrome stop` to stop tracked incoming
+sessions and release an owned notification endpoint. It makes a bounded
+best-effort cleanup request to each display host and stops the exact local
+browser bootstrap if needed.
+
+Notifications are enabled by default. An existing browser-host daemon uses
+informational mirroring; an otherwise headless bus can use the session-owned
+endpoint for clicks and closes. This follows D-Bus contracts and capability
+negotiation, with no Chrome version pin. See
+[notification behavior](docs/usage.md#notifications).
+
+For diagnostics, `status` sends no notifications; `doctor HOST` checks
+prerequisites and sends a **visible notification probe** when a relay is live.
+See [diagnostics and recovery](docs/usage.md#diagnostics-and-recovery).
+
+Updating installed launchers leaves active sessions running. Update both hosts
+before a deliberate reset activates a new bootstrap. Unattended reboot
+reachability, wallet unlock, and fresh FIDO access require separate host
+acceptance; installing the launcher alone does not establish them.
+
+## Development and license
+
+Run `./scripts/check` with the dependencies in [Contributing](CONTRIBUTING.md).
+Graphical and hardware acceptance are separate from the isolated CI suites.
 
 Released under the [MIT License](LICENSE).

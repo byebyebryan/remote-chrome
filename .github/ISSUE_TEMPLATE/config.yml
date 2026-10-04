@@ -2,4 +2,4 @@ blank_issues_enabled: true
 contact_links:
   - name: Report a security vulnerability
     url: https://github.com/byebyebryan/remote-chrome/security/advisories/new
-    about: Report SSH, USB/IP, privilege-boundary, or hardware-token vulnerabilities privately
+    about: Report SSH, USB/IP, notification, privilege-boundary, or hardware-token vulnerabilities privately

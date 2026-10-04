@@ -1,6 +1,10 @@
 Headless remote-chrome notifications: feasibility study
 2026-10-02 | Snap -> private test environment | production HEAD 9c9256f
 
+Historical feasibility snapshot. The endpoint was implemented afterward.
+README.md in this directory reconciles the roadmap, later evidence, and
+remaining acceptance limits; ../../usage.md defines current behavior.
+
 Implementation roadmap update: roadmap.txt supersedes the initial release
 scope and effort estimate below. Its first milestone resolves the actions
 capability contract with a real callback path. The experiments here remain
@@ -212,13 +216,13 @@ Reproduction and evidence
 
 Run from the repository root on a host with the dependencies listed above:
 
-  rtk proxy python3 docs/studies/headless-notifications/study.py
+  python3 docs/studies/headless-notifications/study.py
 
 The script creates a unique private /tmp directory, prints observations,
 records results.json and logs there, and cleans up its owned processes on
 success or failure. It retains only disposable scratch files for inspection.
-The successful run's evidence is saved in the study directory as an
-uncommitted results.json artifact. These fixtures are study tools, not the
+The successful run's evidence is retained in this directory as the tracked
+results.json snapshot. These fixtures are study tools, not the
 proposed production service or a replacement for launcher regression tests.
 
 Primary references
