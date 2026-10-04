@@ -2275,6 +2275,32 @@ notify_stop_all() {
 }
 
 notify_start_listener() {
+  local notify_start_signal=0
+  local notify_start_published=0
+  local previous_traps code=0
+
+  previous_traps="$(trap -p INT TERM HUP)"
+  # Defer interruption until startup has captured the child identity and can
+  # roll it back. Before state publication, state-based stop cannot find it.
+  trap '[ "$notify_start_signal" -ne 0 ] || notify_start_signal=130' INT
+  trap '[ "$notify_start_signal" -ne 0 ] || notify_start_signal=143' TERM
+  trap '[ "$notify_start_signal" -ne 0 ] || notify_start_signal=129' HUP
+  notify_start_listener_impl || code=$?
+  if [ "$notify_start_signal" -ne 0 ]; then
+    trap '' INT TERM HUP
+    # Publication may have completed just before the signal was handled.
+    [ "$notify_start_published" -eq 0 ] || notify_stop_listener
+    code="$notify_start_signal"
+  fi
+  trap - INT TERM HUP
+  [ -z "$previous_traps" ] || eval "$previous_traps"
+  if [ "$notify_start_signal" -ne 0 ]; then
+    exit "$code"
+  fi
+  return "$code"
+}
+
+notify_start_listener_impl() {
   local self pid starttime attempt pending_state pending_log candidate
 
   [ -n "$notify_local_socket" ] || return 0
@@ -2306,13 +2332,23 @@ notify_start_listener() {
     return 1
   fi
   for ((attempt = 0; attempt < 50; attempt++)); do
+    [ "$notify_start_signal" -eq 0 ] || break
     [ -S "$notify_local_socket" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
-  if [ ! -S "$notify_local_socket" ]; then
+  if [ "$notify_start_signal" -ne 0 ] || [ ! -S "$notify_local_socket" ]; then
     notify_stop_process "$pid" "$starttime"
-    echo "remote-chrome notify: listener did not create $notify_local_socket (see $notify_log_file); notifications are not forwarded." >&2
+    if [ "$notify_start_signal" -ne 0 ]; then
+      if [[ -S "$notify_local_socket" && -O "$notify_local_socket" && ! -L "$notify_local_socket" ]]; then
+        rm -f -- "$notify_local_socket" 2>/dev/null || true
+      fi
+      if runtime_artifact_status "$notify_log_file"; then
+        rm -f -- "$notify_log_file" 2>/dev/null || true
+      fi
+    else
+      echo "remote-chrome notify: listener did not create $notify_local_socket (see $notify_log_file); notifications are not forwarded." >&2
+    fi
     return 1
   fi
   pending_state="$(mktemp -- "${notify_state_file}.tmp.XXXXXX")" || pending_state=""
@@ -2337,6 +2373,7 @@ notify_start_listener() {
     return 1
   fi
   chmod 600 -- "$notify_state_file" 2>/dev/null || true
+  notify_start_published=1
   return 0
 }
 

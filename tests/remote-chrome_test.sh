@@ -1752,6 +1752,82 @@ LISTENER_WRAPPER
   done
 )
 
+test_notify_startup_signals_reap_uncommitted_listener() (
+  local test_dir definition signal_name stage expected_status code pid birth
+  local trace signal_marker startup_parent=""
+  test_dir="$(mktemp -d)"
+  trap 'for trace in "$test_dir"/*.pid; do [ -f "$trace" ] || continue; read -r pid birth <"$trace"; notify_stop_process "$pid" "$birth"; done; rm -rf "$test_dir"' EXIT
+  export XDG_RUNTIME_DIR="$test_dir"
+  export REMOTE_CHROME_TEST_NOTIFY_LAUNCHER="$repo_root/bin/remote-chrome"
+  cat >"$test_dir/listener-wrapper" <<'LISTENER_WRAPPER'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+if os.environ["REMOTE_CHROME_TEST_NOTIFY_STAGE"] != "publication":
+    time.sleep(30)
+launcher = os.environ["REMOTE_CHROME_TEST_NOTIFY_LAUNCHER"]
+os.execv(launcher, [launcher, *sys.argv[1:]])
+LISTENER_WRAPPER
+  chmod +x "$test_dir/listener-wrapper"
+  script_path() { printf '%s\n' "$test_dir/listener-wrapper"; }
+  notify_remove_remote_socket() { :; }
+  definition="$(declare -f notify_pid_starttime)"
+  eval "${definition/notify_pid_starttime/notify_test_pid_starttime}"
+  notify_pid_starttime() {
+    local value
+    value="$(notify_test_pid_starttime "$1")" || return 1
+    [ -f "$trace" ] || printf '%s %s\n' "$1" "$value" >"$trace"
+    if [ "$stage" = identity ] && [ ! -f "$signal_marker" ]; then
+      : >"$signal_marker"
+      kill -"$signal_name" "$startup_parent"
+    fi
+    printf '%s\n' "$value"
+  }
+  sleep() {
+    if [ "$stage" = readiness ] && [ "$1" = 0.1 ] && [ ! -f "$signal_marker" ]; then
+      : >"$signal_marker"
+      kill -"$signal_name" "$startup_parent"
+    fi
+    command sleep "$@"
+  }
+  mv() {
+    command mv "$@" || return $?
+    if [ "$stage" = publication ] && [ "${*: -1}" = "$notify_state_file" ]; then
+      : >"$signal_marker"
+      kill -"$signal_name" "$startup_parent"
+    fi
+  }
+
+  for signal_name in INT TERM HUP; do
+    case "$signal_name" in INT) expected_status=130 ;; TERM) expected_status=143 ;; HUP) expected_status=129 ;; esac
+    for stage in identity readiness publication; do
+      export REMOTE_CHROME_TEST_NOTIFY_STAGE="$stage"
+      notify_prepare_session "$signal_name-$stage" ""
+      trace="$test_dir/$signal_name-$stage.pid"
+      signal_marker="$test_dir/$signal_name-$stage.signal"
+      code=0
+      (
+        trap - EXIT INT TERM HUP
+        trap ': >"${trace}.exit"' EXIT
+        startup_parent="$BASHPID"
+        notify_start_listener
+      ) >"$test_dir/output" 2>&1 || code=$?
+      [ "$code" -eq "$expected_status" ] ||
+        fail "$signal_name during $stage returned $code: $(cat "$test_dir/output")"
+      [ -f "${trace}.exit" ] || fail "$signal_name during $stage lost caller EXIT cleanup"
+      read -r pid birth <"$trace"
+      [ "$(notify_test_pid_starttime "$pid" 2>/dev/null || true)" != "$birth" ] ||
+        fail "$signal_name during $stage left an untracked startup listener running"
+      assert_file_missing "$notify_state_file"
+      assert_file_missing "$notify_local_socket"
+      assert_file_missing "$notify_log_file"
+      [ -z "$(find "$test_dir" -name '*.tmp.*' -print -quit)" ] ||
+        fail "$signal_name during $stage leaked a temporary state file"
+    done
+  done
+)
+
 test_notify_cleanup_ignores_untrusted_state() (
   local test_dir state_file pid birth
   test_dir="$(mktemp -d)"
@@ -1798,19 +1874,23 @@ test_notify_cleanup_preserves_changed_artifacts() (
 )
 
 test_notify_startup_uses_safe_runtime_files() (
-  local test_dir candidate code
+  local test_dir candidate code previous_traps
   test_dir="$(mktemp -d)"
   trap 'notify_stop_listener; rm -rf "$test_dir"' EXIT
   export XDG_RUNTIME_DIR="$test_dir"
   notify_prepare_session safe-files ""
   script_path() { printf '%s\n' "$repo_root/bin/remote-chrome"; }
   notify_remove_remote_socket() { :; }
+  trap ':' INT TERM HUP
+  previous_traps="$(trap -p EXIT INT TERM HUP)"
   printf 'unrelated\n' >"$test_dir/document"
   for candidate in "$notify_state_file" "$notify_log_file"; do
     ln -s "$test_dir/document" "$candidate"
     code=0
     notify_start_listener >"$test_dir/output" 2>&1 || code=$?
     [ "$code" -eq 1 ] || fail "startup accepted a state/log symlink"
+    [ "$(trap -p EXIT INT TERM HUP)" = "$previous_traps" ] ||
+      fail "failed listener startup changed caller cleanup traps"
     [ "$(cat "$test_dir/document")" = unrelated ] || fail "startup overwrote a symlink target"
     [ -L "$candidate" ] || fail "startup removed an unmanaged symlink"
     rm -- "$candidate"
@@ -1823,6 +1903,8 @@ test_notify_startup_uses_safe_runtime_files() (
   rmdir "$notify_state_file"
   ln -s "$test_dir/document" "${notify_state_file}.tmp"
   notify_start_listener
+  [ "$(trap -p EXIT INT TERM HUP)" = "$previous_traps" ] ||
+    fail "successful listener startup changed caller cleanup traps"
   [ "$(cat "$test_dir/document")" = unrelated ] || fail "pending state write followed a predictable symlink"
   [ -L "${notify_state_file}.tmp" ] || fail "startup removed an unrelated pending symlink"
   [[ -f "$notify_state_file" && ! -L "$notify_state_file" ]] || fail "startup did not publish regular state"
@@ -5830,6 +5912,7 @@ tests=(
   test_notify_stop_listener_reaps_recorded_process
   test_notify_cleanup_bounds_ssh_and_continues_stop
   test_notify_state_failure_reaps_startup_listener
+  test_notify_startup_signals_reap_uncommitted_listener
   test_notify_cleanup_ignores_untrusted_state
   test_notify_cleanup_preserves_changed_artifacts
   test_notify_startup_uses_safe_runtime_files
