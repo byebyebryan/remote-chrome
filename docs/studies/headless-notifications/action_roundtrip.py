@@ -798,7 +798,7 @@ def run_child(argv):
 class RoundTripStudy(Study):
     def __init__(self, output_path, delay_ms):
         super().__init__()
-        self.output_path = Path(output_path) if output_path else None
+        self.output_path = Path(output_path) if output_path else self.root / "results.json"
         self.delay_ms = delay_ms
         self.results.update({
             "prototype": "milestone-0-bidirectional-notification-actions",
@@ -1160,8 +1160,8 @@ class RoundTripStudy(Study):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default=str(HERE / "milestone0-results.json"),
-                        help="write evidence JSON (default: milestone0-results.json)")
+    parser.add_argument("--output",
+                        help="write evidence JSON (default: fresh study scratch/results.json)")
     parser.add_argument("--delay-ms", type=int, default=250,
                         help="fixture-only destination Notify delay for ordering-race checks")
     args = parser.parse_args(argv)
