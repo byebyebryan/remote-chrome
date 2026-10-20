@@ -13,10 +13,16 @@ test_yk_ssh_request_definition="$(declare -f yk_ssh_request)"
 test_suite_dir="$(mktemp -d)"
 trap 'rm -rf "$test_suite_dir"' EXIT
 mkdir -m 700 "$test_suite_dir/runtime" "$test_suite_dir/tmux" \
-  "$test_suite_dir/usbip-host"
+  "$test_suite_dir/usbip-host" "$test_suite_dir/module-sysfs" \
+  "$test_suite_dir/modules"
 export XDG_RUNTIME_DIR="$test_suite_dir/runtime"
 export TMUX_TMPDIR="$test_suite_dir/tmux"
 export REMOTE_CHROME_USBIP_HOST_SYSFS="$test_suite_dir/usbip-host"
+# Keep module evidence and fallback trees fixture-only; these tests must not
+# pass or fail based on modules loaded on the machine running the suite.
+export REMOTE_CHROME_MODULE_SYSFS_ROOT="$test_suite_dir/module-sysfs"
+export REMOTE_CHROME_MODULES_ROOT="$test_suite_dir/modules"
+export REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS="$test_suite_dir/vhci-driver"
 # Launch tests must not spawn real notification listeners; focused relay tests
 # exercise the notify helpers directly instead.
 export REMOTE_CHROME_NOTIFICATIONS=0
@@ -1229,7 +1235,7 @@ test_usbipd_state_write_failure_stops_before_daemon() (
   yk_usbip_port=3240
   yk_set_runtime_paths
   need() { :; }
-  yk_local_module_preflight() { :; }
+  yk_ensure_local_module_loaded() { :; }
   ss() { return 1; }
   yk_write_state() {
     events+="state "
@@ -3110,6 +3116,273 @@ test_second_start_preserves_live_legacy_state() (
   [ -z "$events" ] || fail "duplicate start cleaned legacy resources: $events"
 )
 
+setup_remote_module_script_fixture() {
+  local fixture_dir="$1"
+  mkdir -p "$fixture_dir/bin" "$fixture_dir/module-sysfs" "$fixture_dir/modules"
+  cat >"$fixture_dir/bin/uname" <<'REMOTE_MODULE_UNAME'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = "-r" ] || exit 2
+printf '%s\n' fixture-kernel
+REMOTE_MODULE_UNAME
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fixture_dir/bin/usbip"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fixture_dir/bin/timeout"
+  cat >"$fixture_dir/bin/modinfo" <<'REMOTE_MODULE_MODINFO'
+#!/usr/bin/env bash
+printf 'modinfo %s\n' "$*" >>"$REMOTE_CHROME_TEST_COMMAND_LOG"
+printf '%s\n' "$REMOTE_CHROME_TEST_MODULE_PATH"
+REMOTE_MODULE_MODINFO
+  cat >"$fixture_dir/bin/modprobe" <<'REMOTE_MODULE_MODPROBE'
+#!/usr/bin/env bash
+printf 'modprobe %s\n' "$*" >>"$REMOTE_CHROME_TEST_COMMAND_LOG"
+exit 98
+REMOTE_MODULE_MODPROBE
+  cat >"$fixture_dir/bin/sudo" <<'REMOTE_MODULE_SUDO'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >>"$REMOTE_CHROME_TEST_COMMAND_LOG"
+[ "$*" = "-n modprobe vhci-hcd" ] || exit 98
+exit "${REMOTE_CHROME_TEST_SUDO_STATUS:-17}"
+REMOTE_MODULE_SUDO
+  chmod +x "$fixture_dir/bin/uname" "$fixture_dir/bin/usbip" \
+    "$fixture_dir/bin/timeout" "$fixture_dir/bin/modinfo" \
+    "$fixture_dir/bin/modprobe" "$fixture_dir/bin/sudo"
+  REMOTE_CHROME_TEST_BIN="$fixture_dir/bin"
+  REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT="$fixture_dir/module-sysfs"
+  REMOTE_CHROME_TEST_VHCI_DRIVER_SYSFS="$fixture_dir/vhci-driver"
+  REMOTE_CHROME_TEST_MODULES_ROOT="$fixture_dir/modules"
+  REMOTE_CHROME_TEST_COMMAND_LOG="$fixture_dir/commands"
+  REMOTE_CHROME_TEST_MODULE_PATH="$fixture_dir/modules/fixture-kernel/vhci-hcd.ko"
+}
+
+remote_module_test_ssh() {
+  local remote_script="$1"
+  PATH="$REMOTE_CHROME_TEST_BIN:$PATH" \
+    REMOTE_CHROME_MODULE_SYSFS_ROOT="$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT" \
+    REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS="$REMOTE_CHROME_TEST_VHCI_DRIVER_SYSFS" \
+    REMOTE_CHROME_MODULES_ROOT="$REMOTE_CHROME_TEST_MODULES_ROOT" \
+    REMOTE_CHROME_TEST_COMMAND_LOG="$REMOTE_CHROME_TEST_COMMAND_LOG" \
+    REMOTE_CHROME_TEST_MODULE_PATH="$REMOTE_CHROME_TEST_MODULE_PATH" \
+    REMOTE_CHROME_TEST_SUDO_STATUS="${REMOTE_CHROME_TEST_SUDO_STATUS:-17}" \
+    bash -s <<<"$remote_script"
+}
+
+test_local_module_preflight_accepts_live_registered_driver_without_module_tree() (
+  local test_dir modinfo_marker
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  modinfo_marker="$test_dir/modinfo-called"
+  mkdir -p "$test_dir/module-sysfs/usbip_host" "$test_dir/usbip-host" \
+    "$test_dir/missing-modules"
+  printf '%s\n' live >"$test_dir/module-sysfs/usbip_host/initstate"
+  REMOTE_CHROME_MODULE_SYSFS_ROOT="$test_dir/module-sysfs"
+  REMOTE_CHROME_MODULES_ROOT="$test_dir/missing-modules"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  modinfo() { : >"$modinfo_marker"; return 1; }
+
+  yk_local_module_preflight || fail "live registered usbip-host did not pass without its module tree"
+  assert_file_missing "$modinfo_marker"
+)
+
+test_local_module_preflight_rejects_unusable_driver_evidence() (
+  local output code state
+  local test_dir
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir -p "$test_dir/module-sysfs" "$test_dir/usbip-host" "$test_dir/missing-modules"
+  REMOTE_CHROME_MODULE_SYSFS_ROOT="$test_dir/module-sysfs"
+  REMOTE_CHROME_MODULES_ROOT="$test_dir/missing-modules"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+
+  # The suite's ordinary pre-created export directory must not be mistaken
+  # for proof that a module is loaded or its kernel driver is registered.
+  output="$(yk_local_module_preflight 2>&1)" || code=$?
+  [ "${code:-0}" -ne 0 ] || fail "the fake export directory counted as loaded-driver evidence"
+  assert_contains "$output" "Local USB/IP module diagnostics"
+
+  for state in coming going; do
+    mkdir -p "$test_dir/module-sysfs/usbip_host"
+    printf '%s\n' "$state" >"$test_dir/module-sysfs/usbip_host/initstate"
+    code=0
+    output="$(yk_local_module_preflight 2>&1)" || code=$?
+    [ "$code" -ne 0 ] || fail "$state usbip-host state was accepted without module files"
+    rm -rf "$test_dir/module-sysfs/usbip_host"
+  done
+
+  mkdir -p "$test_dir/module-sysfs/usbip_host"
+  printf '%s\n' live >"$test_dir/module-sysfs/usbip_host/initstate"
+  rmdir "$test_dir/usbip-host"
+  code=0
+  output="$(yk_local_module_preflight 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "live module without a registered USB driver was accepted"
+)
+
+test_local_unloaded_module_files_still_load_and_report_failure() (
+  local test_dir fixture_kernel fixture_module_path output code=0 sudo_log load_status=17
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  fixture_kernel="fixture-kernel"
+  fixture_module_path="$test_dir/modules/$fixture_kernel/kernel/drivers/usb/usbip/usbip-host.ko"
+  sudo_log="$test_dir/sudo-calls"
+  mkdir -p "${fixture_module_path%/*}" "$test_dir/module-sysfs" "$test_dir/usbip-host"
+  : >"$fixture_module_path"
+  REMOTE_CHROME_MODULE_SYSFS_ROOT="$test_dir/module-sysfs"
+  REMOTE_CHROME_MODULES_ROOT="$test_dir/modules"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  uname() { [ "$1" = "-r" ] || return 2; printf '%s\n' "$fixture_kernel"; }
+  modinfo() { [ "$1" = "-n" ] && [ "$2" = "usbip-host" ] || return 2; printf '%s\n' "$fixture_module_path"; }
+  sudo() { printf '%s\n' "$*" >>"$sudo_log"; return "$load_status"; }
+
+  output="$(yk_ensure_local_module_loaded 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "failed local modprobe was swallowed"
+  assert_contains "$(cat "$sudo_log")" "modprobe usbip-host"
+  assert_contains "$output" "Could not load local usbip-host"
+
+  rm "$sudo_log"
+  load_status=0
+  code=0
+  output="$(yk_ensure_local_module_loaded 2>&1)" || code=$?
+  [ "$code" -eq 0 ] || fail "matching unloaded module files could not be loaded: $output"
+  assert_contains "$(cat "$sudo_log")" "modprobe usbip-host"
+)
+
+test_local_startup_call_sites_skip_modprobe_for_live_driver() (
+  local test_dir sudo_events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir -p "$test_dir/module-sysfs/usbip_host" "$test_dir/usbip-host" \
+    "$test_dir/missing-modules"
+  printf '%s\n' live >"$test_dir/module-sysfs/usbip_host/initstate"
+  REMOTE_CHROME_MODULE_SYSFS_ROOT="$test_dir/module-sysfs"
+  REMOTE_CHROME_MODULES_ROOT="$test_dir/missing-modules"
+  yk_usbip_host_sysfs="$test_dir/usbip-host"
+  yk_usbipd_pid_file="$test_dir/usbipd.pid"
+  yk_usbip_port=3240
+  need() { :; }
+  yk_pid_file_status() { return 1; }
+  sudo() {
+    sudo_events+="$* "
+    [ "$*" = "-v" ] || return 97
+  }
+  ss() { printf '%s\n' 'LISTEN 0 128 127.0.0.1:3240 0.0.0.0:*'; }
+
+  yk_ensure_local_ready || fail "local readiness rejected the live registered driver"
+  yk_remote="test-host"
+  yk_remote_module_preflight() { sudo_events+="remote-preflight "; return 0; }
+  yk_local_candidate_exists() { return 0; }
+  yk_remote_forward_port_available() { return 0; }
+  yk_preflight_for_forwarding || fail "forwarding preflight rejected the live registered driver"
+  [[ "$sudo_events" != *"modprobe"* ]] || fail "a local startup path redundantly loaded usbip-host"
+)
+
+test_remote_module_preflight_accepts_live_registered_driver_and_doctor_stays_read_only() (
+  local test_dir output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  setup_remote_module_script_fixture "$test_dir"
+  mkdir -p "$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd" \
+    "$REMOTE_CHROME_TEST_VHCI_DRIVER_SYSFS"
+  printf '%s\n' live >"$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd/initstate"
+  yk_remote="test-host"
+  yk_ssh() { remote_module_test_ssh "$1"; }
+
+  output="$(yk_ensure_remote_ready 2>&1)" || fail "live registered vhci_hcd failed remote startup preflight: $output"
+  assert_contains "$output" "live and registered"
+  assert_file_missing "$REMOTE_CHROME_TEST_COMMAND_LOG"
+
+  output="$(yk_remote_module_check 2>&1)" || fail "read-only doctor rejected live registered vhci_hcd: $output"
+  assert_contains "$output" "vhci-hcd is live and registered"
+  assert_file_missing "$REMOTE_CHROME_TEST_COMMAND_LOG"
+)
+
+test_remote_module_preflight_rejects_absent_and_transitional_drivers_without_tree() (
+  local test_dir output code=0 state
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  setup_remote_module_script_fixture "$test_dir"
+  yk_remote="test-host"
+  yk_ssh() { remote_module_test_ssh "$1"; }
+
+  output="$(yk_remote_module_preflight 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "remote preflight accepted an absent vhci_hcd without module files"
+  assert_contains "$output" "Remote module tree is missing"
+  assert_file_missing "$REMOTE_CHROME_TEST_COMMAND_LOG"
+
+  for state in coming going; do
+    mkdir -p "$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd" \
+      "$REMOTE_CHROME_TEST_VHCI_DRIVER_SYSFS"
+    printf '%s\n' "$state" >"$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd/initstate"
+    code=0
+    output="$(yk_remote_module_preflight 2>&1)" || code=$?
+    [ "$code" -ne 0 ] || fail "$state vhci_hcd state passed without a matching module tree"
+    rm -rf "$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd" "$REMOTE_CHROME_TEST_VHCI_DRIVER_SYSFS"
+  done
+  mkdir -p "$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd"
+  printf '%s\n' live >"$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd/initstate"
+  code=0
+  output="$(yk_remote_module_preflight 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "live vhci_hcd without its registered platform driver was accepted"
+  assert_file_missing "$REMOTE_CHROME_TEST_COMMAND_LOG"
+)
+
+test_remote_unloaded_module_files_load_and_doctor_never_modprobes() (
+  local test_dir module_path output code=0
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  setup_remote_module_script_fixture "$test_dir"
+  module_path="$REMOTE_CHROME_TEST_MODULE_PATH"
+  mkdir -p "${module_path%/*}"
+  : >"$module_path"
+  yk_remote="test-host"
+  REMOTE_CHROME_TEST_SUDO_STATUS=7
+  yk_ssh() { remote_module_test_ssh "$1"; }
+
+  output="$(yk_remote_module_preflight 2>&1)" || code=$?
+  [ "$code" -eq 7 ] || fail "remote modprobe failure was not propagated (code $code): $output"
+  assert_contains "$(cat "$REMOTE_CHROME_TEST_COMMAND_LOG")" "modinfo -n vhci-hcd"
+  assert_contains "$(cat "$REMOTE_CHROME_TEST_COMMAND_LOG")" "sudo -n modprobe vhci-hcd"
+
+  rm "$REMOTE_CHROME_TEST_COMMAND_LOG"
+  REMOTE_CHROME_TEST_SUDO_STATUS=0
+  output="$(yk_remote_module_preflight 2>&1)" || fail "matching unloaded module files failed to load: $output"
+  assert_contains "$(cat "$REMOTE_CHROME_TEST_COMMAND_LOG")" "sudo -n modprobe vhci-hcd"
+
+  rm "$REMOTE_CHROME_TEST_COMMAND_LOG"
+  output="$(yk_remote_module_check 2>&1)" || fail "read-only doctor rejected matching module files: $output"
+  assert_contains "$output" "prerequisites available"
+  assert_contains "$(cat "$REMOTE_CHROME_TEST_COMMAND_LOG")" "modinfo -n vhci-hcd"
+  [[ "$(cat "$REMOTE_CHROME_TEST_COMMAND_LOG")" != *"sudo"* &&
+    "$(cat "$REMOTE_CHROME_TEST_COMMAND_LOG")" != *"modprobe"* ]] ||
+    fail "read-only doctor invoked sudo/modprobe for a matching module tree"
+)
+
+test_forwarding_preflight_skips_both_loaders_for_live_drivers() (
+  local test_dir sudo_events=""
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  setup_remote_module_script_fixture "$test_dir/remote"
+  mkdir -p "$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd" \
+    "$REMOTE_CHROME_TEST_VHCI_DRIVER_SYSFS"
+  printf '%s\n' live >"$REMOTE_CHROME_TEST_MODULE_SYSFS_ROOT/vhci_hcd/initstate"
+  mkdir -p "$test_dir/local/module-sysfs/usbip_host" "$test_dir/local/usbip-host" \
+    "$test_dir/local/missing-modules"
+  printf '%s\n' live >"$test_dir/local/module-sysfs/usbip_host/initstate"
+  REMOTE_CHROME_MODULE_SYSFS_ROOT="$test_dir/local/module-sysfs"
+  REMOTE_CHROME_MODULES_ROOT="$test_dir/local/missing-modules"
+  yk_usbip_host_sysfs="$test_dir/local/usbip-host"
+  yk_remote="test-host"
+  need() { :; }
+  sudo() {
+    sudo_events+="$* "
+    [ "$*" = "-v" ] || return 97
+  }
+  yk_ssh() { remote_module_test_ssh "$1"; }
+  yk_local_candidate_exists() { return 0; }
+  yk_remote_forward_port_available() { return 0; }
+
+  yk_preflight_for_forwarding || fail "forwarding preflight rejected usable local and remote drivers"
+  [[ "$sudo_events" != *"modprobe"* ]] || fail "forwarding preflight redundantly loaded usbip-host"
+  assert_file_missing "$REMOTE_CHROME_TEST_COMMAND_LOG"
+)
+
 test_local_missing_module_tree_has_diagnostics() (
   local test_dir output code=0
   test_dir="$(mktemp -d)"
@@ -3168,7 +3441,7 @@ test_forwarding_preflight_rejects_occupied_remote_port() (
   yk_usbip_port=3240
   need() { :; }
   sudo() { return 0; }
-  yk_local_module_preflight() { return 0; }
+  yk_ensure_local_module_loaded() { return 0; }
   yk_remote_module_preflight() { return 0; }
   yk_local_candidate_exists() { return 0; }
   yk_remote_forward_port_available() { return 23; }
@@ -3313,7 +3586,7 @@ test_occupied_remote_port_preserves_existing_chrome() (
     yk_set_runtime_paths
   }
   yk_local_candidate_exists() { return 0; }
-  yk_local_module_preflight() { return 0; }
+  yk_ensure_local_module_loaded() { return 0; }
   yk_remote_module_preflight() { return 0; }
   yk_remote_forward_port_available() { return 23; }
   sudo() { return 0; }
@@ -3817,7 +4090,7 @@ test_startup_invalid_pid_file_is_preserved() (
   yk_set_runtime_paths
   printf '%s\n' not-a-pid >"$yk_usbipd_pid_file"
   need() { :; }
-  yk_local_module_preflight() { :; }
+  yk_ensure_local_module_loaded() { :; }
   ss() { :; }
   sudo() {
     events+="sudo:$* "
@@ -3851,7 +4124,7 @@ test_startup_refuses_symlink_pid_before_sudo_or_usb_setup() (
   printf '%s\n' 4242 >"$target"
   ln -s "$target" "$yk_usbipd_pid_file"
   need() { events+="need:$1 "; }
-  yk_local_module_preflight() { events+="module "; }
+  yk_ensure_local_module_loaded() { events+="module "; }
   sudo() { events+="sudo:$* "; return 0; }
 
   yk_ensure_local_ready || code=$?
@@ -4051,7 +4324,7 @@ test_failed_usbipd_start_retains_retryable_reservation() (
   yk_usbip_port=3240
   yk_set_runtime_paths
   need() { :; }
-  yk_local_module_preflight() { :; }
+  yk_ensure_local_module_loaded() { :; }
   yk_close_tunnel() { :; }
   ss() { return 0; }
   rm() {
@@ -4393,7 +4666,7 @@ test_start_rejects_unverified_usbipd_pid() (
   yk_started_usbipd=0
   yk_usbipd_pid=""
   need() { :; }
-  yk_local_module_preflight() { :; }
+  yk_ensure_local_module_loaded() { :; }
   ss() { :; }
   yk_owned_usbipd_running() { return 1; }
   sudo() {
@@ -5967,6 +6240,14 @@ tests=(
   test_yubikey_status_line_reports_legacy_state_truthfully
   test_stop_cleans_legacy_state_without_lock_or_token
   test_second_start_preserves_live_legacy_state
+  test_local_module_preflight_accepts_live_registered_driver_without_module_tree
+  test_local_module_preflight_rejects_unusable_driver_evidence
+  test_local_unloaded_module_files_still_load_and_report_failure
+  test_local_startup_call_sites_skip_modprobe_for_live_driver
+  test_remote_module_preflight_accepts_live_registered_driver_and_doctor_stays_read_only
+  test_remote_module_preflight_rejects_absent_and_transitional_drivers_without_tree
+  test_remote_unloaded_module_files_load_and_doctor_never_modprobes
+  test_forwarding_preflight_skips_both_loaders_for_live_drivers
   test_local_missing_module_tree_has_diagnostics
   test_local_missing_module_has_diagnostics
   test_remote_preflight_failure_is_propagated

@@ -104,7 +104,9 @@ waits. `REMOTE_CHROME_SSH_TIMEOUT` governs YubiKey requests, not every Chrome
 transport or diagnostic command. Longer configured stages can outlast a single
 SSH request deadline.
 
-`REMOTE_CHROME_USBIP_HOST_SYSFS`, `REMOTE_CHROME_MODULES_ROOT`, and
-`REMOTE_CHROME_HIDRAW_ROOT` are test filesystem selectors. Attempt-token and
-`REMOTE_CHROME_ORIGIN_*` variables are internal lifecycle metadata; ordinary
-launch configuration should not set them.
+`REMOTE_CHROME_USBIP_HOST_SYSFS`, `REMOTE_CHROME_MODULE_SYSFS_ROOT`,
+`REMOTE_CHROME_MODULES_ROOT`, `REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS`, and
+`REMOTE_CHROME_HIDRAW_ROOT` are test filesystem selectors. The module and VHCI
+selectors also apply when set in the browser host's environment. Attempt-token
+and `REMOTE_CHROME_ORIGIN_*` variables are internal lifecycle metadata;
+ordinary launch configuration should not set them.

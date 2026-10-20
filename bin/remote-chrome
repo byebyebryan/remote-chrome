@@ -4958,7 +4958,22 @@ yk_print_local_module_diagnostic() {
   echo "  If the kernel was upgraded recently, reboot so the running kernel matches /lib/modules, then retry." >&2
 }
 
-yk_local_module_preflight() {
+yk_module_sysfs_live() {
+  local module="$1"
+  local module_sysfs_root="${REMOTE_CHROME_MODULE_SYSFS_ROOT:-/sys/module}"
+  local module_dir="$module_sysfs_root/$module"
+  local module_state=""
+
+  [ -d "$module_dir" ] && [ -r "$module_dir/initstate" ] || return 1
+  IFS= read -r module_state <"$module_dir/initstate" || return 1
+  [ "$module_state" = "live" ]
+}
+
+yk_local_usbip_host_usable() {
+  yk_module_sysfs_live usbip_host && [ -d "$yk_usbip_host_sysfs" ]
+}
+
+yk_local_module_files_preflight() {
   local kernel
   local module_path=""
   local modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
@@ -4988,6 +5003,24 @@ yk_local_module_preflight() {
   return 0
 }
 
+yk_local_module_preflight() {
+  yk_local_usbip_host_usable || yk_local_module_files_preflight
+}
+
+yk_ensure_local_module_loaded() {
+  yk_local_usbip_host_usable && return 0
+  yk_local_module_files_preflight || return $?
+  if yk_local_usbip_host_usable; then
+    return 0
+  fi
+
+  if ! sudo modprobe usbip-host; then
+    echo "Could not load local usbip-host for running kernel $(uname -r)." >&2
+    yk_print_local_module_diagnostic
+    return 1
+  fi
+}
+
 yk_remote_module_preflight() {
   local remote_script
   # The variables in this script must expand on the remote host.
@@ -4995,14 +5028,25 @@ yk_remote_module_preflight() {
   remote_script='set -u
 kernel=$(uname -r 2>&1) || exit $?
 printf "Remote USB/IP diagnostics (kernel): %s\\n" "$kernel" >&2
-dirs=$(find /lib/modules -mindepth 1 -maxdepth 1 -type d -printf "%f " 2>/dev/null || true)
-printf "Remote available /lib/modules directories: %s\\n" "${dirs:-none}" >&2
 command -v usbip >/dev/null 2>&1 || { echo "Remote prerequisite missing: usbip" >&2; exit 127; }
 command -v timeout >/dev/null 2>&1 || { echo "Remote prerequisite missing: timeout" >&2; exit 127; }
-tree="/lib/modules/$kernel"
+module_sysfs_root="${REMOTE_CHROME_MODULE_SYSFS_ROOT:-/sys/module}"
+driver_sysfs="${REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS:-/sys/bus/platform/drivers/vhci_hcd}"
+module_state=""
+if [ -r "$module_sysfs_root/vhci_hcd/initstate" ]; then
+  IFS= read -r module_state <"$module_sysfs_root/vhci_hcd/initstate" || module_state=""
+fi
+if [ "$module_state" = "live" ] && [ -d "$driver_sysfs" ]; then
+  echo "Remote vhci-hcd driver is live and registered."
+  exit 0
+fi
+modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
+dirs=$(find "$modules_root" -mindepth 1 -maxdepth 1 -type d -printf "%f " 2>/dev/null || true)
+printf "Remote available %s directories: %s\\n" "$modules_root" "${dirs:-none}" >&2
+tree="$modules_root/$kernel"
 if [ ! -d "$tree" ]; then
   echo "Remote module tree is missing for running kernel $kernel." >&2
-  echo "If the kernel was upgraded recently, reboot the remote host so it matches /lib/modules." >&2
+  echo "If the kernel was upgraded recently, reboot the remote host so it matches $modules_root." >&2
   exit 1
 fi
 module_path=""
@@ -5014,7 +5058,7 @@ fi
 if [ -z "$module_path" ] || [ ! -e "$module_path" ] || [ "${module_path#"$tree"/}" = "$module_path" ]; then
   [ -n "$module_path" ] && printf "Remote modinfo vhci-hcd result: %s\\n" "$module_path" >&2
   echo "Remote vhci-hcd module is not available for running kernel $kernel." >&2
-  echo "If the kernel was upgraded recently, reboot the remote host so it matches /lib/modules." >&2
+  echo "If the kernel was upgraded recently, reboot the remote host so it matches $modules_root." >&2
   exit 1
 fi
 sudo -n modprobe vhci-hcd'
@@ -5031,7 +5075,18 @@ yk_remote_module_check() {
 kernel=$(uname -r 2>&1) || exit $?
 command -v usbip >/dev/null 2>&1 || { echo "Remote prerequisite missing: usbip" >&2; exit 127; }
 command -v timeout >/dev/null 2>&1 || { echo "Remote prerequisite missing: timeout" >&2; exit 127; }
-tree="/lib/modules/$kernel"
+module_sysfs_root="${REMOTE_CHROME_MODULE_SYSFS_ROOT:-/sys/module}"
+driver_sysfs="${REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS:-/sys/bus/platform/drivers/vhci_hcd}"
+module_state=""
+if [ -r "$module_sysfs_root/vhci_hcd/initstate" ]; then
+  IFS= read -r module_state <"$module_sysfs_root/vhci_hcd/initstate" || module_state=""
+fi
+if [ "$module_state" = "live" ] && [ -d "$driver_sysfs" ]; then
+  printf "Remote USB/IP prerequisites available (vhci-hcd is live and registered).\\n"
+  exit 0
+fi
+modules_root="${REMOTE_CHROME_MODULES_ROOT:-/lib/modules}"
+tree="$modules_root/$kernel"
 if [ ! -d "$tree" ]; then
   echo "Remote module tree is missing for running kernel $kernel." >&2
   exit 1
@@ -5323,13 +5378,7 @@ yk_ensure_local_ready() {
     fi
   fi
 
-  yk_local_module_preflight || return $?
-
-  if ! sudo modprobe usbip-host; then
-    echo "Could not load local usbip-host for running kernel $(uname -r)." >&2
-    yk_print_local_module_diagnostic
-    return 1
-  fi
+  yk_ensure_local_module_loaded || return $?
 
   if ! ss -ltn | grep -q ":${yk_usbip_port}\\b"; then
     if [ "$pid_file_status" -eq 0 ]; then
@@ -5443,12 +5492,7 @@ yk_preflight_for_forwarding() {
   # Local sudo may authenticate interactively before a detached session is
   # created; only remote sudo is required to be noninteractive.
   sudo -v || die "YubiKey forwarding needs local sudo for usbip."
-  yk_local_module_preflight || die "Local YubiKey USB/IP preflight failed."
-  if ! sudo modprobe usbip-host; then
-    echo "Local sudo could not load usbip-host for running kernel $(uname -r)." >&2
-    yk_print_local_module_diagnostic
-    die "Local YubiKey USB/IP preflight failed."
-  fi
+  yk_ensure_local_module_loaded || die "Local YubiKey USB/IP preflight failed."
   yk_remote_module_preflight || die "Remote YubiKey USB/IP preflight failed for $yk_remote."
   yk_local_candidate_exists ||
     die "No local YubiKey found with USB id $yk_usb_id."

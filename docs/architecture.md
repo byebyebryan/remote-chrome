@@ -51,6 +51,13 @@ must pass actual FIDO readiness before Chrome is created. Notification listener 
 advisory for ordinary failures, with exact rollback even when interrupted
 before a state file can be published.
 
+USB/IP capability is checked against each host's own running kernel. A module
+in the `live` state plus its registered driver permits startup without on-disk
+module files or another load attempt. Otherwise, the matching module tree and
+successful module loading remain prerequisites. The read-only `doctor` uses
+the same availability criteria without loading modules. Attachment and FIDO
+readiness checks still follow driver preflight.
+
 Reset selects a recorded canonical Waypipe command, verifies its exact SSH
 reverse socket and remote process group, and recreates it in the same tmux
 session. It preserves recorded launch settings. After teardown, forwarding

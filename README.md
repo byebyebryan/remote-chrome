@@ -82,6 +82,28 @@ to browser-host loopback, but the display host's `usbipd` may listen on network
 interfaces, depending on the installed daemon. Use trusted hosts and inspect
 the daemon's exposure. See [Security policy](SECURITY.md).
 
+#### Keep kernel modules available after Arch upgrades
+
+Each host needs USB/IP drivers for its own running kernel; the display and
+browser hosts can run different kernel releases. An already loaded module in
+the `live` state with its driver registered remains usable after an upgrade
+removes its module files. Otherwise, forwarding needs matching module files
+so the driver can be loaded.
+
+On both Arch hosts, install the optional module-preservation hooks and enable
+cleanup at boot:
+
+```bash
+sudo pacman -S --needed kernel-modules-hook
+sudo systemctl enable linux-modules-cleanup.service
+```
+
+The pacman hooks save the running kernel's module tree before kernel upgrades
+and restore it afterward. The cleanup service retires old module trees at
+boot. Installing the hooks cannot recover files already removed: if a required
+driver is unavailable, restore the matching modules from the cached kernel
+package or reboot into the installed kernel.
+
 #### Headless remote hosts
 
 On a desktop, systemd-logind normally grants token access to the active seat

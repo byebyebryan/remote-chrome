@@ -116,9 +116,18 @@ remote-chrome launch remote-host --no-yubikey
 ```
 
 Before tmux or Chrome starts, forwarding preflight checks commands, scoped sudo,
-running kernels/module trees, `usbip-host`, and `vhci-hcd`. After a kernel
-upgrade, a missing module tree usually requires rebooting that host; the
-launcher never installs modules or reboots it.
+`usbip-host` on the display host, and `vhci-hcd` on the browser host. A module
+in the `live` state with its driver registered passes without module-file
+lookup or another `modprobe`, including after an upgrade removes its files.
+If the driver is unavailable, preflight still requires module files matching
+that host's running kernel and loads the module before forwarding.
+
+The hosts can run different kernel releases. On Arch, the optional
+[module-preservation setup](../README.md#keep-kernel-modules-available-after-arch-upgrades)
+keeps the running kernel's module files available across future upgrades.
+If those files are already missing and the driver is unavailable, restore the
+matching modules or reboot that host. The launcher never installs modules or
+reboots it; `doctor` only reads driver/module availability and never loads them.
 
 Detached setup starts in the `yubikey` window. The parent allows a separate
 bootstrap phase (30 seconds by default), then readiness after attach (15
