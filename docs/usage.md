@@ -34,8 +34,8 @@ remote-chrome launch remote-host --session work-browser -- --profile-directory=D
 ```
 
 `launch` refuses an existing tmux session. A repeated bare `HOST` command keeps
-the recorded browser arguments, notification configuration, and YubiKey mode;
-new launch flags or browser/notification defaults do not replace those settings.
+the recorded compression, browser arguments, notification configuration, and
+YubiKey mode; new launch flags or defaults do not replace those settings.
 Runtime timeout and path settings still govern the invocation. Stop the
 selected session and launch again to change its launch settings:
 
@@ -43,6 +43,10 @@ selected session and launch again to change its launch settings:
 remote-chrome stop remote-host --session work-browser
 remote-chrome launch remote-host --session work-browser --no-notifications
 ```
+
+Fresh sessions use Waypipe `zstd=1`. Use `--compression lz4` on an explicit
+launch to select LZ4. See [compression configuration](configuration.md#transport-compression)
+for the environment default and how to change an existing session.
 
 Chrome has one instance per user-data directory. A new invocation can delegate
 to the browser already running on the remote desktop, even with `--new-window`.
@@ -81,9 +85,10 @@ forwarding. The normal `chrome` and `yubikey` windows can both be present. Reset
 without a host selects the sole session under the configured default prefix;
 when several exist, specify a host or `--session NAME`.
 
-Reset preserves the canonical launch command and YubiKey mode: automatic,
-required, or disabled. Forwarding state supplies the USB ID and port. Older
-sessions without mode metadata use automatic detection; pre-1.3 sessions may
+Reset preserves the canonical launch command, including compression, and the
+YubiKey mode: automatic, required, or disabled. Forwarding state supplies the
+USB ID and port. Older sessions without mode metadata use automatic detection;
+pre-1.3 sessions may
 fall back to a direct pane command. Wrapped pane metadata is never decoded.
 
 The launcher validates the selected pane, SSH reverse socket, remote process

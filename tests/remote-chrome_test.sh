@@ -26,6 +26,7 @@ export REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS="$test_suite_dir/vhci-driver"
 # Launch tests must not spawn real notification listeners; focused relay tests
 # exercise the notify helpers directly instead.
 export REMOTE_CHROME_NOTIFICATIONS=0
+unset REMOTE_CHROME_COMPRESSION
 yk_usbip_host_sysfs="$REMOTE_CHROME_USBIP_HOST_SYSFS"
 unset TMUX
 
@@ -1324,6 +1325,102 @@ test_password_store_override_is_rejected() (
   fi
 )
 
+test_compression_launch_defaults_and_overrides() (
+  local test_dir mode setting expected output
+  local -a launch_args=()
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  mkdir "$test_dir/bin"
+  cat >"$test_dir/bin/waypipe" <<'FAKE_WAYPIPE_COMPRESSION'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$REMOTE_CHROME_TEST_WAYPIPE_ARGS"
+cat >/dev/null
+FAKE_WAYPIPE_COMPRESSION
+  chmod +x "$test_dir/bin/waypipe"
+  export PATH="$test_dir/bin:$PATH"
+  export REMOTE_CHROME_TEST_WAYPIPE_ARGS="$test_dir/args"
+  XDG_RUNTIME_DIR="$test_dir"
+  need() { :; }
+  chrome_preflight() { :; }
+  chrome_handle_existing() { :; }
+  chrome_secure_bootstrap_script() { printf ':\n'; }
+  tmux() {
+    case "$1" in
+      has-session) return 1 ;;
+      new-session) bash -c "${@: -1}" ;;
+      set-option) return 0 ;;
+      *) fail "unexpected tmux call: $*" ;;
+    esac
+  }
+
+  for mode in detached foreground; do
+    for setting in default environment flag equals override; do
+      unset REMOTE_CHROME_COMPRESSION
+      launch_args=(test-host --no-yubikey --no-notifications)
+      [ "$mode" != foreground ] || launch_args+=(--foreground)
+      expected=lz4
+      case "$setting" in
+        default) expected=zstd=1 ;;
+        environment) export REMOTE_CHROME_COMPRESSION=lz4 ;;
+        flag) launch_args+=(--compression lz4) ;;
+        equals) launch_args+=(--compression=lz4) ;;
+        override)
+          export REMOTE_CHROME_COMPRESSION=invalid
+          launch_args+=(--compression zstd=1)
+          expected=zstd=1
+          ;;
+      esac
+      rm -f "$REMOTE_CHROME_TEST_WAYPIPE_ARGS"
+      output="$(chrome_launch "${launch_args[@]}" 2>&1)" ||
+        fail "$mode/$setting launch failed: $output"
+      [ "$(sed -n '1,5p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
+        "$(printf '%s\n' --no-gpu --compress "$expected" ssh test-host)" ] ||
+        fail "$mode/$setting used the wrong Waypipe compression or host"
+    done
+  done
+)
+
+test_invalid_compression_is_rejected_before_launch_or_reset() (
+  local output setting code
+  need() { fail "invalid compression reached dependency checks"; }
+  chrome_preflight() { fail "invalid compression reached preflight"; }
+  chrome_handle_existing() { fail "invalid compression touched Chrome"; }
+  chrome_reset() { fail "invalid compression reset the existing session"; }
+  tmux() { fail "invalid compression inspected tmux"; }
+
+  for setting in zstd=2 none '' 'lz4;false'; do
+    code=0
+    output="$(chrome_ensure test-host --compression "$setting" 2>&1)" || code=$?
+    [ "$code" -eq 1 ] || fail "invalid compression returned status $code"
+    assert_contains "$output" "Invalid Waypipe compression"
+
+    code=0
+    output="$(chrome_ensure test-host --compression="$setting" 2>&1)" || code=$?
+    [ "$code" -eq 1 ] || fail "invalid equals compression returned status $code"
+    assert_contains "$output" "Invalid Waypipe compression"
+  done
+  code=0
+  output="$(REMOTE_CHROME_COMPRESSION=invalid chrome_launch test-host 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "invalid environment compression returned status $code"
+  assert_contains "$output" "Invalid Waypipe compression"
+
+  code=0
+  output="$(chrome_ensure test-host --compression 2>&1)" || code=$?
+  [ "$code" -eq 1 ] || fail "missing compression returned status $code"
+  assert_contains "$output" "requires a compression mode"
+)
+
+test_launch_target_accepts_compression_options() (
+  chrome_launch_target --compression lz4 test-host --session work-browser ||
+    fail "launch target parser rejected --compression before the host"
+  [ "$chrome_launch_target_host" = test-host ] || fail "launch target lost the host"
+  [ "$chrome_launch_target_session" = work-browser ] || fail "launch target lost the session"
+  chrome_launch_target test-host --compression=zstd=1 --session=work-browser ||
+    fail "launch target parser rejected --compression= after the host"
+  [ "$chrome_launch_target_host" = test-host ] || fail "launch target lost the equals host"
+  [ "$chrome_launch_target_session" = work-browser ] || fail "launch target lost the equals session"
+)
+
 test_secure_bootstrap_encodes_minimal_proxy_policy() (
   local script command_line
   script="$(chrome_secure_bootstrap_script)"
@@ -1335,8 +1432,8 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
   assert_contains "$script" "secret-tool lookup application"
   assert_contains "$script" "--password-store=gnome-libsecret"
 
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
-  [[ "$command_line" == waypipe\ --no-gpu\ ssh\ test-host\ * ]] ||
+  command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
+  [[ "$command_line" == waypipe\ --no-gpu\ --compress\ zstd=1\ ssh\ test-host\ * ]] ||
     fail "secure detached command did not preserve the direct Waypipe SSH prefix"
   assert_contains "$command_line" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2"
   assert_contains "$command_line" "< /tmp/remote-chrome-test-host.bootstrap.sh"
@@ -1347,7 +1444,7 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
 
 test_notification_command_shape_round_trips() (
   local enabled disabled
-  enabled="$(chrome_secure_command_line test-host google-chrome-stable chrome \
+  enabled="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome \
     chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock \
     /run/user/1000/remote-chrome-notify-1.sock chrome \
     /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
@@ -1355,7 +1452,7 @@ test_notification_command_shape_round_trips() (
   assert_contains "$enabled" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock chrome"
   [[ "$enabled" != *$'\n'* ]] || fail "notify command line contains a literal newline"
 
-  disabled="$(chrome_secure_command_line test-host google-chrome-stable chrome \
+  disabled="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome \
     chrome_libsecret_os_crypt_password_v2 "" "" "" \
     /tmp/remote-chrome-test-host.bootstrap.sh)"
   [[ "$disabled" != *"-R "* ]] || fail "disabled notify command line unexpectedly forwards a socket"
@@ -2018,10 +2115,10 @@ test_secure_command_shape_recreates_through_reset_parser() (
   local test_dir command_line events=""
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+  command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
     /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
-  [ "${command_line#waypipe --no-gpu ssh test-host}" != "$command_line" ] ||
+  [ "${command_line#waypipe --no-gpu --compress zstd=1 ssh test-host}" != "$command_line" ] ||
     fail "generated secure pane command lost its direct Waypipe SSH prefix"
   [[ "$command_line" != *$'\n'* ]] || fail "generated secure pane command contains a literal newline"
 
@@ -2067,7 +2164,7 @@ test_secure_command_line_replays_with_exact_arguments() (
     'cat >"$SECURE_WAYPIPE_STDIN"' >"$fake_bin/waypipe"
   chmod +x "$fake_bin/waypipe"
   chrome_secure_bootstrap_script >"$test_dir/bootstrap.sh"
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+  command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
     "$test_dir/bootstrap.sh" '--profile-directory=Profile One' '--test=a;b')"
   output="$(PATH="$fake_bin:$PATH" SECURE_WAYPIPE_ARGS="$test_dir/args" \
@@ -2246,7 +2343,7 @@ test_reset_reads_real_tmux_chrome_and_yubikey_windows() (
   tmux() { LC_ALL=C LANG=C LC_CTYPE=C command tmux -S "$test_dir/tmux.sock" -f /dev/null "$@"; }
   tmux new-session -d -s "$session" -n yubikey 'sleep 60'
   tmux new-window -d -t "$session" -n chrome 'sleep 60'
-  command_line="waypipe --no-gpu ssh test-host bash -s -- arg"
+  command_line="waypipe --no-gpu --compress zstd=1 ssh test-host bash -s -- arg"
   chrome_tmux_record_command "$session" "$command_line"
   expected_pid="$(tmux display-message -p -t "$session:chrome" '#{pane_pid}')"
 
@@ -2322,7 +2419,7 @@ test_reset_recreation_restores_canonical_option_for_repeated_reset() (
   local test_dir command_line events="" option_value set_count=0 session_alive=1
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+  command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
     /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   option_value="$command_line"
@@ -2360,6 +2457,8 @@ test_reset_recreation_restores_canonical_option_for_repeated_reset() (
   chrome_reset_remote_identity() { return 1; }
 
   chrome_reset test-host --yes >/dev/null 2>&1
+  # Changing launch defaults must not replace the session's recorded Zstd mode.
+  REMOTE_CHROME_COMPRESSION=lz4
   chrome_reset test-host --yes >/dev/null 2>&1
   [ "$set_count" -eq 2 ] || fail "repeated reset did not restore the canonical tmux option twice"
   [ "$option_value" = "$command_line" ] || fail "repeated reset changed the canonical command option"
@@ -5470,9 +5569,10 @@ test_reset_restarts_notification_listener() (
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   XDG_RUNTIME_DIR="$test_dir"
-  command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+  command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock \
-    /run/user/1000/remote-chrome-notify-1.sock chrome --new-window)"
+    /run/user/1000/remote-chrome-notify-1.sock chrome \
+    /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   [[ "$command_line" == *"-R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock"* ]] ||
     fail "notify-enabled reset fixture lacks the reverse forward"
 
@@ -5590,9 +5690,9 @@ PY
     notify_prepare_session "$session" test-host
     local_socket="$notify_local_socket"
     probe_trace="$test_dir/$mode.probe"
-    command_line="$(chrome_secure_command_line test-host google-chrome-stable \
+    command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
       chrome chrome_libsecret_os_crypt_password_v2 "$notify_remote_socket" \
-      "$notify_local_socket" chrome --new-window)"
+      "$notify_local_socket" chrome /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
     {
       printf 'listener_pid\t%s\n' "999999"
       printf 'listener_starttime\t%s\n' "1"
@@ -5638,6 +5738,19 @@ PY
 )
 
 test_reset_parser_skips_ssh_options_before_host() (
+  local compression command_line
+  for compression in zstd=1 lz4; do
+    command_line="$(chrome_secure_command_line "$compression" test-host google-chrome-stable chrome \
+      chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock \
+      /run/user/1000/remote-chrome-notify-1.sock chrome /tmp/remote-chrome-test.bootstrap.sh)"
+    chrome_reset_parse_pane_host "$command_line" ||
+      fail "reset parser rejected recorded $compression compression"
+    [ "$chrome_reset_host" = test-host ] || fail "reset parser lost the compressed host"
+  done
+  if chrome_reset_parse_pane_host "waypipe --no-gpu --compress invalid ssh test-host x" >/dev/null 2>&1; then
+    fail "reset parser accepted an unmanaged compression command"
+  fi
+
   chrome_reset_parse_pane_host \
     "waypipe --no-gpu ssh -R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock test-host bash -s -- x" ||
     fail "reset parser rejected a notify forward"
@@ -6178,6 +6291,9 @@ tests=(
   test_chrome_command_rejects_shell_syntax
   test_secret_identity_maps_chrome_chromium_and_custom
   test_password_store_override_is_rejected
+  test_compression_launch_defaults_and_overrides
+  test_invalid_compression_is_rejected_before_launch_or_reset
+  test_launch_target_accepts_compression_options
   test_secure_bootstrap_encodes_minimal_proxy_policy
   test_notification_command_shape_round_trips
   test_launch_target_accepts_notification_flag

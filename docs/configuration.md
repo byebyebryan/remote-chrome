@@ -1,9 +1,10 @@
 # Configuration
 
 Configure launches on the display host. Flags override the corresponding
-launch defaults. Reset keeps the recorded browser/notification settings and
-YubiKey mode; stop and explicitly `launch` again to change them. Runtime
-timeout/path settings still govern each invocation. See [usage](usage.md).
+launch defaults. Reset keeps the recorded compression, browser settings,
+notification settings, and YubiKey mode; stop and explicitly `launch` again to
+change them. Runtime timeout/path settings still govern each invocation. See
+[usage](usage.md).
 
 ## Launch options
 
@@ -12,6 +13,7 @@ timeout/path settings still govern each invocation. See [usage](usage.md).
 | `--session NAME` | Select a tmux session; also accepted by attach, status, reset, and stop |
 | `--foreground` (`--no-tmux`) | Run transport and cleanup in the launching terminal |
 | `--chrome-command CMD` | Select a remote executable name or path, without shell syntax |
+| `--compression MODE` | Select Waypipe compression: `zstd=1` (default) or `lz4` |
 | `--with-yubikey` / `--no-yubikey` | Require forwarding / skip detection and forwarding |
 | `--yubikey-usb-id ID` | Select the local USB vendor/product |
 | `--yubikey-port PORT` | Set the USB/IP TCP port |
@@ -49,6 +51,26 @@ export REMOTE_CHROME_SECRET_APPLICATION=my-browser
 export REMOTE_CHROME_SECRET_SCHEMA=my_browser_libsecret_os_crypt_password_v2
 remote-chrome launch remote-host --chrome-command /opt/my-browser
 ```
+
+## Transport compression
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `REMOTE_CHROME_COMPRESSION` | `zstd=1` | Waypipe compression; accepts `zstd=1` or `lz4`; `--compression` takes precedence |
+
+Fresh launches explicitly use Zstd level 1. Both hosts need Waypipe built with
+support for the selected codec. To use LZ4 for a new session:
+
+```bash
+remote-chrome launch remote-host --compression lz4
+# Or set a default for launches from this shell:
+export REMOTE_CHROME_COMPRESSION=lz4
+```
+
+Reset and repeated bare `HOST` commands replay the recorded compression choice.
+Older sessions without an explicit codec retain Waypipe's implicit default.
+Stop and explicitly launch again to change an existing session's compression;
+updating the launcher does not change a running stream.
 
 ## Notifications
 

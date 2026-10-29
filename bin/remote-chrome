@@ -19,6 +19,7 @@ Chrome options:
       --session NAME       tmux session name
       --foreground         run Chrome remoting in the foreground
       --chrome-command CMD remote Chrome command, default: google-chrome-stable
+      --compression MODE   Waypipe compression: zstd=1 (default) or lz4
       --with-yubikey       require forwarding a local YubiKey
       --no-yubikey         skip YubiKey detection and forwarding
       --yubikey-usb-id ID  local USB id, default: 1050:0407
@@ -42,6 +43,7 @@ General options:
 
 Environment:
   REMOTE_CHROME_COMMAND
+  REMOTE_CHROME_COMPRESSION
   REMOTE_CHROME_SESSION_PREFIX
   REMOTE_CHROME_YUBIKEY_USB_ID
   REMOTE_CHROME_USBIP_PORT
@@ -1575,7 +1577,19 @@ chrome_set_origin_metadata() {
     "REMOTE_CHROME_ORIGIN_NAME=$(hostname)")
 }
 
+chrome_validate_compression() {
+  case "$1" in
+    zstd=1|lz4) return 0 ;;
+    *)
+      echo "Invalid Waypipe compression: $1. Use zstd=1 or lz4." >&2
+      return 1
+      ;;
+  esac
+}
+
 chrome_secure_command_line() {
+  local compression="$1"
+  shift
   local host="$1"
   local chrome_command="$2"
   local secret_application="$3"
@@ -1587,7 +1601,8 @@ chrome_secure_command_line() {
   shift 8
   local argument quoted
 
-  local command_line="waypipe --no-gpu ssh"
+  chrome_validate_compression "$compression" || return 1
+  local command_line="waypipe --no-gpu --compress $compression ssh"
   if [ -n "$notify_remote_socket" ]; then
     printf -v quoted '%q' "-R"
     command_line+=" $quoted"
@@ -1655,6 +1670,15 @@ chrome_launch_target() {
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --compression)
+        [ "$#" -ge 2 ] || return 1
+        chrome_validate_compression "$2" >/dev/null 2>&1 || return 1
+        shift 2
+        ;;
+      --compression=*)
+        chrome_validate_compression "${1#*=}" >/dev/null 2>&1 || return 1
+        shift
+        ;;
       --session|--chrome-command|--yubikey-usb-id|--yubikey-port)
         [ "$#" -ge 2 ] || return 1
         if [ "$1" = "--session" ]; then
@@ -1742,6 +1766,7 @@ chrome_launch() {
   local allow_existing=0
   local assume_yes=0
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
+  local compression="${REMOTE_CHROME_COMPRESSION:-zstd=1}"
   local chrome_args=("--ozone-platform=wayland" "--disable-gpu" "--disable-features=Vulkan" "--new-window")
   local yubikey_args=()
   local notifications=1
@@ -1774,6 +1799,15 @@ chrome_launch() {
         ;;
       --chrome-command=*)
         chrome_command="${1#*=}"
+        shift
+        ;;
+      --compression)
+        [ "$#" -ge 2 ] || die "$1 requires a compression mode."
+        compression="$2"
+        shift 2
+        ;;
+      --compression=*)
+        compression="${1#*=}"
         shift
         ;;
       --with-yubikey)
@@ -1843,6 +1877,7 @@ chrome_launch() {
   done
 
   [ -n "$host" ] || die "Remote host is required. Example: $PROGRAM launch HOST"
+  chrome_validate_compression "$compression" || return 1
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
   chrome_validate_password_store_args "${chrome_args[@]}"
   chrome_secret_identity "$chrome_command" || exit 1
@@ -1921,7 +1956,7 @@ chrome_launch() {
   if [ "$notifications" = "1" ]; then
     notify_prepare_session "$session" "$host"
   fi
-  local -a command=(waypipe --no-gpu ssh)
+  local -a command=(waypipe --no-gpu --compress "$compression" ssh)
   if [ -n "$notify_remote_socket" ]; then
     command+=(-R "$notify_remote_socket:$notify_local_socket")
   fi
@@ -1974,7 +2009,7 @@ chrome_launch() {
   local bootstrap_script
   bootstrap_script="$(chrome_prepare_bootstrap_script "$session")" ||
     die "Could not prepare the remote Chrome bootstrap script for $host."
-  command_line="$(chrome_secure_command_line "$host" "$chrome_command" \
+  command_line="$(chrome_secure_command_line "$compression" "$host" "$chrome_command" \
     "$chrome_secret_application" "$chrome_secret_schema" "$notify_remote_socket" \
     "$notify_local_socket" "$notify_apps" "$bootstrap_script" "${chrome_args[@]}")"
   if [ "$forwarding_expected" = "1" ]; then
@@ -2798,6 +2833,8 @@ chrome_reset_remote_pid=""
 chrome_reset_remote_starttime=""
 chrome_reset_remote_boot_id=""
 chrome_reset_remote_browser_allowlist=()
+# Older sessions omit --compress; new canonical commands record the codec.
+chrome_reset_waypipe_prefix='^waypipe[[:space:]]+--no-gpu[[:space:]]+(--compress[[:space:]]+(zstd=1|lz4)[[:space:]]+)?ssh[[:space:]]+(.*)$'
 
 chrome_reset_read_pane() {
   local session="$1"
@@ -2836,9 +2873,9 @@ chrome_reset_read_pane() {
   if canonical_command="$(tmux show-options -qv -t "=$session:" \
     "$chrome_tmux_command_option" 2>/dev/null)" && [ -n "$canonical_command" ]; then
     chrome_reset_pane_command="$canonical_command"
-  elif [[ "$pane_start_command" == waypipe[[:space:]]--no-gpu[[:space:]]ssh[[:space:]]* ]]; then
-    # Pre-1.3 sessions stored the direct command in pane_start_command.  Do
-    # not attempt to decode a newly wrapped `bash -c` pane command.
+  elif [[ "$pane_start_command" =~ $chrome_reset_waypipe_prefix ]]; then
+    # Older sessions stored the direct command in pane_start_command. Do not
+    # attempt to decode a newly wrapped `bash -c` pane command.
     chrome_reset_pane_command="$pane_start_command"
   else
     echo "The $session:chrome pane has no canonical remote-chrome command option; refusing reset." >&2
@@ -2864,12 +2901,12 @@ chrome_reset_parse_pane_host() {
   local command_line="$1"
   local remainder token argument
 
-  if [[ ! "$command_line" =~ ^waypipe[[:space:]]+--no-gpu[[:space:]]+ssh[[:space:]]+(.*)$ ]]; then
+  if [[ ! "$command_line" =~ $chrome_reset_waypipe_prefix ]]; then
     echo "The chrome pane is not a managed waypipe SSH command; refusing reset." >&2
     return 1
   fi
   chrome_reset_host=""
-  remainder="${BASH_REMATCH[1]}"
+  remainder="${BASH_REMATCH[3]}"
   # SSH options (including the optional -R notification forward) precede the
   # destination; skip them before taking the first non-option token as host.
   while [ -n "$remainder" ]; do

@@ -30,8 +30,8 @@ for Chrome transport; forwarding still needs noninteractive SSH.
 
 | Host | Required commands and environment |
 | --- | --- |
-| Display | `bash`, `ssh`, `waypipe`, a graphical Wayland session, and `tmux` for detached mode |
-| Browser | `bash`, `waypipe`, `xdg-dbus-proxy`, `secret-tool` (libsecret), `ksecretd` (KWallet/Secret Service), `busctl` (systemd), and the selected Chrome executable |
+| Display | `bash`, `ssh`, `waypipe` with Zstd support, a graphical Wayland session, and `tmux` for detached mode |
+| Browser | `bash`, `waypipe` with Zstd support, `xdg-dbus-proxy`, `secret-tool` (libsecret), `ksecretd` (KWallet/Secret Service), `busctl` (systemd), and the selected Chrome executable |
 | Both, with notifications enabled | `python3` |
 | Both, for interactive headless notifications | Python D-Bus and GLib bindings (`python-dbus` and `python-gobject` on Arch; `python3-dbus` and `python3-gi` on Debian) |
 | Display, for existing-daemon informational forwarding | `notify-send` (libnotify); `busctl` detects body markup support |
