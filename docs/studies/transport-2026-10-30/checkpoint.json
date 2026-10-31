@@ -1,0 +1,908 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "status": "implementation and live functional acceptance complete; controlled latency study pending active native display",
+  "launcher": {
+    "version": "1.6.0",
+    "commit": "acd8bfc9f1573b0e2ea1bc6de87b2f57dcae33f2",
+    "sha256": "4021fdea2cb0e6cecacf216698a69862b4456679f2679b30a9daf2b9dd37591f",
+    "ci_run": 41165287618,
+    "ci_result": "success"
+  },
+  "managed_deployment": {
+    "commit": "4d9c152176656bf82376c39ea7c0c2a9b78e3f4f",
+    "package": "waypipe-remote-chrome 0.11.3-4",
+    "recipe_sha256": "bf63bfbc0c8bc99e0d256ef4463657991d88175a6e3eb2f7c0d10fb5c37cb25b",
+    "hosts": {
+      "snap": {
+        "launcher": {
+          "path": "/home/bryan/.local/share/remote-chrome/acd8bfc9f1573b0e2ea1bc6de87b2f57dcae33f2/bin/remote-chrome",
+          "sha256": "4021fdea2cb0e6cecacf216698a69862b4456679f2679b30a9daf2b9dd37591f",
+          "mode": "0o755"
+        },
+        "packages": {
+          "code": 0,
+          "stdout": "waypipe-remote-chrome 0.11.3-4\nwaypipe 0.11.3-1\nffmpeg 2:9.0.2-2\n",
+          "stderr": ""
+        },
+        "abi": {
+          "code": 0,
+          "stdout": "{\"schema\":1,\"libavcodec_major\":63,\"libavutil_major\":61,\"compatible\":true}\n",
+          "stderr": ""
+        },
+        "namespaces": {
+          "code": 0,
+          "stdout": "",
+          "stderr": ""
+        },
+        "chezmoi_head": {
+          "code": 0,
+          "stdout": "4d9c152176656bf82376c39ea7c0c2a9b78e3f4f\n",
+          "stderr": ""
+        },
+        "known_processes": {
+          "2331299": {
+            "start": "38263131",
+            "exe": "/usr/lib/waypipe-remote-chrome/waypipe (deleted)"
+          },
+          "2331351": {
+            "start": "38263152",
+            "exe": "/opt/google/chrome/chrome"
+          }
+        },
+        "forwarding": "1"
+      },
+      "starship": {
+        "launcher": {
+          "path": "/home/bryan/.local/share/remote-chrome/acd8bfc9f1573b0e2ea1bc6de87b2f57dcae33f2/bin/remote-chrome",
+          "sha256": "4021fdea2cb0e6cecacf216698a69862b4456679f2679b30a9daf2b9dd37591f",
+          "mode": "0o755"
+        },
+        "packages": {
+          "code": 0,
+          "stdout": "waypipe-remote-chrome 0.11.3-4\nwaypipe 0.11.3-1\nffmpeg 2:9.0.2-2\n",
+          "stderr": ""
+        },
+        "abi": {
+          "code": 0,
+          "stdout": "{\"schema\":1,\"libavcodec_major\":63,\"libavutil_major\":61,\"compatible\":true}\n",
+          "stderr": ""
+        },
+        "namespaces": {
+          "code": 0,
+          "stdout": "",
+          "stderr": ""
+        },
+        "chezmoi_head": {
+          "code": 0,
+          "stdout": "4d9c152176656bf82376c39ea7c0c2a9b78e3f4f\n",
+          "stderr": ""
+        },
+        "known_processes": {
+          "2521288": {
+            "start": "36110289",
+            "exe": "/opt/google/chrome/chrome"
+          }
+        },
+        "forwarding": "1"
+      },
+      "carbon": {
+        "launcher": {
+          "path": "/home/bryan/.local/share/remote-chrome/acd8bfc9f1573b0e2ea1bc6de87b2f57dcae33f2/bin/remote-chrome",
+          "sha256": "4021fdea2cb0e6cecacf216698a69862b4456679f2679b30a9daf2b9dd37591f",
+          "mode": "0o755"
+        },
+        "packages": {
+          "code": 0,
+          "stdout": "waypipe-remote-chrome 0.11.3-4\nwaypipe 0.11.3-1\nffmpeg 2:9.0.2-2\n",
+          "stderr": ""
+        },
+        "abi": {
+          "code": 0,
+          "stdout": "{\"schema\":1,\"libavcodec_major\":63,\"libavutil_major\":61,\"compatible\":true}\n",
+          "stderr": ""
+        },
+        "namespaces": {
+          "code": 0,
+          "stdout": "",
+          "stderr": ""
+        },
+        "chezmoi_head": {
+          "code": 0,
+          "stdout": "4d9c152176656bf82376c39ea7c0c2a9b78e3f4f\n",
+          "stderr": ""
+        },
+        "known_processes": {
+          "1029902": {
+            "start": "32597973",
+            "exe": "/usr/lib/waypipe-remote-chrome/waypipe (deleted)"
+          }
+        },
+        "forwarding": "0"
+      }
+    }
+  },
+  "validation": {
+    "shell_assertions": 196,
+    "notification_tests": 18,
+    "bootstrap_assertions": 17,
+    "rust_snapshot_test": "passed",
+    "managed_wrapper_and_installer_fixtures": "passed"
+  },
+  "functional_acceptance": [
+    {
+      "viewer": "starship",
+      "mode": "hw500",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "video h264 bpf=500000 compression=zstd=1 codec-preference=hw",
+      "local_decoder": "hardware",
+      "remote_encoder": "hardware",
+      "chrome_renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "chrome_features": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webgpu_on_vk_via_gl_interop": "enabled",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          1342
+        ],
+        "dpr": 1
+      },
+      "reset": {
+        "exit": 0,
+        "before": {
+          "pid": 2682877,
+          "start": "38729930"
+        },
+        "after": {
+          "pid": 2702173,
+          "start": "38730958"
+        },
+        "recorded_transport": "video h264 bpf=500000 compression=zstd=1 codec-preference=hw",
+        "local_decoder": "hardware",
+        "remote_encoder": "hardware"
+      }
+    },
+    {
+      "viewer": "starship",
+      "mode": "sw500",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "video h264 bpf=500000 compression=zstd=1 codec-preference=sw",
+      "local_decoder": "software",
+      "remote_encoder": "software",
+      "chrome_renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "chrome_features": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webgpu_on_vk_via_gl_interop": "enabled",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          1342
+        ],
+        "dpr": 1
+      },
+      "reset": null
+    },
+    {
+      "viewer": "starship",
+      "mode": "hw250",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "video h264 bpf=250000 compression=zstd=1 codec-preference=hw",
+      "local_decoder": "hardware",
+      "remote_encoder": "hardware",
+      "chrome_renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "chrome_features": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webgpu_on_vk_via_gl_interop": "enabled",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          1342
+        ],
+        "dpr": 1
+      },
+      "reset": {
+        "exit": 0,
+        "before": {
+          "pid": 2726795,
+          "start": "38732556"
+        },
+        "after": {
+          "pid": 2735745,
+          "start": "38733523"
+        },
+        "recorded_transport": "video h264 bpf=250000 compression=zstd=1 codec-preference=hw",
+        "local_decoder": "hardware",
+        "remote_encoder": "hardware"
+      }
+    },
+    {
+      "viewer": "starship",
+      "mode": "lossless",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "stock lossless; Chrome GPU policy: disabled",
+      "local_decoder": null,
+      "remote_encoder": null,
+      "chrome_renderer": "Disabled",
+      "chrome_features": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "disabled_off",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webgpu_on_vk_via_gl_interop": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          1342
+        ],
+        "dpr": 1
+      },
+      "reset": null
+    },
+    {
+      "viewer": "carbon",
+      "mode": "hw500",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "video h264 bpf=500000 compression=zstd=1 codec-preference=hw",
+      "local_decoder": "hardware",
+      "remote_encoder": "hardware",
+      "chrome_renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "chrome_features": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webgpu_on_vk_via_gl_interop": "enabled",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          760
+        ],
+        "dpr": 1.5
+      },
+      "reset": {
+        "exit": 0,
+        "before": {
+          "pid": 2750435,
+          "start": "38735113"
+        },
+        "after": {
+          "pid": 2759002,
+          "start": "38736313"
+        },
+        "recorded_transport": "video h264 bpf=500000 compression=zstd=1 codec-preference=hw",
+        "local_decoder": "hardware",
+        "remote_encoder": "hardware"
+      }
+    },
+    {
+      "viewer": "carbon",
+      "mode": "sw500",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "video h264 bpf=500000 compression=zstd=1 codec-preference=sw",
+      "local_decoder": "software",
+      "remote_encoder": "software",
+      "chrome_renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "chrome_features": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webgpu_on_vk_via_gl_interop": "enabled",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          760
+        ],
+        "dpr": 1.5
+      },
+      "reset": null
+    },
+    {
+      "viewer": "carbon",
+      "mode": "hw250",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "video h264 bpf=250000 compression=zstd=1 codec-preference=hw",
+      "local_decoder": "hardware",
+      "remote_encoder": "hardware",
+      "chrome_renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "chrome_features": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webgpu_on_vk_via_gl_interop": "enabled",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          760
+        ],
+        "dpr": 1.5
+      },
+      "reset": {
+        "exit": 0,
+        "before": {
+          "pid": 2763391,
+          "start": "38738284"
+        },
+        "after": {
+          "pid": 2764286,
+          "start": "38739438"
+        },
+        "recorded_transport": "video h264 bpf=250000 compression=zstd=1 codec-preference=hw",
+        "local_decoder": "hardware",
+        "remote_encoder": "hardware"
+      }
+    },
+    {
+      "viewer": "carbon",
+      "mode": "lossless",
+      "passed": true,
+      "launch_exit": 0,
+      "stop_exit": 0,
+      "recorded_transport": "stock lossless; Chrome GPU policy: disabled",
+      "local_decoder": null,
+      "remote_encoder": null,
+      "chrome_renderer": "Disabled",
+      "chrome_features": {
+        "2d_canvas": "disabled_software",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "disabled_software",
+        "multiple_raster_threads": "disabled_off",
+        "opengl": "disabled_off",
+        "rasterization": "disabled_software",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "disabled_off",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "disabled_software",
+        "video_encode": "disabled_software",
+        "vulkan": "disabled_off",
+        "webgl": "disabled_off",
+        "webgpu": "disabled_off",
+        "webgpu_on_vk_via_gl_interop": "disabled_off",
+        "webnn": "disabled_off"
+      },
+      "initial_viewport": {
+        "viewport": [
+          1200,
+          760
+        ],
+        "dpr": 1.5
+      },
+      "reset": null
+    }
+  ],
+  "functional_limits": [
+    "Initial Starship viewport observations raced resizing; these are lifecycle/backend checks, not matched performance trials.",
+    "The 250k test starts a fixture made from the installed launcher with only its new-session bitrate changed; reset and stop use the installed launcher.",
+    "No physical YubiKey forwarding or subjective real-page acceptance was part of these disposable no-YubiKey, no-notifications tests."
+  ],
+  "calibration": {
+    "measurement_accepted": false,
+    "user_reported_display_state": {
+      "starship": "off or switched away",
+      "carbon": "in active use; further GUI tests stopped"
+    },
+    "local_starship_gtk_before": {
+      "elapsed": 5.488625101046637,
+      "ticks": 5,
+      "fps": 0.9109749541914496
+    },
+    "local_starship_gtk_after_hiding_popups": {
+      "elapsed": 5.490010460023768,
+      "ticks": 5,
+      "fps": 0.9107450771557096
+    },
+    "swaync_popup_probe": {
+      "history_count_before": "252",
+      "history_count_after": "252",
+      "dnd_before": "false",
+      "dnd_after": "false",
+      "overlay_before": "[{\"namespace\":\"swaync-notification-window\",\"output\":\"DP-1\",\"layer\":\"Overlay\",\"keyboard_interactivity\":\"None\"}]\n",
+      "overlay_after": "[]\n"
+    },
+    "interpretation": [
+      "Local GTK and local Chrome reproduce approximately one callback per second without Waypipe or network.",
+      "Starship physical display was later confirmed off or switched away; an active-display A/B is still required before assigning cause.",
+      "The unlimited-frame-rate diagnostic produced tens of thousands of callbacks and is not presentation FPS or an accepted baseline.",
+      "Pilot image/input figures below are calibration diagnostics, not valid transport latency estimates.",
+      "An old raw_ok flag denotes successful harness execution only; no listed calibration case is accepted as a controlled performance result."
+    ],
+    "viewers": {
+      "starship": {
+        "cases": [
+          {
+            "name": "local-starship-baseline.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 10,
+            "duration_ms": 10010.800000011921,
+            "callback_fps": 0.9989211651404575,
+            "image": {},
+            "keys": []
+          },
+          {
+            "name": "calib4-starship-nori-h264.result",
+            "raw_ok": false,
+            "error": "TypeError: Cannot read properties of null (reading 'logical')",
+            "frames": null,
+            "duration_ms": null,
+            "callback_fps": null,
+            "image": {},
+            "keys": []
+          },
+          {
+            "name": "calib4-starship-nomux-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 10,
+            "duration_ms": 8030.699999988079,
+            "callback_fps": 1.2452214626389786,
+            "image": {
+              "ok": true,
+              "skipped": true
+            },
+            "keys": []
+          },
+          {
+            "name": "calib3-starship-unlimited-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 40316,
+            "duration_ms": 8022.100000023842,
+            "callback_fps": 5025.6167337580155,
+            "image": {
+              "ok": true,
+              "skipped": true
+            },
+            "keys": []
+          },
+          {
+            "name": "calib3-starship-scroll-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 10,
+            "duration_ms": 8020.099999964237,
+            "callback_fps": 1.2468672460498735,
+            "image": {
+              "ok": true,
+              "skipped": true
+            },
+            "keys": []
+          },
+          {
+            "name": "calib3-starship-await-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 9,
+            "duration_ms": 8096.100000023842,
+            "callback_fps": 1.1116463482384724,
+            "image": {
+              "ok": true,
+              "skipped": true
+            },
+            "keys": []
+          },
+          {
+            "name": "calib2-starship-foreground-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 11,
+            "duration_ms": 10052.700000047684,
+            "callback_fps": 1.0942333900293277,
+            "image": {
+              "ok": true,
+              "error": null,
+              "samples": 200,
+              "keys": 2,
+              "capture_p50_ms": 32.15977601939812
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "observed",
+                "latency_lower_ms": 4843.477010959759,
+                "latency_upper_ms": 4931.627314013895
+              },
+              {
+                "seq": 2,
+                "status": "incomplete",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              }
+            ]
+          },
+          {
+            "name": "calib2-starship-image-sw264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 11,
+            "duration_ms": 10052.799999952316,
+            "callback_fps": 1.0942225051778784,
+            "image": {
+              "ok": true,
+              "error": null,
+              "samples": 200,
+              "keys": 2,
+              "capture_p50_ms": 32.03683550236747
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "observed",
+                "latency_lower_ms": 4040.6937450170517,
+                "latency_upper_ms": 4129.237226967234
+              },
+              {
+                "seq": 2,
+                "status": "incomplete",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              }
+            ]
+          },
+          {
+            "name": "calib2-starship-image-lossless.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 11,
+            "duration_ms": 10096.400000035763,
+            "callback_fps": 1.0894972465394632,
+            "image": {
+              "ok": true,
+              "error": null,
+              "samples": 200,
+              "keys": 3,
+              "capture_p50_ms": 30.836710997391492
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "observed",
+                "latency_lower_ms": 3736.0635100048967,
+                "latency_upper_ms": 3829.3449800112285
+              },
+              {
+                "seq": 2,
+                "status": "observed",
+                "latency_lower_ms": 3892.1213620342314,
+                "latency_upper_ms": 3981.0573760187253
+              },
+              {
+                "seq": 3,
+                "status": "incomplete",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              }
+            ]
+          },
+          {
+            "name": "calib2-starship-noimage-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 12,
+            "duration_ms": 10034.600000023842,
+            "callback_fps": 1.1958623163824655,
+            "image": {
+              "ok": true,
+              "skipped": true
+            },
+            "keys": []
+          },
+          {
+            "name": "calib-starship-noimage-h264.result",
+            "raw_ok": false,
+            "error": "Error: window control Traceback (most recent call last):\n  File \"/tmp/remote-chrome-next-pass-20261030/viewer-control.py\", line 20, in <module>\n    w=window();niri('action','power-on-monitors');niri('action','focus-window','--id',str(w['id']))\n  File \"/tmp/remote-chrome-next-pass-20261030/viewer-control.py\", line 8, in window\n    if len(w)!=1:raise ValueError('no unique test window: '+str(w))\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nValueError: no unique test window: []\n",
+            "frames": null,
+            "duration_ms": null,
+            "callback_fps": null,
+            "image": {},
+            "keys": []
+          },
+          {
+            "name": "pilot4-starship-native-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 11,
+            "duration_ms": 10059.199999988079,
+            "callback_fps": 1.093526324162263,
+            "image": {
+              "ok": true,
+              "error": null,
+              "samples": 200,
+              "keys": 3,
+              "capture_p50_ms": 31.914328486891463
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "observed",
+                "latency_lower_ms": 3590.2345849899575,
+                "latency_upper_ms": 3671.5494159725495
+              },
+              {
+                "seq": 2,
+                "status": "observed",
+                "latency_lower_ms": 3891.799319011625,
+                "latency_upper_ms": 3980.733149976004
+              },
+              {
+                "seq": 3,
+                "status": "incomplete",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              }
+            ]
+          },
+          {
+            "name": "pilot3-starship-proxy-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 13,
+            "duration_ms": 10070.5,
+            "callback_fps": 1.2908991609155456,
+            "image": {
+              "ok": true,
+              "error": null,
+              "samples": 200,
+              "keys": 2,
+              "capture_p50_ms": 31.81175098870881
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "timeout",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              },
+              {
+                "seq": 2,
+                "status": "incomplete",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              }
+            ]
+          },
+          {
+            "name": "pilot2-starship-proxy-h264.result",
+            "raw_ok": false,
+            "error": "Error: Waypipe exited 255",
+            "frames": null,
+            "duration_ms": null,
+            "callback_fps": null,
+            "image": {},
+            "keys": []
+          },
+          {
+            "name": "pilot-starship-native-h264.result",
+            "raw_ok": true,
+            "error": null,
+            "frames": 10,
+            "duration_ms": 8065.200000047684,
+            "callback_fps": 1.2398948569088029,
+            "image": {
+              "ok": true,
+              "error": null,
+              "samples": 160,
+              "keys": 1,
+              "capture_p50_ms": 31.893543025944382
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "timeout",
+                "latency_lower_ms": null,
+                "latency_upper_ms": null
+              }
+            ]
+          }
+        ],
+        "owned_test_processes_at_collection": [],
+        "namespace_list_at_collection": ""
+      },
+      "carbon": {
+        "cases": [
+          {
+            "name": "pilot-carbon-native-h264.result",
+            "raw_ok": false,
+            "error": "Error: image sampling {\"ok\":false,\"error\":\"focus changed; input sampling stopped\",\"samples\":100,\"keys\":1,\"capture_p50_ms\":44.73884552135132} ",
+            "frames": null,
+            "duration_ms": null,
+            "callback_fps": null,
+            "image": {
+              "ok": false,
+              "error": "focus changed; input sampling stopped",
+              "samples": 100,
+              "keys": 1,
+              "capture_p50_ms": 44.73884552135132
+            },
+            "keys": [
+              {
+                "seq": 1,
+                "status": "observed",
+                "latency_lower_ms": 194.92888302193023,
+                "latency_upper_ms": 304.55642301240005
+              }
+            ]
+          }
+        ],
+        "owned_test_processes_at_collection": [],
+        "namespace_list_at_collection": ""
+      }
+    }
+  },
+  "network_isolation": {
+    "method": "three new private network namespaces, router egress netem in both directions, private Unix bridge to host SSH endpoint; no host firewall, forwarding, routing or qdisc modifications",
+    "proxy_ping": "PING 198.18.210.5 (198.18.210.5) 56(84) bytes of data.\n64 bytes from 198.18.210.5: icmp_seq=1 ttl=63 time=0.072 ms\n64 bytes from 198.18.210.5: icmp_seq=2 ttl=63 time=0.067 ms\n64 bytes from 198.18.210.5: icmp_seq=3 ttl=63 time=0.027 ms\n64 bytes from 198.18.210.5: icmp_seq=4 ttl=63 time=0.100 ms\n\n--- 198.18.210.5 ping statistics ---\n4 packets transmitted, 4 received, 0% packet loss, time 619ms\nrtt min/avg/max/mdev = 0.027/0.066/0.100/0.026 ms\n",
+    "delay_ping": "PING 198.18.210.5 (198.18.210.5) 56(84) bytes of data.\n64 bytes from 198.18.210.5: icmp_seq=1 ttl=63 time=50.1 ms\n64 bytes from 198.18.210.5: icmp_seq=2 ttl=63 time=50.2 ms\n64 bytes from 198.18.210.5: icmp_seq=3 ttl=63 time=50.3 ms\n64 bytes from 198.18.210.5: icmp_seq=4 ttl=63 time=50.3 ms\n\n--- 198.18.210.5 ping statistics ---\n4 packets transmitted, 4 received, 0% packet loss, time 602ms\nrtt min/avg/max/mdev = 50.071/50.227/50.329/0.103 ms\n",
+    "cleanup": "verified",
+    "profile_calibration": "network-profile-calibration.json",
+    "profiles": {
+      "proxy": {
+        "ping_rtt_ms": {
+          "min": 0.015,
+          "average": 0.017,
+          "max": 0.033,
+          "mdev": 0.005
+        },
+        "sent": 8,
+        "received": 8,
+        "loss_percent": 0.0
+      },
+      "delay": {
+        "ping_rtt_ms": {
+          "min": 50.022,
+          "average": 50.025,
+          "max": 50.032,
+          "mdev": 0.004
+        },
+        "sent": 8,
+        "received": 8,
+        "loss_percent": 0.0
+      },
+      "jitter": {
+        "ping_rtt_ms": {
+          "min": 12.679,
+          "average": 48.085,
+          "max": 81.381,
+          "mdev": 15.699
+        },
+        "sent": 30,
+        "received": 30,
+        "loss_percent": 0.0
+      },
+      "loss": {
+        "ping_rtt_ms": {
+          "min": 50.009,
+          "average": 50.054,
+          "max": 50.402,
+          "mdev": 0.075
+        },
+        "sent": 200,
+        "received": 198,
+        "loss_percent": 1.0
+      },
+      "cap": {
+        "tcp_payload_mbps": [
+          9.559903594967128,
+          9.546663139125476,
+          9.560344827858296
+        ],
+        "mean_mbps": 9.555637187316966
+      }
+    }
+  },
+  "remaining": {
+    "controlled_matrix": "Both viewers; native and unshaped proxy controls plus delay, jitter, loss and 10 Mbit/s cap; H264 hardware 500k vs stock software lossless; three 60-second repeats per cell after passing native calibration.",
+    "manual_acceptance": "Ordinary-page smoothness and artifacts remain unconfirmed after this change.",
+    "calibration_gate": "Native pilot must show at least 10 browser callbacks per second and two reflected input events; focus, geometry and image markers must stay valid. Impaired cases retain slow outcomes and timeouts rather than being excluded by this native-baseline threshold."
+  },
+  "artifact_policy": "Raw scratch evidence is retained at /tmp/remote-chrome-next-pass-20261030 on Snap and viewers; the committed JSON curates test-only facts and excludes unrelated desktop titles, profile contents, secrets and image captures."
+}

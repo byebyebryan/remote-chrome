@@ -135,3 +135,53 @@ For exact pixels, use the existing `--transport lossless` recovery option on
 a fresh launch. Changing the policy later should retain the old canonical
 bitrate in reset parsing and append a new dated result rather than rewriting
 this study.
+
+## Transport follow-up checkpoint, October 30, 2026
+
+The [follow-up checkpoint](../transport-2026-10-30/checkpoint.json) records
+launcher 1.6.0 and the managed `waypipe-remote-chrome 0.11.3-4` deployment to
+Snap, Starship, and Carbon. Live status now distinguishes recorded settings
+from observed encoder/decoder backends. Launch and reset check the compiled
+FFmpeg ABI before changing a browser; the managed installer rebuilds in an
+ABI-specific clean directory. Existing production sessions were preserved.
+
+All eight disposable functional cases passed: hardware video at 500k and
+250k, software video at 500k, and stock lossless on each viewer. Installed
+reset preserved both recorded bitrates and recreated the intended stream.
+Fresh ABI queries matched libavcodec 63 and libavutil 61 on all three hosts.
+Some initial Starship geometry observations preceded resize settlement, so
+these checks establish lifecycle/backend behavior, not matched performance.
+
+**The controlled latency comparison has no accepted results yet.** During
+calibration, direct local Chrome and a separate local GTK app on Starship
+both received approximately one frame callback per second without Waypipe
+or a network connection. Hiding notification popups removed the overlay and
+preserved history but did not change that rate. The user subsequently
+confirmed that Starship's physical display was off or switched away. An
+active-display A/B remains necessary before assigning cause. A Carbon pilot
+stopped when focus changed; Carbon is in active use and further GUI tests
+there are pending. Calibration input delays and the unlimited-frame-rate
+diagnostic are excluded from transport/perceived-smoothness conclusions.
+
+The isolated network prototype verified approximately 50ms added RTT with
+25ms delay in each direction. Its three temporary network namespaces and
+private Unix bridge left host routing, forwarding, firewall and queue
+settings alone; cleanup was verified. This validates the impairment setup,
+not Chrome's behavior under those impairments. A subsequent
+[network-only calibration](../transport-2026-10-30/network-profile-calibration.json)
+confirmed all profiles: fixed delay averaged 50.025ms RTT, the seeded
+0.5%-per-direction loss profile dropped 2 of 200 pings, and three 4 MiB TCP
+downloads through the 10 Mbit/s cap delivered 9.547–9.560 Mbit/s of payload.
+These are short setup checks, not estimates of live-path reliability or
+application latency. Queue counters are cumulative across replacements;
+Chrome trials must use before/after deltas.
+
+The prepared comparison retains native and unshaped-proxy controls, then
+tests delay, jitter, loss and a 10 Mbit/s cap. Each viewer/mode/condition needs
+three 60-second repeats after native calibration passes. Native calibration
+must exceed 10 browser callbacks/second and reflect at least two input
+events, with verified focus, geometry and image markers. That threshold
+applies to the baseline only: slow impaired runs and input timeouts are
+outcomes to retain. Capture-bracketed input-to-received-image timing is not
+physical input-to-photon latency. Ordinary-page smoothness and artifact
+acceptance remain a separate pending user check.
