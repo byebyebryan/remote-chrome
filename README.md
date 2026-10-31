@@ -15,6 +15,7 @@ This README covers installation and host setup. See:
 - [Usage and troubleshooting](docs/usage.md) for launch, reset, handoff, and cleanup.
 - [Configuration](docs/configuration.md) for options and environment defaults.
 - [Architecture](docs/architecture.md) for lifecycle ownership and notification contracts.
+- [Session diagnostics](docs/diagnostics.md) for daily-use incident logs, retention, and export.
 - [Notification study and acceptance index](docs/studies/headless-notifications/README.md)
   for dated evidence, roadmap reconciliation, and remaining acceptance limits.
 - [Contributing](CONTRIBUTING.md) for development dependencies and checks.
@@ -33,6 +34,7 @@ for Chrome transport; forwarding still needs noninteractive SSH.
 | Display | `bash`, `ssh`, `waypipe` with Zstd support, a graphical Wayland session, and `tmux` for detached mode |
 | Browser | `bash`, `waypipe` with Zstd support, `xdg-dbus-proxy`, `secret-tool` (libsecret), `ksecretd` (KWallet/Secret Service), `busctl` (systemd), and the selected Chrome executable |
 | Both, with notifications enabled | `python3` |
+| Both, with session diagnostics enabled | `python3`; `ss` and `ip` (iproute2) for TCP/network observations; optional `tailscale` for passive path context |
 | Both, for interactive headless notifications | Python D-Bus and GLib bindings (`python-dbus` and `python-gobject` on Arch; `python3-dbus` and `python3-gi` on Debian) |
 | Display, for existing-daemon informational forwarding | `notify-send` (libnotify); `busctl` detects body markup support |
 | Display, for bounded notification diagnostics, cleanup, and incoming stop requests | `timeout` (coreutils) |
@@ -41,7 +43,8 @@ for Chrome transport; forwarding still needs noninteractive SSH.
 Interactive notifications also need a display-host notification daemon that
 advertises body and action support. Missing bindings or unsupported capabilities
 produce a warning and let the secure browser launch continue. Disabling
-notifications removes their Python requirement.
+notifications removes their Python requirement. Diagnostics has an independent,
+optional Python requirement; unavailable telemetry never prevents Chrome from running.
 
 Chrome starts with native Wayland and `--disable-features=Vulkan --new-window`.
 The standalone lossless default also disables Chrome GPU rendering. Managed

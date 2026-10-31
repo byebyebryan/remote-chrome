@@ -1,9 +1,17 @@
 # Architecture and lifecycle contracts
 
 The runtime is the single executable [bin/remote-chrome](../bin/remote-chrome).
-It embeds the remote Bash bootstrap and Python notification helpers; nothing
+It embeds the remote Bash bootstrap and Python notification/diagnostics helpers; nothing
 under `docs/studies/` is a runtime dependency. [Usage](usage.md) covers commands,
 and [configuration](configuration.md) defines public defaults.
+
+Optional [session diagnostics](diagnostics.md) observes exact process and SSH
+socket identities locally on each endpoint. The bootstrap and viewer share a
+fresh attempt ID; resets retain the canonical transport command and recorded
+diagnostics policy while replacing that ID. Diagnostics never authorizes
+cleanup, sends owner signals, or changes transport policy. Durable JSONL logs
+use one private per-user store and one shared retention/quota lock per host;
+per-chunk locks protect open writers. There is no permanent collector service.
 
 ## Hosts and ownership
 

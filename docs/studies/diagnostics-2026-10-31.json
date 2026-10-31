@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "purpose": "Daily-use diagnostics delivery and passive sampler sanity",
+  "validation": {
+    "runner": "scripts/check",
+    "shell_checks": 198,
+    "notification_protocol_tests": 18,
+    "generated_bootstrap_tests": 18,
+    "diagnostics_tests": 30,
+    "result": "passed"
+  },
+  "passive_checks": [
+    {
+      "endpoint": "Snap browser",
+      "duration_seconds": 10.067,
+      "samples": 5,
+      "tcp_available": 5,
+      "cpu_seconds_including_tools": 0.2437,
+      "max_rss_kib": 21536,
+      "codec_available": true,
+      "process_kinds": ["chrome", "waypipe"],
+      "owner_unchanged": true,
+      "last_event": "end",
+      "exit": 0
+    },
+    {
+      "endpoint": "Carbon viewer",
+      "duration_seconds": 10.098,
+      "samples": 5,
+      "tcp_available": 5,
+      "cpu_seconds_including_tools": 0.3242,
+      "max_rss_kib": 26816,
+      "codec_available": true,
+      "process_kinds": ["ssh", "waypipe"],
+      "owner_unchanged": true,
+      "last_event": "end",
+      "exit": 0
+    }
+  ],
+  "limits": [
+    "Short passive checks used development snapshots during implementation; they establish collection and rough cost, not a performance guarantee.",
+    "Records were temporary and removed after inspection; no production attempt was adopted or restarted.",
+    "CPU includes the sampler and its reaped helper commands; RSS is a high-water observation, not summed steady-state memory.",
+    "These checks are not a codec, bitrate, compression, network or presentation-latency comparison.",
+    "The existing Carbon-to-Snap tunnel remains on its original bootstrap; durable collection starts at a later deliberate launch/reset.",
+    "Daily-use soak remains ongoing user acceptance; no Carbon controlled matrix or Starship display wake is required."
+  ]
+}

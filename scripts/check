@@ -21,4 +21,5 @@ shellcheck bin/remote-chrome tests/remote-chrome_test.sh scripts/check
 bash tests/remote-chrome_test.sh
 python3 tests/headless_notifications_test.py
 python3 tests/secure_notifications_test.py
+python3 tests/diagnostics_test.py
 git diff --check

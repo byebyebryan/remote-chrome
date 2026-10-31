@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.6.1"
+VERSION="1.7.0"
 
 usage() {
   cat <<USAGE
@@ -14,6 +14,8 @@ Usage:
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
   $PROGRAM reset [HOST] [--session NAME] [--yes]
+  $PROGRAM mark HOST [--session NAME]
+  $PROGRAM diagnostics HOST [--session NAME] [--since 20m] [--export FILE]
 
 Chrome options:
       --session NAME       tmux session name
@@ -48,6 +50,7 @@ Environment:
   REMOTE_CHROME_COMPRESSION
   REMOTE_CHROME_TRANSPORT
   REMOTE_CHROME_VIDEO_CODECS
+  REMOTE_CHROME_DIAGNOSTICS
   REMOTE_CHROME_CONFIG
   REMOTE_CHROME_SESSION_PREFIX
   REMOTE_CHROME_YUBIKEY_USB_ID
@@ -184,6 +187,17 @@ chrome_validate_password_store_args() {
 # that proxy, and only then starts Chrome. Keep this literal heredoc free of
 # local expansion: values arrive as positional arguments in the command line.
 chrome_secure_bootstrap_script() {
+  if [ "${chrome_diagnostics:-off}" = on ] && [ -n "${chrome_diag_attempt:-}" ]; then
+    # Freeze only technical policy and identity, never the local environment.
+    printf 'VERSION=%q\n' "$VERSION"
+    printf 'chrome_diagnostics=on\nchrome_diag_attempt=%q\nchrome_diag_previous=%q\n' \
+      "$chrome_diag_attempt" "${chrome_diag_previous:-}"
+    printf 'chrome_diag_days=%q\nchrome_diag_cap=%q\nchrome_diag_policy=%q\n' \
+      "$chrome_diag_days" "$chrome_diag_cap" "$chrome_diag_policy"
+    printf 'chrome_diag_target=%q\nchrome_diag_session=%q\nchrome_diag_origin=%q\n' \
+      "$chrome_diag_target" "$chrome_diag_session" "$chrome_diag_origin"
+    declare -f chrome_diagnostics_run chrome_diagnostics_start
+  fi
   cat <<'REMOTE_CHROME_SECURE_BOOTSTRAP'
 set -u
 
@@ -582,6 +596,13 @@ trap 'remote_secure_on_exit' EXIT
 trap 'remote_secure_signal 130' INT
 trap 'remote_secure_signal 143' TERM
 trap 'remote_secure_signal 129' HUP
+
+if [ "${chrome_diagnostics:-off}" = on ]; then
+  diagnostics_owner="${BASHPID:-$$}"
+  diagnostics_birth="$(remote_secure_pid_starttime "$diagnostics_owner" 2>/dev/null || true)"
+  chrome_diagnostics_start "$diagnostics_owner" "$diagnostics_birth" browser \
+    "$chrome_diag_target" "$chrome_diag_session" "$chrome_diag_origin" "${SSH_CONNECTION:-}"
+fi
 
 [ -n "$chrome_command" ] || remote_secure_fail "Chrome command is missing."
 [ -n "$secret_application" ] && [ -n "$secret_schema" ] ||
@@ -1611,6 +1632,9 @@ chrome_validate_video_codecs() {
 chrome_transport_defaults() {
   chrome_transport=lossless
   chrome_video_codecs=auto
+  chrome_diagnostics=off
+  chrome_diag_days=30
+  chrome_diag_cap=1073741824
   local config="${REMOTE_CHROME_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/remote-chrome/config}"
   local key value
   if [ -f "$config" ]; then
@@ -1618,6 +1642,9 @@ chrome_transport_defaults() {
       case "$key" in
         transport) chrome_transport="$value" ;;
         video_codecs) chrome_video_codecs="$value" ;;
+        diagnostics) chrome_diagnostics="$value" ;;
+        diagnostics_retention_days) chrome_diag_days="$value" ;;
+        diagnostics_max_bytes) chrome_diag_cap="$value" ;;
         ''|\#*) ;;
         *) echo "Unknown remote-chrome configuration key: $key" >&2; return 1 ;;
       esac
@@ -1625,6 +1652,52 @@ chrome_transport_defaults() {
   fi
   chrome_transport="${REMOTE_CHROME_TRANSPORT:-$chrome_transport}"
   chrome_video_codecs="${REMOTE_CHROME_VIDEO_CODECS:-$chrome_video_codecs}"
+  chrome_diagnostics="${REMOTE_CHROME_DIAGNOSTICS:-$chrome_diagnostics}"
+  chrome_diagnostics_validate
+}
+
+chrome_diagnostics_validate() {
+  case "$chrome_diagnostics" in on|off) ;; *) echo "Invalid diagnostics setting; use on or off." >&2; return 1 ;; esac
+  if [[ ! "$chrome_diag_days" =~ ^([1-9]|[12][0-9]|30)$ ]] ||
+    [[ ! "$chrome_diag_cap" =~ ^[0-9]{7,10}$ ]] ||
+    ((10#$chrome_diag_cap < 8388608 || 10#$chrome_diag_cap > 1073741824)); then
+    echo "Invalid diagnostics retention: use 1..30 days and 8388608..1073741824 bytes." >&2
+    return 1
+  fi
+}
+
+chrome_diagnostics_prepare() {
+  chrome_diag_target="$1" chrome_diag_session="$2"
+  chrome_diag_previous="${3:-}"
+  chrome_diag_origin="$(hostname)"
+  chrome_diag_attempt=""
+  [ "$chrome_diagnostics" = on ] || return 0
+  chrome_diag_attempt="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)" || {
+    echo "remote-chrome: diagnostics attempt identity unavailable; this attempt will not record." >&2
+    chrome_diagnostics=off
+    return 0
+  }
+}
+
+chrome_diagnostics_start() {
+  local owner="$1" birth="$2" role="$3" target="$4" session="$5" origin="$6" connection="${7:-}"
+  [ "${chrome_diagnostics:-off}" = on ] && [ -n "$birth" ] || return 0
+  # The detached helper observes this exact owner and never sends it signals.
+  # Ignore terminal hangup; owner exit ends recording within a sampling cycle.
+  (trap '' HUP
+    chrome_diagnostics_run collect "$target" --session "$session" --origin "$origin" \
+      --role "$role" --attempt "$chrome_diag_attempt" --previous "${chrome_diag_previous:-}" \
+      --owner "$owner" --start "$birth" --connection "$connection" --version "$VERSION" \
+      --policy "$chrome_diag_policy" --days "$chrome_diag_days" --cap "$chrome_diag_cap"
+  ) </dev/null >/dev/null 2>&1 &
+  return 0
+}
+
+chrome_diagnostics_command() {
+  local action="$1"
+  shift
+  chrome_transport_defaults || return 1
+  chrome_diagnostics_run "$action" "$@" --days "$chrome_diag_days" --cap "$chrome_diag_cap"
 }
 
 chrome_waypipe_command=()
@@ -1711,6 +1784,27 @@ chrome_tmux_record_command() {
     "$chrome_yubikey_mode" >/dev/null 2>&1; then
     echo "Could not record the canonical Chrome command in tmux session $session." >&2
     return 1
+  fi
+  chrome_diagnostics_tmux_start "$session"
+  return 0
+}
+
+chrome_diagnostics_tmux_start() {
+  local session="$1"
+  if [ "${chrome_diagnostics:-}" = off ]; then
+    tmux set-option -t "=$session:" @remote-chrome-diagnostics \
+      "off:$chrome_diag_days:$chrome_diag_cap:-" >/dev/null 2>&1 || true
+  elif [ "${chrome_diagnostics:-off}" = on ]; then
+    local pane_pid birth
+    if tmux set-option -t "=$session:" @remote-chrome-diagnostics \
+      "on:$chrome_diag_days:$chrome_diag_cap:$chrome_diag_attempt" >/dev/null 2>&1 &&
+      pane_pid="$(tmux display-message -p -t "=$session:=chrome" '#{pane_pid}' 2>/dev/null)" &&
+      birth="$(notify_pid_starttime "$pane_pid" 2>/dev/null)"; then
+      chrome_diagnostics_start "$pane_pid" "$birth" viewer "$chrome_diag_target" \
+        "$session" "$chrome_diag_origin"
+    else
+      echo "remote-chrome: diagnostics viewer startup unavailable; the browser continues." >&2
+    fi
   fi
   return 0
 }
@@ -2052,6 +2146,9 @@ chrome_launch() {
   fi
   chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
 
+  chrome_diag_policy="$transport:$video_codecs:$compression"
+  [ "$transport" != video ] || chrome_diag_policy+=":h264,bpf=250000"
+  chrome_diagnostics_prepare "$host" "$session"
   secure_script="$(chrome_secure_bootstrap_script)"
   chrome_set_origin_metadata "$host" "$session" "$foreground"
   notify_remote_socket=""
@@ -2070,6 +2167,9 @@ chrome_launch() {
     "$notify_remote_socket" "$notify_apps" "${chrome_args[@]}")"
   command+=("$host" "$remote_command")
   if [ "$foreground" = "1" ]; then
+    local diagnostics_owner="${BASHPID:-$$}"
+    chrome_diagnostics_start "$diagnostics_owner" "$(notify_pid_starttime "$diagnostics_owner" 2>/dev/null || true)" \
+      viewer "$host" "$session" "$chrome_diag_origin"
     if [ -n "$notify_local_socket" ]; then
       notify_start_listener ||
         echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
@@ -3622,6 +3722,7 @@ chrome_reset() {
   local notify_reset_listener_started=0
   local notify_reset_previous_traps=""
   local recreate_failed=0
+  local diagnostics_saved="" diagnostics_previous="" diagnostics_mode=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -3684,6 +3785,30 @@ chrome_reset() {
     die "The selected chrome pane targets $pane_host, not requested host $host; refusing reset."
   fi
   host="$pane_host"
+  chrome_transport_defaults || return 1
+  diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+  if [ -n "$diagnostics_saved" ]; then
+    if [[ "$diagnostics_saved" =~ ^off:([0-9]+):([0-9]+):-$ ]]; then
+      chrome_diagnostics=off
+      chrome_diag_days="${BASH_REMATCH[1]}" chrome_diag_cap="${BASH_REMATCH[2]}"
+      chrome_diagnostics_validate || return 1
+    elif [[ "$diagnostics_saved" =~ ^on:([0-9]+):([0-9]+):([a-f0-9-]{36})$ ]]; then
+      chrome_diagnostics=on
+      chrome_diag_days="${BASH_REMATCH[1]}" chrome_diag_cap="${BASH_REMATCH[2]}"
+      diagnostics_previous="${BASH_REMATCH[3]}"
+      chrome_diagnostics_validate || return 1
+    else
+      echo "Invalid recorded diagnostics policy; refusing reset before teardown." >&2
+      return 1
+    fi
+  fi
+  if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
+    diagnostics_mode="${BASH_REMATCH[1]}:h264,${BASH_REMATCH[2]},bpf=${BASH_REMATCH[3]}"
+  else
+    diagnostics_mode="lossless"
+  fi
+  chrome_diag_policy="$diagnostics_mode"
+  chrome_diagnostics_prepare "$host" "$session" "$diagnostics_previous"
   # A reset must not tear down a working stream before proving that the
   # currently installed video builds can start its recorded transport again.
   if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
@@ -4039,6 +4164,13 @@ chrome_status_current() {
   fi
 
   chrome_transport_status "$host" "$session" || code=1
+  local diagnostics_saved="" diagnostics_attempt=""
+  diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+  if [[ "$diagnostics_saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
+    diagnostics_attempt="${BASH_REMATCH[1]}"
+  fi
+  chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" ||
+    echo "status: diagnostics: degraded (local diagnostic store unavailable)"
   yk_prepare_for_launch "$host"
   if yk_load_state; then
     echo "status: yubikey phase=$yk_phase readiness=$yk_readiness"
@@ -8126,6 +8258,930 @@ if __name__ == "__main__":
 REMOTE_CHROME_NOTIFY_LISTENER
 }
 
+chrome_diagnostics_run() {
+  python3 - "$@" <<'REMOTE_CHROME_DIAGNOSTICS'
+"""Embedded session diagnostics. Technical records only; never a control plane."""
+import argparse
+import datetime as dt
+import errno
+import fcntl
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import selectors
+import shlex
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+SCHEMA = 1
+CHUNK = 4 * 1024 * 1024
+LINE = 32768
+READ_LIMIT = 32 * 1024 * 1024
+FILE_RE = re.compile(r"[a-f0-9-]{36}\.(viewer|browser)\.[a-f0-9]{32}\.jsonl\Z")
+BOOT = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+UID = os.getuid()
+HZ = os.sysconf("SC_CLK_TCK")
+PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+def now():
+    return dict(utc=dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds"),
+                wall=time.time(), mono=time.monotonic(), boot=BOOT)
+
+
+def private(info, directory=False):
+    return (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)) and \
+        info.st_uid == UID and not info.st_mode & 0o077 and (directory or info.st_nlink == 1)
+
+
+class Store:
+    """Directory-relative I/O, nonblocking host lock and live chunk reservations.
+
+    An open chunk is charged CHUNK bytes against quota, without preallocation.
+    Every writer holds its chunk flock until close. Pruning never removes one.
+    """
+    def __init__(self, days=30, cap=1073741824, base=None, create=True):
+        self.days, self.cap = days, cap
+        self.fd = self.lock = self.writer = None
+        self.size = self.opened = 0
+        self.path = Path(base or os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+        self.path = self.path / "remote-chrome/diagnostics"
+        if not self.path.is_absolute() or ".." in self.path.parts:
+            raise ValueError("diagnostic state path must be absolute without parent traversal")
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for index, part in enumerate(self.path.parts[1:]):
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                info = os.fstat(descriptor)
+                if index == len(self.path.parts) - 3 and (info.st_uid != UID or info.st_mode & 0o022):
+                    raise ValueError("diagnostic parent must be owned and not writable by others")
+                if index == len(self.path.parts) - 2 and not private(info, True):
+                    raise ValueError("diagnostic directories must be private and owned")
+            self.fd, descriptor = descriptor, None
+            if create:
+                self.lock = self.open_file(".lock", os.O_RDWR | os.O_CREAT)
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def open_file(self, name, flags):
+        descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=self.fd)
+        if not private(os.fstat(descriptor)):
+            os.close(descriptor)
+            raise ValueError("unsafe diagnostic file")
+        return descriptor
+
+    def chunks(self):
+        names = os.listdir(self.fd)
+        if len(names) > 10000:
+            raise ValueError("diagnostic directory entry limit exceeded")
+        result = []
+        for name in names:
+            if name == ".lock":
+                continue
+            try:
+                info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # Another command may have pruned a closed chunk.
+            if not FILE_RE.fullmatch(name) or not private(info):
+                raise ValueError("unsafe or unrecognized diagnostic entry")
+            result.append((info.st_mtime, name, info.st_size))
+        return sorted(result)
+
+    def prune_locked(self, reserve=0):
+        opened = []
+        total = 0
+        try:
+            for stamp, name, size in self.chunks():
+                descriptor = self.open_file(name, os.O_RDONLY)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(descriptor)
+                    total += max(CHUNK, size)
+                    continue
+                # A writer may have appended and closed since chunks() ran.
+                # Once its lock is held, account the final size, not that scan.
+                held = os.fstat(descriptor)
+                stamp, size = held.st_mtime, held.st_size
+                # Keep locked closed chunks until the quota decision is complete.
+                opened.append((stamp, name, size, descriptor))
+                total += size
+            for stamp, name, size, descriptor in opened:
+                if stamp < time.time() - self.days * 86400 or total + reserve > self.cap:
+                    current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                    held = os.fstat(descriptor)
+                    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                        raise ValueError("diagnostic chunk changed during pruning")
+                    os.unlink(name, dir_fd=self.fd)
+                    total -= size
+            return total + reserve <= self.cap
+        finally:
+            for _, _, _, descriptor in opened:
+                os.close(descriptor)
+
+    def prune(self):
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        try:
+            return self.prune_locked()
+        finally:
+            fcntl.flock(self.lock, fcntl.LOCK_UN)
+
+    def rotate(self):
+        if self.writer is not None:
+            os.close(self.writer)
+            self.writer = None
+
+    def append(self, record):
+        raw = (json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode()
+        if len(raw) > LINE or len(raw) > CHUNK:
+            raise ValueError("diagnostic record too large")
+        if self.writer is not None and (self.size + len(raw) > CHUNK or time.monotonic() - self.opened >= 3600):
+            self.rotate()
+        if self.writer is None:
+            try:
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            try:
+                if not self.prune_locked(CHUNK):
+                    return False
+                attempt, role = record["attempt"], record["role"]
+                uuid.UUID(attempt)
+                name = f"{attempt}.{role}.{uuid.uuid4().hex}.jsonl"
+                if not FILE_RE.fullmatch(name):
+                    raise ValueError("invalid diagnostic identity")
+                self.writer = self.open_file(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                fcntl.flock(self.writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.size, self.opened = 0, time.monotonic()
+            finally:
+                fcntl.flock(self.lock, fcntl.LOCK_UN)
+        if not private(os.fstat(self.writer)):
+            raise ValueError("diagnostic writer identity changed")
+        written = os.write(self.writer, raw)
+        if written != len(raw):
+            self.rotate()
+            raise OSError(errno.ENOSPC, "short diagnostic write")
+        self.size += written
+        return True
+
+    def records(self, since, until, target=None, origin=None, session=None):
+        used = 0
+        for stamp, name, _ in reversed(self.chunks()):
+            if stamp < since:
+                continue
+            try:
+                descriptor = self.open_file(name, os.O_RDONLY)
+            except FileNotFoundError:
+                continue
+            with os.fdopen(descriptor, "rb") as stream:
+                while True:
+                    raw = stream.readline(LINE + 1)
+                    if not raw:
+                        break
+                    used += len(raw)
+                    if used > READ_LIMIT:
+                        raise ValueError("query read limit reached; request a shorter time window")
+                    if len(raw) > LINE or not raw.endswith(b"\n"):
+                        continue
+                    try:
+                        row = json.loads(raw)
+                        if row.get("schema") != SCHEMA or not since <= row["wall"] <= until:
+                            continue
+                        if row.get("role") not in {"viewer", "browser"} or \
+                                any(not isinstance(row.get(k), str) for k in ("attempt", "host", "utc", "event")):
+                            continue
+                        uuid.UUID(row["attempt"])
+                        if target is not None and row.get("target") != target:
+                            continue
+                        if origin is not None and row.get("origin") != origin:
+                            continue
+                        if session is not None and row.get("session") != session:
+                            continue
+                        yield row
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        continue
+
+    def close(self):
+        self.rotate()
+        for attr in ("lock", "fd"):
+            descriptor = getattr(self, attr, None)
+            if descriptor is not None:
+                os.close(descriptor)
+                setattr(self, attr, None)
+
+
+def process(pid):
+    try:
+        path = Path("/proc") / str(int(pid))
+        if path.stat().st_uid != UID:
+            return None
+        with (path / "stat").open() as stream:
+            fields = stream.read(8192).rsplit(")", 1)[1].split()
+        if fields[0] in {"Z", "X"}:
+            return None
+        with (path / "cmdline").open("rb") as stream:
+            argv = stream.read(8192).split(b"\0")
+        # argv is transient selection data. It is never written to the store.
+        return dict(pid=int(pid), start=fields[19], ppid=int(fields[1]),
+                    ticks=int(fields[11]) + int(fields[12]), rss=int(fields[21]) * PAGE,
+                    exe=os.readlink(path / "exe").removesuffix(" (deleted)"),
+                    argv=[os.fsdecode(a) for a in argv if a])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def exact(pid, start):
+    row = process(pid)
+    return row if row and row["start"] == start else None
+
+
+def tree(root):
+    rows, todo = {}, [root]
+    while todo and len(rows) < 512:
+        pid = todo.pop()
+        if pid in rows:
+            continue
+        row = process(pid)
+        if not row:
+            continue
+        rows[pid] = row
+        try:
+            children = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text()[:8192]
+            todo.extend(int(p) for p in children.split() if p.isdigit())
+        except OSError:
+            pass
+    return rows
+
+
+def is_waypipe(row):
+    return Path(row["exe"]).name in {"waypipe", "waypipe-remote-chrome"}
+
+
+def browser_waypipe(owner):
+    row = owner
+    for _ in range(64):
+        row = process(row["ppid"])
+        if not row:
+            return None
+        if is_waypipe(row) and "server" in row["argv"]:
+            return row
+    return None
+
+
+def bounded(command, timeout=0.7, limit=262144):
+    """Bound time and output before parsing, including noisy/broken tools."""
+    child = None
+    try:
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        result = bytearray()
+        deadline = time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                ready = selector.select(left)
+                if not ready:
+                    return None
+                part = os.read(child.stdout.fileno(), min(65536, limit + 1 - len(result)))
+                if not part:
+                    child.wait(timeout=max(0.001, deadline - time.monotonic()))
+                    return result.decode(errors="replace") if child.returncode == 0 else None
+                result.extend(part)
+                if len(result) > limit:
+                    return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                child.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
+            child.stdout.close()
+
+
+def address(value):
+    host, port = value.rsplit(":", 1)
+    return str(ipaddress.ip_address(host.strip("[]"))), int(port)
+
+
+def parse_ss(raw):
+    rows = []
+    for line in (raw or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != "ESTAB":
+            continue
+        try:
+            local, peer = address(parts[3]), address(parts[4])
+            values = dict(re.findall(r"\b([a-z_]+):([^\s]+)", line))
+            if not values.get("ino") or not values.get("sk"):
+                continue
+            row = dict(local=list(local), peer=list(peer), inode=values["ino"], cookie=values["sk"],
+                       recv_queue=int(parts[1]), send_queue=int(parts[2]))
+            for key in ("bytes_sent", "bytes_received", "bytes_retrans", "segs_in", "segs_out", "cwnd"):
+                row[key] = int(values[key]) if values.get(key, "").isdigit() else None
+            rtt = values.get("rtt", "").split("/")
+            row["rtt_ms"] = float(rtt[0]) if rtt[0] else None
+            row["rttvar_ms"] = float(rtt[1]) if len(rtt) == 2 else None
+            retrans = values.get("retrans", "").split("/")
+            row["retrans_total"] = int(retrans[1]) if len(retrans) == 2 else None
+            rows.append(row)
+        except (ValueError, IndexError):
+            continue
+    return rows
+
+
+def tcp_sample(role, rows, connection, selected):
+    if role == "browser":
+        try:
+            client, cport, server, sport = connection.split()
+            client, server = str(ipaddress.ip_address(client)), str(ipaddress.ip_address(server))
+            wanted = ([server, int(sport)], [client, int(cport)])
+        except (ValueError, TypeError):
+            return dict(available=False, reason="missing SSH connection identity")
+        raw = bounded(["ss", "-tineHO", "src", server, "dst", client,
+                       "sport", "=", str(sport), "dport", "=", str(cport)])
+        sockets = [r for r in parse_ss(raw) if (r["local"], r["peer"]) == wanted]
+    else:
+        ssh = [r for r in rows.values() if Path(r["exe"]).name == "ssh"]
+        if len(ssh) != 1:
+            return dict(available=False, reason="SSH process absent or ambiguous")
+        # A ControlMaster client can have only a Unix socket: don't attribute
+        # the shared master's traffic to this attempt.
+        inodes = set()
+        try:
+            for fd in (Path("/proc") / str(ssh[0]["pid"]) / "fd").iterdir():
+                link = os.readlink(fd)
+                if link.startswith("socket:["):
+                    inodes.add(link[8:-1])
+        except OSError:
+            return dict(available=False, reason="SSH socket descriptors unavailable")
+        if selected:
+            raw = bounded(["ss", "-tineHO", "src", selected["local"][0], "dst", selected["peer"][0],
+                           "sport", "=", str(selected["local"][1]), "dport", "=", str(selected["peer"][1])])
+        else:
+            raw = bounded(["ss", "-tineHO"])
+        sockets = [r for r in parse_ss(raw) if r["inode"] in inodes]
+        if not exact(ssh[0]["pid"], ssh[0]["start"]):
+            sockets = []
+    if len(sockets) != 1:
+        return dict(available=False, reason="TCP socket unavailable or ambiguous")
+    return dict(available=True, scope="SSH connection including its forwarded channels", **sockets[0])
+
+
+def codec_snapshot(rows):
+    observations = []
+    for row in rows.values():
+        if not is_waypipe(row):
+            continue
+        try:
+            with (Path("/proc") / str(row["pid"]) / "environ").open("rb") as stream:
+                env = stream.read(131072).split(b"\0")
+            value = next((p.split(b"=", 1)[1] for p in env if p.startswith(b"WAYPIPE_REMOTE_CHROME_STATUS_DIR=")), None)
+            if value is None:
+                continue
+            directory = Path(os.fsdecode(value))
+            # Resolve no symlink in this process-provided path.
+            if not directory.is_absolute() or directory.resolve() != directory or not private(directory.lstat(), True):
+                continue
+            path = directory / f"{row['pid']}-{row['start']}.json"
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor) as stream:
+                if not private(os.fstat(stream.fileno())) or os.fstat(stream.fileno()).st_size > 4096:
+                    continue
+                data = json.loads(stream.read(4097))
+            if data.get("schema") != 1 or any(data.get(k) != v for k, v in
+                    (("pid", row["pid"]), ("start", row["start"]), ("boot", BOOT))):
+                continue
+            keys = ("encoder_hw", "encoder_sw", "decoder_hw", "decoder_sw")
+            if any(type(data.get(k)) is not int or not 0 <= data[k] <= 4096 for k in keys):
+                continue
+            if exact(row["pid"], row["start"]):
+                observations.append(dict(pid=row["pid"], start=row["start"], **{k: data[k] for k in keys}))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return dict(available=bool(observations), contexts=observations)
+
+
+def helper_observation(args):
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    if args.role == "browser":
+        paths = list(runtime.glob("remote-chrome-incoming-*.state"))[:128]
+    else:
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", args.session)
+        paths = [runtime / f"remote-chrome-notify-{name}.state"]
+    for path in paths:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor) as stream:
+                if not private(os.fstat(stream.fileno())) or os.fstat(stream.fileno()).st_size > 16384:
+                    continue
+                fields = dict(line.split("\t", 1) for line in stream.read(16385).splitlines() if "\t" in line)
+            if args.role == "browser":
+                if (fields.get("pid"), fields.get("starttime"), fields.get("boot_id")) != (str(args.owner), args.start, BOOT):
+                    continue
+                backend = fields.get("notify_backend")
+                if backend not in {"desktop", "helper", "unavailable", "disabled"}:
+                    continue
+                pid, start = fields.get("notify_pid", ""), fields.get("notify_starttime", "")
+                return dict(available=True, backend=backend, startup_error=bool(fields.get("notify_error")),
+                            helper_alive=exact(pid, start) is not None if pid.isdigit() and start.isdigit() else None)
+            if fields.get("host") != args.target or fields.get("session") != args.session:
+                continue
+            pid, start = fields.get("listener_pid", ""), fields.get("listener_starttime", "")
+            return dict(available=True, helper_alive=exact(pid, start) is not None
+                        if pid.isdigit() and start.isdigit() else None)
+        except (OSError, ValueError, TypeError):
+            continue
+    return dict(available=False)
+
+
+def path_sample(peer):
+    result = dict(tailscale=dict(available=False), route=None, links=None)
+    if not peer:
+        return result
+    route = bounded(["ip", "-j", "route", "get", peer])
+    links = bounded(["ip", "-j", "link", "show"])
+    status = bounded(["tailscale", "status", "--json"], limit=1048576)
+    try:
+        result["route"] = [{k: r.get(k) for k in ("dev", "gateway", "prefsrc", "dst")} for r in json.loads(route or "null")][:4]
+    except (ValueError, TypeError, AttributeError):
+        pass
+    try:
+        result["links"] = [{k: r.get(k) for k in ("ifindex", "ifname", "operstate", "mtu")}
+                           for r in json.loads(links or "null")][:64]
+    except (ValueError, TypeError, AttributeError):
+        pass
+    try:
+        data = json.loads(status or "null")
+        peers = [p for p in data["Peer"].values() if peer in p.get("TailscaleIPs", [])]
+        if len(peers) == 1:
+            p = peers[0]
+            # Relay is a home DERP region; it alone does not establish an
+            # active relayed connection. Preserve ambiguous status as unknown.
+            direct = p.get("CurAddr") or None
+            relay = p.get("PeerRelay") or None
+            mode = "direct" if direct else "peer-relay" if relay else "unknown"
+            result["tailscale"] = dict(available=True, mode=mode, active=p.get("Active"),
+                                       direct_address=direct, home_derp=p.get("Relay"), peer_relay=relay)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return result
+
+
+def differences(current, previous, elapsed):
+    keys = ("bytes_sent", "bytes_received", "bytes_retrans", "retrans_total")
+    if not current.get("available") or not previous or not previous.get("available"):
+        return None, "baseline unavailable"
+    if any(current.get(k) != previous.get(k) for k in ("local", "peer", "inode", "cookie")):
+        return None, "socket identity changed"
+    result = {}
+    for key in keys:
+        a, b = current.get(key), previous.get(key)
+        result[key] = a - b if type(a) is int and type(b) is int and a >= b else None
+        if type(a) is int and type(b) is int and a < b:
+            return None, "counter discontinuity"
+    return dict(seconds=elapsed, **result), None
+
+
+def common(args):
+    return dict(schema=SCHEMA, attempt=args.attempt, role=args.role, origin=args.origin,
+                target=args.target, session=args.session, host=socket.gethostname())
+
+
+def collect(args):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    stopped = False
+
+    def stop(_number, _frame):
+        nonlocal stopped
+        stopped = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    identity = common(args)
+    identity.update(owner=dict(pid=args.owner, start=args.start),
+                    collector=dict(pid=os.getpid(), start=process(os.getpid())["start"]),
+                    policy=args.policy, launcher=args.version)
+    store = Store(args.days, args.cap)
+    owner = exact(args.owner, args.start)
+    if not owner:
+        store.close()
+        return 0
+    previous, prior_process, previous_clock = None, {}, None
+    selected, last_codec, last_path, last_helpers = None, None, None, None
+    next_path, next_prune, dropped = 0, 0, 0
+
+    def emit(event, **data):
+        nonlocal dropped
+        try:
+            if dropped:
+                if store.append(dict(identity, **now(), event="collection_gap", lost_records=dropped)):
+                    dropped = 0
+                else:
+                    dropped += 1
+                    return
+            if not store.append(dict(identity, **now(), event=event, **data)):
+                dropped += 1
+        except (OSError, ValueError):
+            store.rotate()
+            dropped += 1
+
+    abi = None
+    try:
+        value = json.loads(bounded(["waypipe-remote-chrome", "--remote-chrome-info"]) or "null")
+        if isinstance(value, dict) and value.get("schema") == 1 and \
+                all(type(value.get(k)) is int and 0 < value[k] < 1000 for k in ("libavcodec_major", "libavutil_major")) and \
+                type(value.get("compatible")) is bool:
+            abi = {k: value.get(k) for k in ("libavcodec_major", "libavutil_major", "compatible")}
+    except ValueError:
+        pass
+    emit("start", kernel=os.uname().release, waypipe_abi=abi,
+         previous_attempt=args.previous or None, sample_seconds=2, path_seconds=30,
+         retention_days=args.days, cap_bytes=args.cap)
+    if args.previous:
+        emit("reset", previous_attempt=args.previous)
+    deadline = time.monotonic()
+    try:
+        while not stopped:
+            owner = exact(args.owner, args.start)
+            if not owner:
+                break
+            clock = now()
+            if previous_clock:
+                elapsed = clock["mono"] - previous_clock["mono"]
+                if elapsed > 4.5 or abs((clock["wall"] - previous_clock["wall"]) - elapsed) > 1:
+                    emit("clock_or_sampling_gap", seconds=elapsed)
+                    previous, prior_process = None, {}
+            else:
+                elapsed = None
+            root = browser_waypipe(owner) if args.role == "browser" else owner
+            rows = tree(root["pid"]) if root else tree(owner["pid"])
+            # Re-prove the selected lifetime after traversal before attribution.
+            if not exact(args.owner, args.start) or (root and not exact(root["pid"], root["start"])):
+                break
+            tcp = tcp_sample(args.role, rows, args.connection, selected)
+            delta, discontinuity = differences(tcp, previous, elapsed)
+            if tcp.get("available"):
+                selected = tcp
+            if discontinuity not in (None, "baseline unavailable"):
+                emit("tcp_discontinuity", reason=discontinuity)
+            measurements = []
+            chrome_roots = {r["pid"] for r in rows.values() if Path(r["exe"]).name in
+                            {"chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "fake-chrome"}}
+            chrome_children = set(chrome_roots)
+            for _ in range(64):
+                children = {r["pid"] for r in rows.values() if r["ppid"] in chrome_children}
+                if children <= chrome_children:
+                    break
+                chrome_children |= children
+            current_process = {}
+            for row in rows.values():
+                kind = "waypipe" if is_waypipe(row) else "ssh" if Path(row["exe"]).name == "ssh" else \
+                    "chrome" if row["pid"] in chrome_children else None
+                if not kind:
+                    continue
+                key = (row["pid"], row["start"])
+                old = prior_process.get(key)
+                cpu = 100 * (row["ticks"] - old) / HZ / elapsed if old is not None and elapsed else None
+                measurements.append(dict(pid=row["pid"], start=row["start"], kind=kind,
+                                         cpu_percent=cpu if cpu is not None and cpu >= 0 else None,
+                                         rss_bytes=row["rss"]))
+                current_process[key] = row["ticks"]
+            emit("sample", tcp=tcp, delta=delta, processes=measurements,
+                 process_limit=len(rows) >= 512)
+            codec = codec_snapshot(rows)
+            if codec != last_codec:
+                emit("codec", **codec)
+                last_codec = codec
+            helpers = helper_observation(args)
+            if helpers != last_helpers:
+                emit("helpers", **helpers)
+                last_helpers = helpers
+            if clock["mono"] >= next_path:
+                path = path_sample(tcp["peer"][0] if tcp.get("available") else None)
+                if path != last_path:
+                    emit("network", **path)
+                    last_path = path
+                next_path = clock["mono"] + 30
+            if clock["mono"] >= next_prune:
+                try:
+                    store.prune()
+                except (OSError, ValueError):
+                    emit("retention_unavailable")
+                next_prune = clock["mono"] + 30
+            previous, prior_process, previous_clock = tcp, current_process, clock
+            deadline += 2
+            if deadline < time.monotonic():
+                deadline = time.monotonic()
+            while not stopped and time.monotonic() < deadline:
+                time.sleep(max(0, min(0.1, deadline - time.monotonic())))
+        emit("end", reason="collector_signal" if stopped else "owner_exited_or_replaced")
+    except Exception:
+        # No error messages from tools, paths or Chrome are persisted.
+        emit("collector_failure")
+    finally:
+        store.close()
+    return 0
+
+
+def percentile(values, p):
+    return sorted(values)[max(0, math.ceil(len(values) * p) - 1)] if values else None
+
+
+def summarize(records):
+    groups = {}
+    for row in sorted(records, key=lambda r: r["wall"]):
+        key = (row["attempt"], row["role"], row["host"])
+        g = groups.setdefault(key, dict(attempt=key[0], role=key[1], host=key[2],
+                                       first=row["utc"], last=row["utc"], samples=0,
+                                       unavailable=0, gaps=0, rtts=[], variations=[], rate=[], retrans=0,
+                                       retrans_observations=0, queue=None, cpu={}, rss={}, codecs=[], networks=[], events=[]))
+        g["last"] = row["utc"]
+        event = row.get("event")
+        if event == "sample":
+            g["samples"] += 1
+            tcp, delta = row.get("tcp", {}), row.get("delta")
+            if not tcp.get("available"):
+                g["unavailable"] += 1
+            for field, output in (("rtt_ms", "rtts"), ("rttvar_ms", "variations")):
+                if type(tcp.get(field)) in (float, int):
+                    g[output].append(tcp[field])
+            if type(tcp.get("send_queue")) is int:
+                g["queue"] = max(g["queue"] or 0, tcp["send_queue"])
+            if delta and delta.get("seconds", 0) > 0:
+                counts = [delta.get(k) for k in ("bytes_sent", "bytes_received")]
+                if all(type(v) is int for v in counts):
+                    g["rate"].append(sum(counts) / delta["seconds"])
+                if type(delta.get("retrans_total")) is int:
+                    g["retrans"] += delta["retrans_total"]
+                    g["retrans_observations"] += 1
+            totals = {}
+            for proc in row.get("processes", []):
+                t = totals.setdefault(proc["kind"], [0, 0, False])
+                t[1] += proc.get("rss_bytes", 0)
+                if proc.get("cpu_percent") is not None:
+                    t[0] += proc["cpu_percent"]
+                    t[2] = True
+            for kind, (cpu, rss, available) in totals.items():
+                if available:
+                    g["cpu"][kind] = max(g["cpu"].get(kind, 0), cpu)
+                g["rss"][kind] = max(g["rss"].get(kind, 0), rss)
+        elif event == "codec":
+            g["codecs"].append({k: row[k] for k in ("utc", "available", "contexts") if k in row})
+        elif event == "network":
+            g["networks"].append({k: row[k] for k in ("utc", "tailscale", "route") if k in row})
+        elif event in {"collection_gap", "clock_or_sampling_gap", "collector_failure", "retention_unavailable"}:
+            g["gaps"] += 1
+        elif event in {"mark", "start", "end", "reset", "tcp_discontinuity"} or \
+                (event == "helpers" and (row.get("startup_error") or row.get("helper_alive") is False)):
+            g["events"].append({k: row[k] for k in ("event", "utc", "reason", "previous_attempt") if k in row})
+    result = []
+    for g in groups.values():
+        g["rtt_p95_ms"] = percentile(g.pop("rtts"), 0.95)
+        g["rttvar_p95_ms"] = percentile(g.pop("variations"), 0.95)
+        rates = g.pop("rate")
+        g["traffic_peak_bytes_sec"] = max(rates) if rates else None
+        if not g.pop("retrans_observations"):
+            g["retrans"] = None
+        result.append(g)
+    return result
+
+
+def duration(value):
+    match = re.fullmatch(r"([1-9][0-9]*)([smhd])", value)
+    if not match:
+        raise ValueError("--since expects e.g. 20m, 2h or 1d")
+    seconds = int(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match[2]]
+    if seconds > 30 * 86400:
+        raise ValueError("query window exceeds 30 days")
+    return seconds
+
+
+def report(label, data):
+    print(label + ": " + data.get("status", "available"))
+    if not data.get("summaries"):
+        print("  No recorded samples in this window; collection starts on a deliberate launch/reset.")
+    for g in data.get("summaries", []):
+        print(f"  {g['attempt']} {g['host']} {g['role']}: {g['samples']} samples, "
+              f"{g['unavailable']} TCP unavailable, {g['gaps']} gaps")
+        print(f"    {g['first']} to {g['last']}")
+        def fmt(value, suffix, scale=1):
+            return "unavailable" if value is None else f"{value / scale:.1f}{suffix}"
+        print("    RTT p95 " + fmt(g["rtt_p95_ms"], " ms") + "; variation p95 " +
+              fmt(g["rttvar_p95_ms"], " ms") + "; peak traffic " +
+              fmt(g["traffic_peak_bytes_sec"], " KiB/s", 1024) +
+              "; interval retransmissions " + str(g["retrans"] if g["retrans"] is not None else "unavailable") +
+              "; max send queue " + fmt(g['queue'], " bytes"))
+        if g["cpu"]:
+            print("    peak process CPU " + ", ".join(f"{k}={v:.1f}%" for k, v in sorted(g["cpu"].items())))
+        if g["events"]:
+            print("    events: " + ", ".join(e["event"] + "@" + e["utc"] for e in g["events"][-12:]))
+        if g["codecs"]:
+            counts = {}
+            for context in g["codecs"][-1].get("contexts", []):
+                for key in ("encoder_hw", "encoder_sw", "decoder_hw", "decoder_sw"):
+                    counts[key] = counts.get(key, 0) + context.get(key, 0)
+            print("    last codec observation: " + (json.dumps(counts, sort_keys=True) if counts else "unavailable"))
+        if g["networks"]:
+            print("    passive path observations: " + ", ".join(n["tailscale"].get("mode", "unavailable")
+                  + "@" + n["utc"] for n in g["networks"][-6:]))
+
+
+def query(args):
+    store = Store(args.days, args.cap)
+    try:
+        store.prune()
+        records = list(store.records(args.since_wall, args.until_wall, args.target,
+                                     args.origin or None, args.session or None))
+        return dict(schema=SCHEMA, status="available", summaries=summarize(records),
+                    records=records if args.include_records else [])
+    finally:
+        store.close()
+
+
+def query_cli(args):
+    until = time.time()
+    args.since_wall, args.until_wall = until - duration(args.since), until
+    args.include_records = bool(args.export)
+    args.origin = socket.gethostname()
+    local = query(args)
+    report("Local", local)
+    remote = dict(status="unavailable (SSH or diagnostics helper unavailable)")
+    command = ["remote-chrome", "_diagnostics-query", args.target, "--origin", args.origin,
+               "--since-wall", str(args.since_wall), "--until-wall", str(until),
+               "--days", str(args.days), "--cap", str(args.cap)]
+    if args.session:
+        command += ["--session", args.session]
+    if args.include_records:
+        command += ["--include-records"]
+    raw = bounded(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                   "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=1",
+                   args.target, shlex.join(command)], timeout=10, limit=READ_LIMIT)
+    try:
+        data = json.loads(raw or "null")
+        if isinstance(data, dict) and data.get("schema") == SCHEMA:
+            remote = data
+    except ValueError:
+        pass
+    report("Browser endpoint", remote)
+    if args.export:
+        output = Path(args.export)
+        store_path = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "remote-chrome/diagnostics"
+        if output.resolve().is_relative_to(store_path.resolve()):
+            raise ValueError("export must be outside the managed diagnostic store")
+        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(json.dumps(dict(schema=SCHEMA, event="export", since=args.since_wall,
+                                         until=until, remote_status=remote.get("status"))) + "\n")
+            for record in local.get("records", []) + remote.get("records", []):
+                stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+        print("Exported selected time window: " + str(output))
+    print("TCP connection counters include forwarded channels; these are not frame latency measurements.")
+    return 0
+
+
+def mark(args):
+    store = Store(args.days, args.cap)
+    try:
+        store.prune()
+        records = list(store.records(time.time() - 300, time.time(), args.target,
+                                     socket.gethostname(), args.session or None))
+        if not records:
+            raise ValueError("no local attempt recorded in the last five minutes")
+        row = max(records, key=lambda r: r["wall"])
+        record = {k: row[k] for k in ("schema", "attempt", "role", "origin", "target", "session", "host")}
+        record.update(now(), event="mark")
+        if not store.append(record):
+            raise ValueError("diagnostic quota or lock unavailable; mark was not stored")
+        print("Marked " + record["utc"] + " attempt " + record["attempt"])
+    finally:
+        store.close()
+    return 0
+
+
+def status_cli(args):
+    try:
+        store = Store(args.days, args.cap, create=False)
+    except FileNotFoundError:
+        print("status: diagnostics: " + ("degraded (recorded attempt has no store)" if args.attempt else
+                                         "off for this attempt (starts on next launch/reset)"))
+        return 0
+    try:
+        records = list(store.records(time.time() - 300, time.time(), args.target,
+                                     socket.gethostname(), args.session or None))
+        if args.attempt:
+            records = [r for r in records if r["attempt"] == args.attempt]
+        if not records:
+            print("status: diagnostics: " + ("degraded (no recent sample for recorded attempt)" if args.attempt else
+                                             "off for this attempt (starts on next launch/reset)"))
+            return 0
+        latest = max(records, key=lambda r: r["wall"])
+        attempt = latest["attempt"]
+        rows = [r for r in records if r["attempt"] == attempt]
+        samples = [r for r in rows if r["event"] == "sample"]
+        starts = [r for r in rows if r.get("collector")]
+        running = False
+        if starts:
+            birth = max(starts, key=lambda r: r["wall"])
+            collector = birth.get("collector", {})
+            running = birth["boot"] == BOOT and exact(collector.get("pid", 0), collector.get("start", "")) is not None
+        sample = max(samples, key=lambda r: r["wall"]) if samples else None
+        owner = latest.get("owner", {})
+        owner_live = latest["boot"] == BOOT and exact(owner.get("pid", 0), owner.get("start", "")) is not None
+        state = "active" if running and sample and time.time() - sample["wall"] < 8 else \
+            "degraded" if running or (args.attempt and owner_live) else "off"
+        print(f"status: diagnostics: {state}; attempt={attempt}; last sample={sample['utc'] if sample else 'unavailable'}; {store.path}")
+    finally:
+        store.close()
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("collect", "query", "query-local", "mark", "status"))
+    parser.add_argument("target")
+    parser.add_argument("--session", default="")
+    parser.add_argument("--origin", default="")
+    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--cap", type=int, default=1073741824)
+    parser.add_argument("--since", default="20m")
+    parser.add_argument("--since-wall", type=float, default=0)
+    parser.add_argument("--until-wall", type=float, default=0)
+    parser.add_argument("--include-records", action="store_true")
+    parser.add_argument("--export")
+    parser.add_argument("--attempt", default="")
+    parser.add_argument("--previous", default="")
+    parser.add_argument("--role", choices=("viewer", "browser"), default="viewer")
+    parser.add_argument("--owner", type=int, default=0)
+    parser.add_argument("--start", default="")
+    parser.add_argument("--connection", default="")
+    parser.add_argument("--version", default="")
+    parser.add_argument("--policy", default="")
+    args = parser.parse_args(argv)
+    if not 1 <= args.days <= 30 or not 2 * CHUNK <= args.cap <= 1073741824:
+        raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")
+    if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}", args.target):
+        raise ValueError("invalid diagnostic target")
+    if args.action == "collect":
+        uuid.UUID(args.attempt)
+        return collect(args)
+    if args.action == "query-local":
+        if not 0 < args.since_wall < args.until_wall or args.until_wall - args.since_wall > 30 * 86400:
+            raise ValueError("invalid diagnostic query window")
+        print(json.dumps(query(args), separators=(",", ":")))
+        return 0
+    if args.action == "query":
+        return query_cli(args)
+    if args.action == "mark":
+        return mark(args)
+    return status_cli(args)
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    try:
+        sys.exit(main())
+    except (OSError, ValueError) as error:
+        print("remote-chrome diagnostics: " + str(error), file=sys.stderr)
+        sys.exit(1)
+REMOTE_CHROME_DIAGNOSTICS
+}
+
 main() {
   local subcommand="${1:-}"
 
@@ -8153,6 +9209,18 @@ main() {
     reset)
       shift
       chrome_reset "$@"
+      ;;
+    mark)
+      shift
+      chrome_diagnostics_command mark "$@"
+      ;;
+    diagnostics)
+      shift
+      chrome_diagnostics_command query "$@"
+      ;;
+    _diagnostics-query)
+      shift
+      chrome_diagnostics_run query-local "$@"
       ;;
     _yubikey-run)
       shift

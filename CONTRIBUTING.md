@@ -34,13 +34,14 @@ Then run:
 ```
 
 The same runner is used by GitHub Actions. It checks Bash syntax, ShellCheck,
-three test suites, and `git diff --check`:
+four test suites, and `git diff --check`:
 
 | Suite | Contract |
 | --- | --- |
 | `tests/remote-chrome_test.sh` | CLI, tmux identity, launch/reset/stop, forwarding readiness/recovery, signal rollback, and unsafe runtime paths |
 | `tests/headless_notifications_test.py` | Real private-bus endpoint/listener negotiation, actions, replacements, closes, malformed input, delivery races, and disconnect cleanup |
 | `tests/secure_notifications_test.py` | Generated secure bootstrap, notification-name ownership, dependency failures, helper cleanup, and overlapping teardown signals |
+| `tests/diagnostics_test.py` | Private stores, shared retention/quota, concurrency, exact lifetimes, missing TCP fields, bounded subprocesses, summaries and incident exports |
 
 Changes to lifecycle or protocol behavior should include a focused regression
 in the relevant suite. Tests must mock privileged and remote operations; they

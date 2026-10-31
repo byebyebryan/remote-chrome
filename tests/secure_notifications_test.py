@@ -265,6 +265,7 @@ class SecureNotifications(unittest.TestCase):
         env = os.environ | {
             "DBUS_SESSION_BUS_ADDRESS": self.source,
             "XDG_RUNTIME_DIR": str(self.source_runtime),
+            "XDG_STATE_HOME": str(self.root / "state"),
             "PATH": str(self.fakebin) + ":" + os.environ["PATH"],
             "CHROME_TRACE": str(self.trace), "CHROME_MODE": "hold",
         }
@@ -281,6 +282,30 @@ class SecureNotifications(unittest.TestCase):
         wait_for(self.trace.exists, "holding Chrome did not start")
         self.assertTrue(self.owned(self.source))
         return bootstrap, env
+
+    def test_diagnostics_runs_in_generated_bootstrap_and_retires_with_owner(self):
+        result = subprocess.run(["bash", "-c", 'source "$1"; chrome_transport_defaults; '
+            'chrome_diagnostics=on; chrome_diag_policy=video; '
+            'chrome_diagnostics_prepare test-source remote-chrome-notification-test; '
+            'chrome_secure_bootstrap_script', "fixture", str(REPO / "bin/remote-chrome")],
+            env=os.environ | {"REMOTE_CHROME_CONFIG": str(self.root / "no-config")},
+            capture_output=True, text=True, check=True, timeout=5)
+        self.script.write_text(result.stdout)
+        self.listener()
+        bootstrap, _ = self.holding_bootstrap()
+        directory = self.root / "state/remote-chrome/diagnostics"
+        def recorded():
+            return [r for path in directory.glob("*.jsonl") for r in events(path)]
+        wait_for(lambda: any(r["event"] == "sample" for r in recorded()), "diagnostic sample absent")
+        bootstrap.terminate()
+        self.assertEqual(bootstrap.wait(timeout=8), 143)
+        wait_for(lambda: any(r["event"] == "end" for r in recorded()), "collector did not retire")
+        rows = recorded()
+        self.assertEqual(len({r["attempt"] for r in rows}), 1)
+        self.assertEqual({r["role"] for r in rows}, {"browser"})
+        self.assertTrue(all(r["owner"]["pid"] == bootstrap.pid for r in rows))
+        self.assertNotIn("CHROME_TRACE", json.dumps(rows))
+        self.clean_source()
 
     def test_term_runs_exact_owned_helper_and_chrome_cleanup(self):
         self.listener()

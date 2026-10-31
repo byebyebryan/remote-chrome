@@ -1,5 +1,9 @@
 # Usage and troubleshooting
 
+For intermittent choppiness during daily use, enable [session diagnostics](diagnostics.md).
+Use `remote-chrome mark HOST` to mark an incident and
+`remote-chrome diagnostics HOST --since 20m` to review both endpoints afterwards.
+
 The display host runs the launcher and supplies the desktop/key; the browser
 host runs Chrome. For `remote-chrome snap` on Starship, these are Starship and
 Snap respectively. [Host setup](../README.md#requirements),

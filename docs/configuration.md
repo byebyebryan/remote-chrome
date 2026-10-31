@@ -61,7 +61,7 @@ remote-chrome launch remote-host --chrome-command /opt/my-browser
 | `REMOTE_CHROME_COMPRESSION` | `zstd=1` | Waypipe compression; accepts `zstd=1` or `lz4`; `--compression` takes precedence |
 | `REMOTE_CHROME_TRANSPORT` | Configuration, then `lossless` | Select `video` or `lossless` |
 | `REMOTE_CHROME_VIDEO_CODECS` | Configuration, then `auto` | Select `auto` or `software` |
-| `REMOTE_CHROME_CONFIG` | `$XDG_CONFIG_HOME/remote-chrome/config`, or `~/.config/remote-chrome/config` | Optional data file with `transport=` and `video_codecs=` entries |
+| `REMOTE_CHROME_CONFIG` | `$XDG_CONFIG_HOME/remote-chrome/config`, or `~/.config/remote-chrome/config` | Optional data file with transport, codec and diagnostics entries; never sourced as shell code |
 
 Chezmoi selects video on Snap, Starship, and Carbon. Video requires the
 coinstalled `waypipe-remote-chrome` package on both ends, enables Chrome GPU

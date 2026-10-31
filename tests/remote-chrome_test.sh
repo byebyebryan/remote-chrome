@@ -16,6 +16,7 @@ mkdir -m 700 "$test_suite_dir/runtime" "$test_suite_dir/tmux" \
   "$test_suite_dir/usbip-host" "$test_suite_dir/module-sysfs" \
   "$test_suite_dir/modules"
 export XDG_RUNTIME_DIR="$test_suite_dir/runtime"
+export XDG_STATE_HOME="$test_suite_dir/state"
 export TMUX_TMPDIR="$test_suite_dir/tmux"
 export REMOTE_CHROME_USBIP_HOST_SYSFS="$test_suite_dir/usbip-host"
 # Keep module evidence and fallback trees fixture-only; these tests must not
@@ -6408,7 +6409,65 @@ test_reset_yubikey_and_chrome_only_recreation_sequence() (
   [[ "$events" != *"new-session"* ]] || fail "YubiKey reset recreated Chrome without readiness-gated helper"
 )
 
+test_diagnostics_reset_rotates_attempt_and_preserves_policy() (
+  local test_dir session=remote-chrome-test-host old_id new_id canonical saved
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  old_id=00000000-0000-4000-8000-000000000001
+  saved="on:17:536870912:$old_id"
+  canonical='waypipe --no-gpu --compress lz4 ssh test-host bash -s -- app'
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session|kill-session) return 0 ;;
+      list-panes) printf '%s\n' "%1|4242|$canonical" ;;
+      list-windows) echo chrome ;;
+      show-options)
+        case "$5" in
+          @remote-chrome-command) echo "$canonical" ;;
+          @remote-chrome-diagnostics) echo "$saved" ;;
+        esac ;;
+      *) return 1 ;;
+    esac
+  }
+  chrome_reset_find_local_ssh() { chrome_reset_remote_socket=/tmp/waypipe-server-test.sock; }
+  chrome_reset_remote_identity() { return 1; }
+  yk_local_candidate_exists() { return 1; }
+  chrome_tmux_create_chrome_session() {
+    [ "$2" = "$canonical" ] || fail "diagnostics reset changed the canonical transport command"
+    new_id="$chrome_diag_attempt"
+  }
+  chrome_reset test-host --yes >/dev/null 2>&1
+  [ "$chrome_diagnostics" = on ] || fail "reset lost enabled diagnostics policy"
+  [ "$chrome_diag_days:$chrome_diag_cap" = 17:536870912 ] || fail "reset lost diagnostics retention policy"
+  [ "$new_id" != "$old_id" ] && [ -n "$new_id" ] || fail "reset reused attempt id"
+  [ "$chrome_diag_previous" = "$old_id" ] || fail "reset lost preceding attempt link"
+  assert_contains "$(cat "$(chrome_bootstrap_script_path "$session")")" "chrome_diag_attempt=$new_id"
+  saved=off:17:536870912:-
+  REMOTE_CHROME_DIAGNOSTICS=on
+  chrome_reset test-host --yes >/dev/null 2>&1
+  [ "$chrome_diagnostics" = off ] || fail "reset changed an explicit recorded off policy"
+)
+
+test_diagnostics_record_hook_covers_both_detached_paths() (
+  local count=0 test_dir
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  chrome_diagnostics_tmux_start() { count=$((count + 1)); }
+  tmux() { return 0; }
+  chrome_tmux_create_chrome_session remote-chrome-test-host 'waypipe ssh test-host app'
+  [ "$count" = 1 ] || fail "plain tmux launch missed diagnostics hook"
+  yk_usb_id=1050:0407 yk_usbip_port=3240 yk_remote=test-host
+  yk_state_file="$test_dir/missing.state" yk_attempt_lock="$test_dir/missing.lock"
+  chrome_wait_for_yubikey_window() { return 0; }
+  chrome_launch_detached_with_yubikey test-host remote-chrome-test-host 'waypipe ssh test-host app'
+  [ "$count" = 2 ] || fail "YubiKey tmux launch missed diagnostics hook"
+)
+
 tests=(
+  test_diagnostics_reset_rotates_attempt_and_preserves_policy
+  test_diagnostics_record_hook_covers_both_detached_paths
   test_unsafe_bootstrap_cleanup_does_not_skip_other_owned_resources
   test_yubikey_ssh_bounds_complete_request_and_preserves_stdin
   test_yubikey_control_deadlines_preserve_socket_and_launch_ownership
