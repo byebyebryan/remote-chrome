@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.5.0"
+VERSION="1.5.1"
 
 usage() {
   cat <<USAGE
@@ -1656,7 +1656,7 @@ chrome_secure_command_line() {
   local notify_apps="$7"
   local bootstrap_script="$8"
   shift 8
-  local argument quoted
+  local argument quoted remote_command
 
   chrome_validate_compression "$compression" || return 1
   local command_line=""
@@ -1679,12 +1679,14 @@ chrome_secure_command_line() {
   fi
   printf -v quoted '%q' "$host"
   command_line+=" $quoted"
-  for argument in "${chrome_origin_args[@]}" bash -s -- \
+  # OpenSSH joins its command arguments with spaces before the remote shell
+  # parses them. Quote the remote argv first, then quote that command for the
+  # local tmux shell, preserving empty arguments and literal shell characters.
+  remote_command="$(quote_command "${chrome_origin_args[@]}" bash -s -- \
     "$chrome_command" "$secret_application" "$secret_schema" \
-    "$notify_remote_socket" "$notify_apps" "$@"; do
-    printf -v quoted '%q' "$argument"
+    "$notify_remote_socket" "$notify_apps" "$@")"
+  printf -v quoted '%q' "$remote_command"
   command_line+=" $quoted"
-  done
   # tmux may render pane_start_command with wrappers/escaping, so reset stores
   # this raw direct Waypipe command in a session-scoped user option. tmux
   # rejects a single command line over 16 KiB, and the bootstrap exceeds that,
@@ -2062,8 +2064,11 @@ chrome_launch() {
   if [ -n "$notify_remote_socket" ]; then
     command+=(-R "$notify_remote_socket:$notify_local_socket")
   fi
-  command+=("$host" "${chrome_origin_args[@]}" bash -s -- "$chrome_command" "$chrome_secret_application" \
-    "$chrome_secret_schema" "$notify_remote_socket" "$notify_apps" "${chrome_args[@]}")
+  local remote_command
+  remote_command="$(quote_command "${chrome_origin_args[@]}" bash -s -- \
+    "$chrome_command" "$chrome_secret_application" "$chrome_secret_schema" \
+    "$notify_remote_socket" "$notify_apps" "${chrome_args[@]}")"
+  command+=("$host" "$remote_command")
   if [ "$foreground" = "1" ]; then
     if [ -n "$notify_local_socket" ]; then
       notify_start_listener ||

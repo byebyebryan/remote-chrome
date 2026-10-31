@@ -1336,17 +1336,22 @@ test_compression_launch_defaults_and_overrides() (
   cat >"$test_dir/bin/waypipe" <<'FAKE_WAYPIPE_COMPRESSION'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$REMOTE_CHROME_TEST_WAYPIPE_ARGS"
-cat >/dev/null
+# Model OpenSSH joining command arguments, then the remote login shell parsing
+# that command before Waypipe executes the application.
+while [ "$1" != test-host ]; do shift; done
+shift
+bash -c "$*"
 FAKE_WAYPIPE_COMPRESSION
   chmod +x "$test_dir/bin/waypipe"
   ln -s waypipe "$test_dir/bin/waypipe-remote-chrome"
   export PATH="$test_dir/bin:$PATH"
   export REMOTE_CHROME_TEST_WAYPIPE_ARGS="$test_dir/args"
+  export REMOTE_CHROME_TEST_REMOTE_ARGS="$test_dir/remote-args"
   XDG_RUNTIME_DIR="$test_dir"
   need() { :; }
   chrome_preflight() { :; }
   chrome_handle_existing() { :; }
-  chrome_secure_bootstrap_script() { printf ':\n'; }
+  chrome_secure_bootstrap_script() { printf '%s\n' 'printf "%s\0" "$@" >"$REMOTE_CHROME_TEST_REMOTE_ARGS"'; }
   tmux() {
     case "$1" in
       has-session) return 1 ;;
@@ -1374,6 +1379,7 @@ FAKE_WAYPIPE_COMPRESSION
           expected=zstd=1
           ;;
       esac
+      launch_args+=(-- '--profile-directory=Profile One' '--test=a;b' "--test=quote'and\"double" '--literal=$(touch should-not-exist)`false`' '')
       rm -f "$REMOTE_CHROME_TEST_WAYPIPE_ARGS"
       output="$(chrome_launch "${launch_args[@]}" 2>&1)" ||
         fail "$mode/$setting launch failed: $output"
@@ -1392,6 +1398,15 @@ FAKE_WAYPIPE_COMPRESSION
             fail "$mode/$setting used the wrong Waypipe compression or host"
           ;;
       esac
+      printf '%s\0' google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 '' '' >"$test_dir/expected-args"
+      case "$mode" in
+        video-*) ;;
+        *) printf '%s\0' --disable-gpu >>"$test_dir/expected-args" ;;
+      esac
+      printf '%s\0' --ozone-platform=wayland --disable-features=Vulkan --new-window '--profile-directory=Profile One' \
+        '--test=a;b' "--test=quote'and\"double" '--literal=$(touch should-not-exist)`false`' '' >>"$test_dir/expected-args"
+      cmp "$test_dir/expected-args" "$REMOTE_CHROME_TEST_REMOTE_ARGS" ||
+        fail "$mode/$setting changed remote arguments across the SSH shell"
     done
   done
 )
@@ -1504,7 +1519,7 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
   command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   [[ "$command_line" == waypipe\ --no-gpu\ --compress\ zstd=1\ ssh\ test-host\ * ]] ||
     fail "secure detached command did not preserve the direct Waypipe SSH prefix"
-  assert_contains "$command_line" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2"
+  assert_contains "$command_line" 'bash\ -s\ --\ google-chrome-stable\ chrome\ chrome_libsecret_os_crypt_password_v2'
   assert_contains "$command_line" "< /tmp/remote-chrome-test-host.bootstrap.sh"
   [[ "$command_line" != *$'\n'* ]] || fail "secure detached command contains a literal newline"
   [ "${#command_line}" -lt 16384 ] ||
@@ -1518,7 +1533,7 @@ test_notification_command_shape_round_trips() (
     /run/user/1000/remote-chrome-notify-1.sock chrome \
     /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
   assert_contains "$enabled" "-R /tmp/remote-chrome-notify-1.sock:/run/user/1000/remote-chrome-notify-1.sock"
-  assert_contains "$enabled" "bash -s -- google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 /tmp/remote-chrome-notify-1.sock chrome"
+  assert_contains "$enabled" 'bash\ -s\ --\ google-chrome-stable\ chrome\ chrome_libsecret_os_crypt_password_v2\ /tmp/remote-chrome-notify-1.sock\ chrome'
   [[ "$enabled" != *$'\n'* ]] || fail "notify command line contains a literal newline"
 
   disabled="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome \
@@ -2230,19 +2245,22 @@ test_secure_command_line_replays_with_exact_arguments() (
   mkdir -p "$fake_bin"
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf "%s\n" "$*" >"$SECURE_WAYPIPE_ARGS"' \
-    'cat >"$SECURE_WAYPIPE_STDIN"' >"$fake_bin/waypipe"
+    'while [ "$1" != test-host ]; do shift; done' \
+    'shift' \
+    'bash -c "$*"' >"$fake_bin/waypipe"
   chmod +x "$fake_bin/waypipe"
-  chrome_secure_bootstrap_script >"$test_dir/bootstrap.sh"
+  printf '%s\n' 'printf "%s\0" "$@" >"$SECURE_REMOTE_ARGS"' >"$test_dir/bootstrap.sh"
   command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
     "$test_dir/bootstrap.sh" '--profile-directory=Profile One' '--test=a;b')"
   output="$(PATH="$fake_bin:$PATH" SECURE_WAYPIPE_ARGS="$test_dir/args" \
-    SECURE_WAYPIPE_STDIN="$test_dir/stdin" bash -c "$command_line" 2>&1)" ||
+    SECURE_REMOTE_ARGS="$test_dir/remote-args" bash -c "$command_line" 2>&1)" ||
     fail "replayed secure pane command failed: $output"
   assert_contains "$(cat "$test_dir/args")" "test-host"
-  assert_contains "$(cat "$test_dir/args")" "--profile-directory=Profile One"
-  assert_contains "$(cat "$test_dir/args")" "--test=a;b"
-  assert_contains "$(cat "$test_dir/stdin")" "remote_secure_pid_stat"
+  printf '%s\0' google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 '' '' \
+    '--profile-directory=Profile One' '--test=a;b' >"$test_dir/expected-args"
+  cmp "$test_dir/expected-args" "$test_dir/remote-args" ||
+    fail "detached command changed remote arguments across the SSH shell"
 )
 
 test_prepare_bootstrap_script_writes_and_removes_session_file() (
@@ -3772,7 +3790,6 @@ test_occupied_remote_port_preserves_existing_chrome() (
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
-  assert_contains "$output" "1.5.0"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
