@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.5.2"
+VERSION="1.6.0"
 
 usage() {
   cat <<USAGE
@@ -1989,7 +1989,7 @@ chrome_launch() {
 
   need ssh
   need "${chrome_waypipe_command[0]}"
-  chrome_preflight "$host" "$chrome_command" "$foreground" "$notifications"
+  chrome_preflight "$host" "$chrome_command" "$foreground" "$notifications" || return 1
 
   local forwarding_expected=0
   if [ "$yubikey_mode" != "off" ]; then
@@ -2150,6 +2150,40 @@ confirm() {
   esac
 }
 
+chrome_video_info_valid() {
+  python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    ok = (isinstance(d, dict) and d.get("schema") == 1 and d.get("compatible") is True
+          and all(type(d.get(k)) is int and 0 < d[k] < 1000
+                  for k in ("libavcodec_major", "libavutil_major")))
+except (ValueError, TypeError):
+    ok = False
+sys.exit(0 if ok else 1)
+'
+}
+
+chrome_video_compatibility() {
+  local host="$1" output
+  local foreground="${2:-0}"
+  local -a ssh_options=(-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=1)
+  local -a request=(yk_ssh_request)
+  [ "$foreground" = 1 ] || ssh_options+=(-o BatchMode=yes)
+  [ "$foreground" != 1 ] || request=(ssh)
+  need python3
+  if ! output="$(waypipe-remote-chrome --remote-chrome-info 2>/dev/null)" ||
+    ! chrome_video_info_valid <<<"$output"; then
+    echo "Video cannot start locally: the custom Waypipe build is missing, outdated, or incompatible with FFmpeg. Rebuild/update waypipe-remote-chrome, or freshly launch with --transport lossless." >&2
+    return 1
+  fi
+  if ! output="$("${request[@]}" "${ssh_options[@]}" "$host" 'waypipe-remote-chrome --remote-chrome-info' 2>/dev/null)" ||
+    ! chrome_video_info_valid <<<"$output"; then
+    echo "Video cannot start on $host: its custom Waypipe build is missing, outdated, incompatible with FFmpeg, or unreachable. Rebuild/update it before retrying; the existing browser is preserved." >&2
+    return 1
+  fi
+}
+
 chrome_preflight() {
   local host="$1"
   local chrome_command="$2"
@@ -2159,6 +2193,10 @@ chrome_preflight() {
   local remote_requirements
   local python_requirement=""
   local waypipe_command="${chrome_waypipe_command[0]:-waypipe}"
+
+  if [ "$waypipe_command" = waypipe-remote-chrome ]; then
+    chrome_video_compatibility "$host" "$foreground" || return 1
+  fi
 
   if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
     die "No local Wayland/X display variables found. Run from a graphical session."
@@ -3646,6 +3684,11 @@ chrome_reset() {
     die "The selected chrome pane targets $pane_host, not requested host $host; refusing reset."
   fi
   host="$pane_host"
+  # A reset must not tear down a working stream before proving that the
+  # currently installed video builds can start its recorded transport again.
+  if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
+    chrome_video_compatibility "$host" || return 1
+  fi
   chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" || return 1
 
   notify_set_runtime_paths "$session"
@@ -3884,6 +3927,89 @@ chrome_status() {
   chrome_status_current "$host" "$session"
 }
 
+chrome_transport_summary() {
+  local label="$1" preference="$2"
+  python3 -c '
+import json, sys
+label, preference = sys.argv[1:]
+try:
+    d = json.load(sys.stdin)
+    if not isinstance(d, dict) or d.get("schema") != 1 or d.get("error"):
+        raise ValueError("transport identity unavailable")
+    root, counts = d["root"], d["counts"]
+    if type(root["pid"]) is not int or not str(root["start"]).isdigit():
+        raise ValueError("invalid process identity")
+    print("status: " + label + " Waypipe live: pid=" + str(root["pid"]) + " start=" + root["start"])
+    if root.get("binary_current") is False:
+        print("status: " + label + " is running a previous package binary; new installation applies on relaunch")
+    for direction in ("encoder", "decoder"):
+        hw, sw = counts[direction + "_hw"], counts[direction + "_sw"]
+        if any(type(x) is not int or not 0 <= x <= 1048576 for x in (hw, sw)):
+            raise ValueError("invalid codec counters")
+        backend = "mixed" if hw and sw else "hardware" if hw else "software" if sw else "unknown (no observed active video buffers)"
+        print("status: " + label + " " + direction + ": " + backend)
+        if sw and preference == "hw":
+            print("status: warning: " + label + " " + direction + " used software despite hardware preference")
+    nodes = d.get("render_nodes", [])
+    if nodes:
+        print("status: " + label + " open render nodes: " + ", ".join(n[0] + " vendor=" + n[1] for n in nodes))
+except (ValueError, KeyError, TypeError):
+    print("status: degraded: " + label + " transport could not be verified", file=sys.stderr)
+    sys.exit(1)
+' "$label" "$preference"
+}
+
+chrome_transport_status() {
+  local host="$1" session="$2" compression preference bpf output birth socket_q
+  if ! chrome_reset_read_pane "$session" 2>/dev/null ||
+    ! chrome_reset_parse_pane_host "$chrome_reset_pane_command" 2>/dev/null; then
+    echo "status: transport: unknown (legacy or unreadable launch metadata)"
+    return 0
+  fi
+  if [ "$chrome_reset_host" != "$host" ]; then
+    echo "status: degraded: recorded transport targets a different host." >&2
+    return 1
+  fi
+  if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
+    compression="${BASH_REMATCH[1]}" preference="${BASH_REMATCH[2]}" bpf="${BASH_REMATCH[3]}"
+    echo "status: recorded transport: video h264 bpf=$bpf compression=$compression codec-preference=$preference"
+    echo "status: Chrome transport defaults: GPU rendering enabled; Chrome Vulkan disabled"
+  else
+    echo "status: recorded transport: stock lossless; Chrome GPU policy: disabled"
+    chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" 2>/dev/null || {
+      echo "status: degraded: managed Waypipe SSH child is absent or ambiguous." >&2
+      return 1
+    }
+    echo "status: managed Waypipe SSH child is live"
+    return 0
+  fi
+  if ! chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" 2>/dev/null; then
+    echo "status: degraded: managed Waypipe SSH child is absent or ambiguous." >&2
+    return 1
+  fi
+  birth="$(notify_pid_starttime "$chrome_reset_pane_pid")" || return 1
+  if ! output="$(waypipe-remote-chrome --remote-chrome-status ancestor "$chrome_reset_pane_pid" "$birth" 2>/dev/null)"; then
+    if [[ "$output" = '{'* ]]; then
+      chrome_transport_summary local "$preference" <<<"$output"
+      return 1
+    fi
+    echo "status: local codec telemetry: unknown (older package or unavailable process)"
+  else
+    chrome_transport_summary local "$preference" <<<"$output" || return 1
+  fi
+  printf -v socket_q '%q' "$chrome_reset_remote_socket"
+  if ! output="$(yk_ssh_request -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 \
+      -o ServerAliveCountMax=1 "$host" "waypipe-remote-chrome --remote-chrome-status socket $socket_q" 2>/dev/null)"; then
+    if [[ "$output" = '{'* ]]; then
+      chrome_transport_summary remote "$preference" <<<"$output"
+      return 1
+    fi
+    echo "status: remote codec telemetry: unknown (older package or unreachable host)"
+  else
+    chrome_transport_summary remote "$preference" <<<"$output" || return 1
+  fi
+}
+
 chrome_status_current() {
   local host="$1"
   local session="$2"
@@ -3912,6 +4038,7 @@ chrome_status_current() {
     code=1
   fi
 
+  chrome_transport_status "$host" "$session" || code=1
   yk_prepare_for_launch "$host"
   if yk_load_state; then
     echo "status: yubikey phase=$yk_phase readiness=$yk_readiness"
@@ -5438,6 +5565,10 @@ chrome_doctor() {
   fi
   chrome_set_transport_command "${REMOTE_CHROME_COMPRESSION:-zstd=1}" "$transport" "$video_codecs" || return 1
   echo "doctor: launch defaults: transport=$transport video-codecs=$video_codecs"
+  if [ "$transport" = video ] &&
+    ! doctor_check "video FFmpeg compatibility on both hosts" chrome_video_compatibility "$host"; then
+    code=1
+  fi
   for command_name in ssh "${chrome_waypipe_command[0]}" tmux; do
     if ! doctor_check "local command: $command_name" doctor_local_command "$command_name"; then
       code=1

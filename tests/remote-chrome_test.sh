@@ -1509,6 +1509,70 @@ test_video_command_and_configuration_round_trip() (
   assert_contains "$output" 'Invalid transport'
 )
 
+test_video_compatibility_checks_both_hosts() (
+  local output code=0
+  need() { :; }
+  waypipe-remote-chrome() { printf '%s\n' '{"schema":1,"libavcodec_major":63,"libavutil_major":61,"compatible":true}'; }
+  ssh() { printf '%s\n' '{"schema":1,"libavcodec_major":63,"libavutil_major":61,"compatible":true}'; }
+  chrome_video_compatibility test-host || fail "compatible video builds rejected"
+  ssh() { printf '%s\n' '{"schema":1,"libavcodec_major":62,"libavutil_major":60,"compatible":false}'; return 1; }
+  output="$(chrome_video_compatibility test-host 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "remote ABI failure was accepted"
+  assert_contains "$output" 'existing browser is preserved'
+  waypipe-remote-chrome() { printf '%s\n' '{"schema":1,"compatible":false}'; return 1; }
+  ssh() { fail "local ABI failure reached remote host"; }
+  code=0
+  output="$(chrome_video_compatibility test-host 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "local ABI failure was accepted"
+  assert_contains "$output" 'Video cannot start locally'
+  for output in '[]' '{}' '{"schema":1,"compatible":true,"libavcodec_major":"63","libavutil_major":61}'; do
+    if chrome_video_info_valid <<<"$output"; then fail "malformed build metadata accepted"; fi
+  done
+)
+
+test_video_launch_preflight_failure_preserves_browser() (
+  local code=0 output
+  need() { :; }
+  chrome_preflight() { echo 'fixture video compatibility failure'; return 1; }
+  chrome_handle_existing() { fail "failed preflight inspected or stopped browser"; }
+  chrome_validate_launch_artifacts() { fail "failed preflight advanced to runtime setup"; }
+  output="$(chrome_launch test-host --transport video --no-yubikey --no-notifications 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "failed video preflight allowed launch"
+  assert_contains "$output" 'fixture video compatibility failure'
+)
+
+test_video_reset_checks_compatibility_before_teardown() (
+  local code=0 output
+  need() { :; }
+  tmux() { [ "$1" = has-session ] || fail "incompatible reset changed tmux"; }
+  chrome_reset_read_pane() {
+    chrome_reset_pane_pid=$$
+    chrome_reset_pane_command='waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host app'
+  }
+  chrome_video_compatibility() { echo 'fixture ABI mismatch'; return 1; }
+  chrome_reset_find_local_ssh() { fail "incompatible reset advanced past preflight"; }
+  chrome_reset_remote_stop() { fail "incompatible reset stopped browser"; }
+  yk_stop() { fail "incompatible reset changed forwarding"; }
+  output="$(chrome_reset test-host --yes 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "incompatible video reset succeeded"
+  assert_contains "$output" 'fixture ABI mismatch'
+)
+
+test_transport_status_reports_observations_and_rejects_bad_evidence() (
+  local output code=0
+  output="$(chrome_transport_summary local hw <<<'{"schema":1,"root":{"pid":123,"start":"456"},"counts":{"encoder_hw":0,"encoder_sw":0,"decoder_hw":2,"decoder_sw":1}}')"
+  assert_contains "$output" 'encoder: unknown'
+  assert_contains "$output" 'decoder: mixed'
+  assert_contains "$output" 'despite hardware preference'
+  output="$(chrome_transport_summary local hw <<<'{"schema":1,"error":"no unique live Waypipe root"}' 2>&1)" || code=$?
+  [ "$code" -ne 0 ] || fail "absent transport was reported healthy"
+  for output in '[]' '{}' '{"schema":1,"root":{"pid":123,"start":"456"},"counts":{"encoder_hw":-1}}'; do
+    if chrome_transport_summary local hw <<<"$output" >/dev/null 2>&1; then
+      fail "invalid transport observation accepted"
+    fi
+  done
+)
+
 test_video_ssh_identity_accepts_only_selected_descendant() (
   local current_uid
   current_uid="$(id -u)"
@@ -6401,6 +6465,10 @@ tests=(
   test_invalid_compression_is_rejected_before_launch_or_reset
   test_launch_target_accepts_compression_options
   test_video_command_and_configuration_round_trip
+  test_video_compatibility_checks_both_hosts
+  test_video_launch_preflight_failure_preserves_browser
+  test_video_reset_checks_compatibility_before_teardown
+  test_transport_status_reports_observations_and_rejects_bad_evidence
   test_video_ssh_identity_accepts_only_selected_descendant
   test_secure_bootstrap_encodes_minimal_proxy_policy
   test_notification_command_shape_round_trips

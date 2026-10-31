@@ -64,6 +64,9 @@ session. It preserves recorded launch settings. After teardown, forwarding
 preflight runs again, followed by replacement listener startup and session
 creation. Listener readiness comes before the replacement Chrome pane.
 Ambiguous identity or unreachable evidence prevents destructive reset.
+For recorded video sessions, installed FFmpeg compatibility on both hosts is
+checked before the destructive part of reset. This check concerns the next
+launch; an already running binary can retain loaded libraries after an upgrade.
 
 Forwarding cleanup attempts every applicable resource and retains its ledger
 when any ownership or remote-state check remains unresolved. A later cleanup
@@ -134,6 +137,7 @@ Artifacts are ownership evidence, not a stable API for manual editing.
 | Display | `remote-chrome-usbipd-<port>.pid` | Tool-started daemon ownership, possibly root-owned |
 | Browser | `remote-chrome-incoming-<random>.state` | Origin, boot, bootstrap identity, and notification status for incoming handoff |
 | Browser | `remote-chrome-dbus-proxy-<pid>.sock` | Filtered session-bus proxy |
+| Either | `remote-chrome-waypipe-<uid>/<pid>-<start>.json` | Optional custom Waypipe codec observations; schema, boot and live process identity validated before display |
 | Browser | `remote-chrome-notify-forwarder-<pid>.py`, `remote-chrome-notify-helper-<pid>.log`, `remote-chrome-notify-status-<pid>.state` | Embedded endpoint/mirror helper and readiness evidence |
 
 Forwarding ledgers survive unresolved cleanup for safe retry. Notification

@@ -72,6 +72,13 @@ surfaces are treated as opaque; this mode discards their transparency and uses
 lossy 4:2:0 video.
 Small alpha surfaces remain on the lossless path. Stock Waypipe is retained.
 
+Launcher 1.6.0 checks both custom binaries' compiled FFmpeg bindings before a
+video launch or video reset stops an existing browser. Missing libraries,
+incompatible symbols, an older package without the compatibility query, or an
+unreachable peer prevent that restart. Rebuild/update the named host's managed
+package before retrying. Compatible library updates within the required ABI do
+not require a rebuild. The launcher never installs packages itself.
+
 The browser-host package selects NVIDIA when an accessible NVIDIA render node
 is present. Viewers use their compositor's GPU, as Waypipe requires. Snap
 normally uses NVIDIA encoding, Starship NVIDIA decoding, and Carbon Intel
@@ -98,6 +105,23 @@ Vulkan validation mode remains a diagnostic limitation of the tested hardware
 video path: NVIDIA reported video-image/profile errors, and hardware decoding
 stalled under `--debug`. Default launches omit validation. Do not interpret a
 successful ordinary launch as a validation-clean result.
+
+`status HOST` reports recorded transport settings separately from live codec
+observations. The custom package writes bounded process/start-time/boot-bound
+snapshots when codec contexts first succeed, change backend, or retire; it
+does not write per-frame logs. Hardware, software and mixed observations refer
+to active video contexts, not a GPU preference flag. No active observed video
+buffers, older packages, or absent telemetry are reported as unknown. Software
+use with hardware preference is a warning, while a verified missing or
+ambiguous transport is degraded. Updating a package can leave a live process
+using the previous executable; status identifies that separately.
+
+Video snapshots live in the private directory
+`${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-waypipe-<uid>`. Only matching live process
+identities are read. Snapshots carry no browser URLs or page content and never
+authorize cleanup. `waypipe-remote-chrome --remote-chrome-info` provides a
+GPU-free JSON compatibility query. `doctor HOST` includes this check but retains
+its existing visible notification probe; ordinary status sends no test notification.
 
 Fresh launches explicitly use Zstd level 1. Both hosts need Waypipe built with
 support for the selected codec. To use LZ4 for a new session:
