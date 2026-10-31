@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.5.1"
+VERSION="1.5.2"
 
 usage() {
   cat <<USAGE
@@ -1638,7 +1638,7 @@ chrome_set_transport_command() {
     local selector=hw
     [ "$codecs" != software ] || selector=sw
     chrome_waypipe_command=(waypipe-remote-chrome --compress "$compression"
-      --video "h264,$selector,bpf=250000" --remote-bin waypipe-remote-chrome ssh)
+      --video "h264,$selector,bpf=500000" --remote-bin waypipe-remote-chrome ssh)
   else
     chrome_waypipe_command=(waypipe --no-gpu --compress "$compression" ssh)
   fi
@@ -1666,7 +1666,7 @@ chrome_secure_command_line() {
   fi
   for argument in "${transport_command[@]}"; do
     case "$argument" in
-      h264,hw,bpf=250000|h264,sw,bpf=250000) quoted="$argument" ;;
+      h264,hw,bpf=250000|h264,sw,bpf=250000|h264,hw,bpf=500000|h264,sw,bpf=500000) quoted="$argument" ;;
       *) printf -v quoted '%q' "$argument" ;;
     esac
     command_line+="${command_line:+ }$quoted"
@@ -2943,7 +2943,8 @@ chrome_reset_remote_boot_id=""
 chrome_reset_remote_browser_allowlist=()
 # Older sessions omit --compress; new canonical commands record the codec.
 chrome_reset_waypipe_prefix='^waypipe[[:space:]]+--no-gpu[[:space:]]+(--compress[[:space:]]+(zstd=1|lz4)[[:space:]]+)?ssh[[:space:]]+(.*)$'
-chrome_reset_video_prefix='^waypipe-remote-chrome[[:space:]]+--compress[[:space:]]+(zstd=1|lz4)[[:space:]]+--video[[:space:]]+h264,(hw|sw),bpf=250000[[:space:]]+--remote-bin[[:space:]]+waypipe-remote-chrome[[:space:]]+ssh[[:space:]]+(.*)$'
+# Preserve the recorded bitrate when resetting sessions from either default.
+chrome_reset_video_prefix='^waypipe-remote-chrome[[:space:]]+--compress[[:space:]]+(zstd=1|lz4)[[:space:]]+--video[[:space:]]+h264,(hw|sw),bpf=(250000|500000)[[:space:]]+--remote-bin[[:space:]]+waypipe-remote-chrome[[:space:]]+ssh[[:space:]]+(.*)$'
 
 chrome_reset_read_pane() {
   local session="$1"
@@ -3014,7 +3015,7 @@ chrome_reset_parse_pane_host() {
   if [[ "$command_line" =~ $chrome_reset_waypipe_prefix ]]; then
     remainder="${BASH_REMATCH[3]}"
   elif [[ "$command_line" =~ $chrome_reset_video_prefix ]]; then
-    remainder="${BASH_REMATCH[3]}"
+    remainder="${BASH_REMATCH[4]}"
   else
     echo "The chrome pane is not a managed waypipe SSH command; refusing reset." >&2
     return 1

@@ -1,0 +1,15 @@
+{
+  "successful_cases": 10,
+  "successful_repeats": {
+    "lossless": 2,
+    "h264-100k": 2,
+    "h264-250k": 2,
+    "h264-500k": 2,
+    "h264-1000k": 2
+  },
+  "zero_software_decode": true,
+  "all_normal_lossless_captures_exact": true,
+  "production_sender_preserved": true,
+  "extra_sender_waypipe": {},
+  "git_status": ""
+}

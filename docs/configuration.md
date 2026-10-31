@@ -65,8 +65,11 @@ remote-chrome launch remote-host --chrome-command /opt/my-browser
 
 Chezmoi selects video on Snap, Starship, and Carbon. Video requires the
 coinstalled `waypipe-remote-chrome` package on both ends, enables Chrome GPU
-rendering, and uses H.264 at `bpf=250000`. Large ARGB/ABGR surfaces are treated
-as opaque; this mode discards their transparency and uses lossy 4:2:0 video.
+rendering, and uses H.264 at `bpf=500000` (500,000 bits per frame, not bits per
+second). The [October 30 bitrate sweep](studies/video-bitrate-2026-10-30/README.md)
+records the measurements and tradeoffs behind this default. Large ARGB/ABGR
+surfaces are treated as opaque; this mode discards their transparency and uses
+lossy 4:2:0 video.
 Small alpha surfaces remain on the lossless path. Stock Waypipe is retained.
 
 The browser-host package selects NVIDIA when an accessible NVIDIA render node
@@ -87,7 +90,9 @@ Flags override environment variables, which override the data file. Reset
 replays the original transport and codec policy. Stop and launch a fresh
 session to select a different policy; a package or configuration update does
 not restart an existing session. Hardware selection is evaluated each time the
-recorded custom Waypipe command runs.
+recorded custom Waypipe command runs. Sessions launched with the former
+`bpf=250000` default remain resettable at that recorded bitrate; a fresh launch
+is required to use `bpf=500000`.
 
 Vulkan validation mode remains a diagnostic limitation of the tested hardware
 video path: NVIDIA reported video-image/profile errors, and hardware decoding

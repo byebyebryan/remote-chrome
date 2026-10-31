@@ -1,0 +1,1255 @@
+{
+  "root": "/tmp/remote-chrome-bitrate-sweep-20261030-imldil1t/v2",
+  "cases": [
+    {
+      "name": "h264-1000k-A",
+      "mode": "h264-1000k",
+      "repeat": "A",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.423374111007433,
+          "rx_bytes": 18839816,
+          "tx_bytes": 50416,
+          "rx_mbps": 12.131851351595333,
+          "tx_mbps": 0.032465254317878174,
+          "fps": 17.789692253287313,
+          "p95_frame_ms": 69.80000000000291,
+          "max_frame_ms": 96,
+          "over50": 165,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.9305907166553344,
+          "sender_chrome_cpu": 12.201333329261715,
+          "viewer_waypipe_cpu": 0.724440874079914,
+          "viewer_transport_cpu": 1.2878948872531806,
+          "visibility": "visible",
+          "rtt_median_ms": 26.512,
+          "rtt_max_ms": 31.11,
+          "retrans_total": 0,
+          "rcv_ooopack": 29,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 23.840569698734427,
+          "video_frames": {
+            "encoded_true": 214,
+            "decoded_true": 214
+          },
+          "kb_per_browser_frame": 704.2921869158879,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 17.22559411701129,
+          "quality": {
+            "psnr_db": 41.350553669919876,
+            "exact_pixels_percent": 1.5767511177347242,
+            "mae": 0.6298276782035828,
+            "text_edge_mae": 3.5649843215942383,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.4677254310227,
+          "rx_bytes": 27964008,
+          "tx_bytes": 42760,
+          "rx_mbps": 17.943294086614273,
+          "tx_mbps": 0.027437242012791095,
+          "fps": 15.337677626888194,
+          "p95_frame_ms": 96.5,
+          "max_frame_ms": 118.09999999999854,
+          "over50": 166,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.924305343359357,
+          "sender_chrome_cpu": 8.389971297046797,
+          "viewer_waypipe_cpu": 0.7218638275114588,
+          "viewer_transport_cpu": 1.6041418389143531,
+          "visibility": "visible",
+          "rtt_median_ms": 26.837,
+          "rtt_max_ms": 32.412,
+          "retrans_total": 1,
+          "rcv_ooopack": 12,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 37.02914991506135,
+          "video_frames": {
+            "encoded_true": 185,
+            "decoded_true": 185
+          },
+          "kb_per_browser_frame": 1209.2543999999998,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 14.838312009957766,
+          "quality": {
+            "psnr_db": 34.044504303172964,
+            "exact_pixels_percent": 20.734072280178836,
+            "mae": 2.350529193878174,
+            "text_edge_mae": 4.833604335784912,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-1000k-B",
+      "mode": "h264-1000k",
+      "repeat": "B",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.376086808973923,
+          "rx_bytes": 19490004,
+          "tx_bytes": 48972,
+          "rx_mbps": 12.598492108744914,
+          "tx_mbps": 0.03165588655340738,
+          "fps": 18.146101085436506,
+          "p95_frame_ms": 72.39999999999964,
+          "max_frame_ms": 88.70000000000073,
+          "over50": 157,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.089782982546103,
+          "sender_chrome_cpu": 8.251214010706207,
+          "viewer_waypipe_cpu": 0.646407877019672,
+          "viewer_transport_cpu": 1.292815754039344,
+          "visibility": "visible",
+          "rtt_median_ms": 26.852,
+          "rtt_max_ms": 29.865,
+          "retrans_total": 0,
+          "rcv_ooopack": 30,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 29.828194893910425,
+          "video_frames": {
+            "encoded_true": 218,
+            "decoded_true": 218
+          },
+          "kb_per_browser_frame": 715.229504587156,
+          "viewer_focused_at_capture": true,
+          "decoded_buffer_fps": 17.61461464878606,
+          "quality": {
+            "psnr_db": 41.54020073956807,
+            "exact_pixels_percent": 1.5406110283159464,
+            "mae": 0.6230481266975403,
+            "text_edge_mae": 3.5478782653808594,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.425426017027348,
+          "rx_bytes": 22077852,
+          "tx_bytes": 47100,
+          "rx_mbps": 14.214628597680479,
+          "tx_mbps": 0.030324915981443785,
+          "fps": 16.44649953700612,
+          "p95_frame_ms": 90.5,
+          "max_frame_ms": 131.29999999999927,
+          "over50": 158,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.0841881454549978,
+          "sender_chrome_cpu": 4.336752581819991,
+          "viewer_waypipe_cpu": 0.6438411036399954,
+          "viewer_transport_cpu": 1.4486424831899896,
+          "visibility": "visible",
+          "rtt_median_ms": 27.144,
+          "rtt_max_ms": 32.124,
+          "retrans_total": 1,
+          "rcv_ooopack": 27,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 35.96673941266167,
+          "video_frames": {
+            "encoded_true": 198,
+            "decoded_true": 198
+          },
+          "kb_per_browser_frame": 892.0344242424242,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 15.935067315089885,
+          "quality": {
+            "psnr_db": 35.40889817695699,
+            "exact_pixels_percent": 23.646190387481372,
+            "mae": 1.784261703491211,
+            "text_edge_mae": 3.123199462890625,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-100k-A",
+      "mode": "h264-100k",
+      "repeat": "A",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.37614102900261,
+          "rx_bytes": 2373892,
+          "tx_bytes": 52440,
+          "rx_mbps": 1.534495765319385,
+          "tx_mbps": 0.03389748056497454,
+          "fps": 20.81928031911793,
+          "p95_frame_ms": 62.5,
+          "max_frame_ms": 74.70000000000073,
+          "over50": 74,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.1669684369009103,
+          "sender_chrome_cpu": 8.713364328860132,
+          "viewer_waypipe_cpu": 0.7272056757360098,
+          "viewer_transport_cpu": 0.8888069370106787,
+          "visibility": "visible",
+          "rtt_median_ms": 23.308,
+          "rtt_max_ms": 28.751,
+          "retrans_total": 0,
+          "rcv_ooopack": 27,
+          "max_send_q": 220,
+          "peak_halfsecond_rx_mbps": 6.1215878930290515,
+          "video_frames": {
+            "encoded_true": 250,
+            "decoded_true": 250
+          },
+          "kb_per_browser_frame": 75.96454399999999,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 20.20015765933361,
+          "quality": {
+            "psnr_db": 35.57161762630058,
+            "exact_pixels_percent": 0.5638505961251863,
+            "mae": 1.6821132898330688,
+            "text_edge_mae": 8.599766731262207,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.41216948296642,
+          "rx_bytes": 2469192,
+          "tx_bytes": 46068,
+          "rx_mbps": 1.5914652170282038,
+          "tx_mbps": 0.029692150151974933,
+          "fps": 19.50789629834762,
+          "p95_frame_ms": 63.69999999999709,
+          "max_frame_ms": 75.89999999999782,
+          "over50": 110,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.8561740674600147,
+          "sender_chrome_cpu": 7.734058614416728,
+          "viewer_waypipe_cpu": 0.72509483635,
+          "viewer_transport_cpu": 0.9667931151333332,
+          "visibility": "visible",
+          "rtt_median_ms": 23.77,
+          "rtt_max_ms": 27.738,
+          "retrans_total": 0,
+          "rcv_ooopack": 28,
+          "max_send_q": 176,
+          "peak_halfsecond_rx_mbps": 2.16311895288648,
+          "video_frames": {
+            "encoded_true": 235,
+            "decoded_true": 235
+          },
+          "kb_per_browser_frame": 84.05760000000001,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 18.933031838027777,
+          "quality": {
+            "psnr_db": 30.089529651463423,
+            "exact_pixels_percent": 9.477785022354695,
+            "mae": 4.095220565795898,
+            "text_edge_mae": 9.47712516784668,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-100k-B",
+      "mode": "h264-100k",
+      "repeat": "B",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.417615988000762,
+          "rx_bytes": 2428700,
+          "tx_bytes": 48412,
+          "rx_mbps": 1.5646803717215103,
+          "tx_mbps": 0.031189239574991458,
+          "fps": 20.760153791219288,
+          "p95_frame_ms": 62.5,
+          "max_frame_ms": 70.30000000000018,
+          "over50": 81,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.1640600114483244,
+          "sender_chrome_cpu": 9.234876090823372,
+          "viewer_waypipe_cpu": 0.6442460459181909,
+          "viewer_transport_cpu": 0.8858383131375125,
+          "visibility": "visible",
+          "rtt_median_ms": 22.53,
+          "rtt_max_ms": 26.465,
+          "retrans_total": 1,
+          "rcv_ooopack": 28,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 5.252572997344772,
+          "video_frames": {
+            "encoded_true": 250,
+            "decoded_true": 250
+          },
+          "kb_per_browser_frame": 77.71839999999999,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 20.132688934943467,
+          "quality": {
+            "psnr_db": 33.49537976996728,
+            "exact_pixels_percent": 0.9370342771982115,
+            "mae": 2.0091373920440674,
+            "text_edge_mae": 10.762272834777832,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.43922639801167,
+          "rx_bytes": 2369576,
+          "tx_bytes": 30752,
+          "rx_mbps": 1.5239378554143925,
+          "tx_mbps": 0.019777435680350997,
+          "fps": 11.971866114630613,
+          "p95_frame_ms": 207,
+          "max_frame_ms": 277.7999999999993,
+          "over50": 82,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 0.7744578243946216,
+          "sender_chrome_cpu": 3.407614427336335,
+          "viewer_waypipe_cpu": 0.4823451079690182,
+          "viewer_transport_cpu": 0.6431268106253576,
+          "visibility": "visible",
+          "rtt_median_ms": 34.849,
+          "rtt_max_ms": 59.404,
+          "retrans_total": 10,
+          "rcv_ooopack": 19,
+          "max_send_q": 220,
+          "peak_halfsecond_rx_mbps": 3.1097580132692393,
+          "video_frames": {
+            "encoded_true": 144,
+            "decoded_true": 144
+          },
+          "kb_per_browser_frame": 131.64311111111112,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 11.576282591256437,
+          "quality": {
+            "psnr_db": 24.318887410721445,
+            "exact_pixels_percent": 2.6745063338301045,
+            "mae": 7.934261798858643,
+            "text_edge_mae": 38.21995162963867,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-250k-A",
+      "mode": "h264-250k",
+      "repeat": "A",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.39666692801984,
+          "rx_bytes": 4347616,
+          "tx_bytes": 30164,
+          "rx_mbps": 2.8056677009999875,
+          "tx_mbps": 0.019465877513783095,
+          "fps": 11.203133557949245,
+          "p95_frame_ms": 209.10000000000036,
+          "max_frame_ms": 271.60000000000036,
+          "over50": 95,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.2453584694981013,
+          "sender_chrome_cpu": 9.184518712548496,
+          "viewer_waypipe_cpu": 0.4840010653539757,
+          "viewer_transport_cpu": 0.7260015980309635,
+          "visibility": "visible",
+          "rtt_median_ms": 38.4645,
+          "rtt_max_ms": 68.017,
+          "retrans_total": 6,
+          "rcv_ooopack": 16,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 4.465814244422772,
+          "video_frames": {
+            "encoded_true": 135,
+            "decoded_true": 135
+          },
+          "kb_per_browser_frame": 257.6365037037037,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 10.890023970464453,
+          "quality": {
+            "psnr_db": 34.18120223328424,
+            "exact_pixels_percent": 0.8639157973174367,
+            "mae": 1.8913159370422363,
+            "text_edge_mae": 9.848691940307617,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.369343772006687,
+          "rx_bytes": 4663980,
+          "tx_bytes": 48688,
+          "rx_mbps": 3.0164769196924723,
+          "tx_mbps": 0.03148946356244819,
+          "fps": 19.16427113277507,
+          "p95_frame_ms": 68.29999999999927,
+          "max_frame_ms": 83.39999999999782,
+          "over50": 121,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.088535289542701,
+          "sender_chrome_cpu": 4.820656282260532,
+          "viewer_waypipe_cpu": 0.6467602604840657,
+          "viewer_transport_cpu": 0.9701403907260984,
+          "visibility": "visible",
+          "rtt_median_ms": 25.587,
+          "rtt_max_ms": 28.928,
+          "retrans_total": 0,
+          "rcv_ooopack": 30,
+          "max_send_q": 220,
+          "peak_halfsecond_rx_mbps": 4.684778247499761,
+          "video_frames": {
+            "encoded_true": 230,
+            "decoded_true": 230
+          },
+          "kb_per_browser_frame": 162.22539130434785,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 18.594357488916888,
+          "quality": {
+            "psnr_db": 33.66001917680461,
+            "exact_pixels_percent": 19.276592771982116,
+            "mae": 2.5323057174682617,
+            "text_edge_mae": 4.993923187255859,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-250k-B",
+      "mode": "h264-250k",
+      "repeat": "B",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.444617503031623,
+          "rx_bytes": 5398768,
+          "tx_bytes": 46340,
+          "rx_mbps": 3.4705883077144386,
+          "tx_mbps": 0.029789585731316306,
+          "fps": 18.92424310082687,
+          "p95_frame_ms": 69,
+          "max_frame_ms": 76.39999999999964,
+          "over50": 141,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.8554683672938503,
+          "sender_chrome_cpu": 12.52441147923349,
+          "viewer_waypipe_cpu": 0.6428482030927127,
+          "viewer_transport_cpu": 0.9642723046390691,
+          "visibility": "visible",
+          "rtt_median_ms": 25.1785,
+          "rtt_max_ms": 31.422,
+          "retrans_total": 0,
+          "rcv_ooopack": 27,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 10.18173796964615,
+          "video_frames": {
+            "encoded_true": 227,
+            "decoded_true": 227
+          },
+          "kb_per_browser_frame": 189.43045614035088,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 18.240817762755725,
+          "quality": {
+            "psnr_db": 39.93942324944675,
+            "exact_pixels_percent": 1.0867175856929956,
+            "mae": 0.8396095633506775,
+            "text_edge_mae": 4.623205184936523,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.395739582017995,
+          "rx_bytes": 6852452,
+          "tx_bytes": 43388,
+          "rx_mbps": 4.422456250978733,
+          "tx_mbps": 0.028001879008778947,
+          "fps": 18.39520559347428,
+          "p95_frame_ms": 76.40000000000146,
+          "max_frame_ms": 103.59999999999854,
+          "over50": 130,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.7085885337047437,
+          "sender_chrome_cpu": 7.61098528650295,
+          "viewer_waypipe_cpu": 0.6453830323771307,
+          "viewer_transport_cpu": 0.968074548565696,
+          "visibility": "visible",
+          "rtt_median_ms": 23.398,
+          "rtt_max_ms": 31.148,
+          "retrans_total": 0,
+          "rcv_ooopack": 16,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 14.81960437498555,
+          "video_frames": {
+            "encoded_true": 221,
+            "decoded_true": 221
+          },
+          "kb_per_browser_frame": 248.05256108597285,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 17.828706269418234,
+          "quality": {
+            "psnr_db": 31.637349677391512,
+            "exact_pixels_percent": 16.86261177347243,
+            "mae": 3.3600423336029053,
+            "text_edge_mae": 7.990091800689697,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-500k-A",
+      "mode": "h264-500k",
+      "repeat": "A",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.379630599054508,
+          "rx_bytes": 10285308,
+          "tx_bytes": 46204,
+          "rx_mbps": 6.646600909584839,
+          "tx_mbps": 0.029858079935618644,
+          "fps": 18.657493399078785,
+          "p95_frame_ms": 69.30000000000109,
+          "max_frame_ms": 122.70000000000073,
+          "over50": 143,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 2.012318893994894,
+          "sender_chrome_cpu": 12.538294647198956,
+          "viewer_waypipe_cpu": 0.7270006910131368,
+          "viewer_transport_cpu": 1.0501121092411976,
+          "visibility": "visible",
+          "rtt_median_ms": 24.499000000000002,
+          "rtt_max_ms": 30.308,
+          "retrans_total": 0,
+          "rcv_ooopack": 29,
+          "max_send_q": 220,
+          "peak_halfsecond_rx_mbps": 18.862955713301343,
+          "video_frames": {
+            "encoded_true": 224,
+            "decoded_true": 224
+          },
+          "kb_per_browser_frame": 367.3324285714286,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 18.094239420771405,
+          "quality": {
+            "psnr_db": 41.139505970147965,
+            "exact_pixels_percent": 1.7097149776453053,
+            "mae": 0.674696683883667,
+            "text_edge_mae": 3.75039005279541,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.412009368010331,
+          "rx_bytes": 13777792,
+          "tx_bytes": 44744,
+          "rx_mbps": 8.880297519278207,
+          "tx_mbps": 0.028839166116209628,
+          "fps": 17.874512607766686,
+          "p95_frame_ms": 76.90000000000146,
+          "max_frame_ms": 109.29999999999563,
+          "over50": 154,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.8608972044937646,
+          "sender_chrome_cpu": 7.1334392838927645,
+          "viewer_waypipe_cpu": 0.7251041900754476,
+          "viewer_transport_cpu": 1.1279398512284742,
+          "visibility": "visible",
+          "rtt_median_ms": 24.97,
+          "rtt_max_ms": 29.291,
+          "retrans_total": 0,
+          "rcv_ooopack": 23,
+          "max_send_q": 212,
+          "peak_halfsecond_rx_mbps": 26.555356829172094,
+          "video_frames": {
+            "encoded_true": 215,
+            "decoded_true": 215
+          },
+          "kb_per_browser_frame": 512.6620279069767,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 17.321933429580138,
+          "quality": {
+            "psnr_db": 33.65898071352879,
+            "exact_pixels_percent": 19.351946721311474,
+            "mae": 2.5119268894195557,
+            "text_edge_mae": 5.100350379943848,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "h264-500k-B",
+      "mode": "h264-500k",
+      "repeat": "B",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.413765320030507,
+          "rx_bytes": 9128016,
+          "tx_bytes": 46388,
+          "rx_mbps": 5.882512365701831,
+          "tx_mbps": 0.02989455579615291,
+          "fps": 18.540998054442355,
+          "p95_frame_ms": 68.20000000000073,
+          "max_frame_ms": 84.19999999999891,
+          "over50": 154,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.8575949766599449,
+          "sender_chrome_cpu": 14.47376085980874,
+          "viewer_waypipe_cpu": 0.6444458867843604,
+          "viewer_transport_cpu": 0.9666688301765406,
+          "visibility": "visible",
+          "rtt_median_ms": 23.6155,
+          "rtt_max_ms": 29.566,
+          "retrans_total": 0,
+          "rcv_ooopack": 26,
+          "max_send_q": 212,
+          "peak_halfsecond_rx_mbps": 17.6469647903767,
+          "video_frames": {
+            "encoded_true": 223,
+            "decoded_true": 223
+          },
+          "kb_per_browser_frame": 327.46245739910313,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 17.963929094114047,
+          "quality": {
+            "psnr_db": 41.093452052301586,
+            "exact_pixels_percent": 1.5250093144560357,
+            "mae": 0.706179678440094,
+            "text_edge_mae": 3.8547680377960205,
+            "text_edge_pixels": 75431,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.438040796027053,
+          "rx_bytes": 11540736,
+          "tx_bytes": 45528,
+          "rx_mbps": 7.422864220664933,
+          "tx_mbps": 0.029283068448878225,
+          "fps": 17.107361148020193,
+          "p95_frame_ms": 76.40000000000146,
+          "max_frame_ms": 670.7000000000007,
+          "over50": 120,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 1.8527288390446124,
+          "sender_chrome_cpu": 7.951294600899796,
+          "viewer_waypipe_cpu": 0.5627895996478749,
+          "viewer_transport_cpu": 0.9647821708249283,
+          "visibility": "visible",
+          "rtt_median_ms": 26.279,
+          "rtt_max_ms": 31.239,
+          "retrans_total": 0,
+          "rcv_ooopack": 23,
+          "max_send_q": 256,
+          "peak_halfsecond_rx_mbps": 30.42389405486224,
+          "video_frames": {
+            "encoded_true": 206,
+            "decoded_true": 206
+          },
+          "kb_per_browser_frame": 448.18392233009706,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": 16.5620939324946,
+          "quality": {
+            "psnr_db": 34.70927052943428,
+            "exact_pixels_percent": 21.411233233979136,
+            "mae": 2.1177291870117188,
+            "text_edge_mae": 3.850041627883911,
+            "text_edge_pixels": 59681,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "ANGLE (NVIDIA Corporation, NVIDIA RTX A2000 8GB Laptop GPU/PCIe/SSE2, OpenGL ES 3.2 NVIDIA 610.57.04)",
+      "crashes": 0
+    },
+    {
+      "name": "lossless-A",
+      "mode": "lossless",
+      "repeat": "A",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.38196434197016,
+          "rx_bytes": 67387048,
+          "tx_bytes": 90056,
+          "rx_mbps": 43.53884158531032,
+          "tx_mbps": 0.05818527497756997,
+          "fps": 29.08146242591727,
+          "p95_frame_ms": 48.5,
+          "max_frame_ms": 76.5,
+          "over50": 11,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 28.355990524502474,
+          "sender_chrome_cpu": 25.64435208636699,
+          "viewer_waypipe_cpu": 6.218722480002565,
+          "viewer_transport_cpu": 8.157025590652715,
+          "visibility": "visible",
+          "rtt_median_ms": 24.192,
+          "rtt_max_ms": 30.399,
+          "retrans_total": 1,
+          "rcv_ooopack": 385,
+          "max_send_q": 392,
+          "peak_halfsecond_rx_mbps": 52.382711689269655,
+          "video_frames": {},
+          "kb_per_browser_frame": 1544.6887793696276,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": null,
+          "quality": {
+            "psnr_db": null,
+            "exact_pixels_percent": 100.0,
+            "mae": 0.0,
+            "text_edge_mae": 0.0,
+            "text_edge_pixels": 75499,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.43860927503556,
+          "rx_bytes": 188699060,
+          "tx_bytes": 76472,
+          "rx_mbps": 121.3634455927296,
+          "tx_mbps": 0.04918363351342194,
+          "fps": 10.155326552016916,
+          "p95_frame_ms": 148.79999999999927,
+          "max_frame_ms": 180.29999999999927,
+          "over50": 119,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 27.95729994959672,
+          "sender_chrome_cpu": 12.158714936528215,
+          "viewer_waypipe_cpu": 4.904085227793733,
+          "viewer_transport_cpu": 9.486591096387876,
+          "visibility": "visible",
+          "rtt_median_ms": 25.809,
+          "rtt_max_ms": 47.502,
+          "retrans_total": 0,
+          "rcv_ooopack": 139,
+          "max_send_q": 328,
+          "peak_halfsecond_rx_mbps": 180.03857738165746,
+          "video_frames": {},
+          "kb_per_browser_frame": 12373.708852459018,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": null,
+          "quality": {
+            "psnr_db": null,
+            "exact_pixels_percent": 100.0,
+            "mae": 0.0,
+            "text_edge_mae": 0.0,
+            "text_edge_pixels": 59682,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "Disabled",
+      "crashes": 0
+    },
+    {
+      "name": "lossless-B",
+      "mode": "lossless",
+      "repeat": "B",
+      "phases": [
+        {
+          "scene": "text",
+          "duration": 12.381570965982974,
+          "rx_bytes": 72837612,
+          "tx_bytes": 92504,
+          "rx_mbps": 47.06195179924322,
+          "tx_mbps": 0.059768829176294176,
+          "fps": 31.636164131749638,
+          "p95_frame_ms": 46.400000000000546,
+          "max_frame_ms": 72.5,
+          "over50": 13,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 20.287178461254708,
+          "sender_chrome_cpu": 17.877590214898785,
+          "viewer_waypipe_cpu": 6.1381548600578855,
+          "viewer_transport_cpu": 8.318815139288976,
+          "visibility": "visible",
+          "rtt_median_ms": 24.651,
+          "rtt_max_ms": 31.081,
+          "retrans_total": 1,
+          "rcv_ooopack": 334,
+          "max_send_q": 348,
+          "peak_halfsecond_rx_mbps": 57.686507591228086,
+          "video_frames": {},
+          "kb_per_browser_frame": 1533.4234105263156,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": null,
+          "quality": {
+            "psnr_db": null,
+            "exact_pixels_percent": 100.0,
+            "mae": 0.0,
+            "text_edge_mae": 0.0,
+            "text_edge_pixels": 75499,
+            "crop_top": 90
+          }
+        },
+        {
+          "scene": "mixed",
+          "duration": 12.45803346199682,
+          "rx_bytes": 184268524,
+          "tx_bytes": 73772,
+          "rx_mbps": 118.32912445586882,
+          "tx_mbps": 0.04737312689039803,
+          "fps": 9.959498041298719,
+          "p95_frame_ms": 159.39999999999782,
+          "max_frame_ms": 166.70000000000073,
+          "over50": 117,
+          "viewport": [
+            1600,
+            1342
+          ],
+          "sender_waypipe_cpu": 15.939829054390456,
+          "sender_chrome_cpu": 6.886625173984226,
+          "viewer_waypipe_cpu": 4.896438927225573,
+          "viewer_transport_cpu": 10.033686326281913,
+          "visibility": "visible",
+          "rtt_median_ms": 25.307,
+          "rtt_max_ms": 34.228,
+          "retrans_total": 0,
+          "rcv_ooopack": 98,
+          "max_send_q": 248,
+          "peak_halfsecond_rx_mbps": 169.91613731622735,
+          "video_frames": {},
+          "kb_per_browser_frame": 12284.568266666667,
+          "viewer_focused_at_capture": false,
+          "decoded_buffer_fps": null,
+          "quality": {
+            "psnr_db": null,
+            "exact_pixels_percent": 100.0,
+            "mae": 0.0,
+            "text_edge_mae": 0.0,
+            "text_edge_pixels": 59682,
+            "crop_top": 90
+          }
+        }
+      ],
+      "renderer": "Disabled",
+      "crashes": 0
+    }
+  ],
+  "groups": {
+    "lossless": {
+      "runs": 2,
+      "scenes": {
+        "text": {
+          "rx_mbps": 45.30039669227677,
+          "rx_mbps_range": [
+            43.53884158531032,
+            47.06195179924322
+          ],
+          "tx_mbps": 0.058977052076932074,
+          "fps": 30.358813278833452,
+          "fps_range": [
+            29.08146242591727,
+            31.636164131749638
+          ],
+          "kb_per_browser_frame": 1539.0560949479716,
+          "p95_frame_ms": 47.45000000000027,
+          "sender_waypipe_cpu": 24.321584492878593,
+          "sender_chrome_cpu": 21.760971150632887,
+          "viewer_waypipe_cpu": 6.178438670030225,
+          "viewer_transport_cpu": 8.237920364970845,
+          "rtt_median_ms": 24.4215,
+          "decoded_buffer_fps": null,
+          "psnr_db": null,
+          "mae": 0.0,
+          "exact_pixels_percent": 100.0,
+          "text_edge_mae": 0.0,
+          "rtt_max_ms": 31.081,
+          "retrans_total": 2,
+          "hardware_decoded_frames": 0,
+          "software_decoded_frames": 0
+        },
+        "mixed": {
+          "rx_mbps": 119.84628502429922,
+          "rx_mbps_range": [
+            118.32912445586882,
+            121.3634455927296
+          ],
+          "tx_mbps": 0.048278380201909984,
+          "fps": 10.057412296657818,
+          "fps_range": [
+            9.959498041298719,
+            10.155326552016916
+          ],
+          "kb_per_browser_frame": 12329.138559562842,
+          "p95_frame_ms": 154.09999999999854,
+          "sender_waypipe_cpu": 21.948564501993587,
+          "sender_chrome_cpu": 9.52267005525622,
+          "viewer_waypipe_cpu": 4.900262077509653,
+          "viewer_transport_cpu": 9.760138711334895,
+          "rtt_median_ms": 25.558,
+          "decoded_buffer_fps": null,
+          "psnr_db": null,
+          "mae": 0.0,
+          "exact_pixels_percent": 100.0,
+          "text_edge_mae": 0.0,
+          "rtt_max_ms": 47.502,
+          "retrans_total": 0,
+          "hardware_decoded_frames": 0,
+          "software_decoded_frames": 0
+        }
+      }
+    },
+    "h264-100k": {
+      "runs": 2,
+      "scenes": {
+        "text": {
+          "rx_mbps": 1.5495880685204475,
+          "rx_mbps_range": [
+            1.534495765319385,
+            1.5646803717215103
+          ],
+          "tx_mbps": 0.032543360069983,
+          "fps": 20.78971705516861,
+          "fps_range": [
+            20.760153791219288,
+            20.81928031911793
+          ],
+          "kb_per_browser_frame": 76.84147199999998,
+          "p95_frame_ms": 62.5,
+          "sender_waypipe_cpu": 1.1655142241746175,
+          "sender_chrome_cpu": 8.974120209841752,
+          "viewer_waypipe_cpu": 0.6857258608271004,
+          "viewer_transport_cpu": 0.8873226250740955,
+          "rtt_median_ms": 22.919,
+          "decoded_buffer_fps": 20.166423297138536,
+          "psnr_db": 34.533498698133926,
+          "mae": 1.8456253409385681,
+          "exact_pixels_percent": 0.7504424366616989,
+          "text_edge_mae": 9.68101978302002,
+          "rtt_max_ms": 28.751,
+          "retrans_total": 1,
+          "hardware_decoded_frames": 500,
+          "software_decoded_frames": 0
+        },
+        "mixed": {
+          "rx_mbps": 1.5577015362212983,
+          "rx_mbps_range": [
+            1.5239378554143925,
+            1.5914652170282038
+          ],
+          "tx_mbps": 0.024734792916162963,
+          "fps": 15.739881206489116,
+          "fps_range": [
+            11.971866114630613,
+            19.50789629834762
+          ],
+          "kb_per_browser_frame": 107.85035555555557,
+          "p95_frame_ms": 135.34999999999854,
+          "sender_waypipe_cpu": 1.3153159459273183,
+          "sender_chrome_cpu": 5.570836520876531,
+          "viewer_waypipe_cpu": 0.6037199721595091,
+          "viewer_transport_cpu": 0.8049599628793453,
+          "rtt_median_ms": 29.3095,
+          "decoded_buffer_fps": 15.254657214642107,
+          "psnr_db": 27.204208531092434,
+          "mae": 6.0147411823272705,
+          "exact_pixels_percent": 6.0761456780923995,
+          "text_edge_mae": 23.848538398742676,
+          "rtt_max_ms": 59.404,
+          "retrans_total": 10,
+          "hardware_decoded_frames": 379,
+          "software_decoded_frames": 0
+        }
+      }
+    },
+    "h264-250k": {
+      "runs": 2,
+      "scenes": {
+        "text": {
+          "rx_mbps": 3.1381280043572133,
+          "rx_mbps_range": [
+            2.8056677009999875,
+            3.4705883077144386
+          ],
+          "tx_mbps": 0.0246277316225497,
+          "fps": 15.063688329388057,
+          "fps_range": [
+            11.203133557949245,
+            18.92424310082687
+          ],
+          "kb_per_browser_frame": 223.53347992202728,
+          "p95_frame_ms": 139.05000000000018,
+          "sender_waypipe_cpu": 1.550413418395976,
+          "sender_chrome_cpu": 10.854465095890994,
+          "viewer_waypipe_cpu": 0.5634246342233442,
+          "viewer_transport_cpu": 0.8451369513350163,
+          "rtt_median_ms": 31.8215,
+          "decoded_buffer_fps": 14.56542086661009,
+          "psnr_db": 37.06031274136549,
+          "mae": 1.365462750196457,
+          "exact_pixels_percent": 0.9753166915052162,
+          "text_edge_mae": 7.23594856262207,
+          "rtt_max_ms": 68.017,
+          "retrans_total": 6,
+          "hardware_decoded_frames": 362,
+          "software_decoded_frames": 0
+        },
+        "mixed": {
+          "rx_mbps": 3.719466585335603,
+          "rx_mbps_range": [
+            3.0164769196924723,
+            4.422456250978733
+          ],
+          "tx_mbps": 0.02974567128561357,
+          "fps": 18.779738363124675,
+          "fps_range": [
+            18.39520559347428,
+            19.16427113277507
+          ],
+          "kb_per_browser_frame": 205.13897619516035,
+          "p95_frame_ms": 72.35000000000036,
+          "sender_waypipe_cpu": 1.3985619116237222,
+          "sender_chrome_cpu": 6.215820784381741,
+          "viewer_waypipe_cpu": 0.6460716464305982,
+          "viewer_transport_cpu": 0.9691074696458972,
+          "rtt_median_ms": 24.4925,
+          "decoded_buffer_fps": 18.21153187916756,
+          "psnr_db": 32.64868442709806,
+          "mae": 2.9461740255355835,
+          "exact_pixels_percent": 18.069602272727273,
+          "text_edge_mae": 6.492007493972778,
+          "rtt_max_ms": 31.148,
+          "retrans_total": 0,
+          "hardware_decoded_frames": 451,
+          "software_decoded_frames": 0
+        }
+      }
+    },
+    "h264-500k": {
+      "runs": 2,
+      "scenes": {
+        "text": {
+          "rx_mbps": 6.264556637643334,
+          "rx_mbps_range": [
+            5.882512365701831,
+            6.646600909584839
+          ],
+          "tx_mbps": 0.02987631786588578,
+          "fps": 18.59924572676057,
+          "fps_range": [
+            18.540998054442355,
+            18.657493399078785
+          ],
+          "kb_per_browser_frame": 347.39744298526585,
+          "p95_frame_ms": 68.75000000000091,
+          "sender_waypipe_cpu": 1.9349569353274196,
+          "sender_chrome_cpu": 13.506027753503847,
+          "viewer_waypipe_cpu": 0.6857232888987486,
+          "viewer_transport_cpu": 1.008390469708869,
+          "rtt_median_ms": 24.057250000000003,
+          "decoded_buffer_fps": 18.029084257442726,
+          "psnr_db": 41.116479011224776,
+          "mae": 0.6904381811618805,
+          "exact_pixels_percent": 1.6173621460506706,
+          "text_edge_mae": 3.8025790452957153,
+          "rtt_max_ms": 30.308,
+          "retrans_total": 0,
+          "hardware_decoded_frames": 447,
+          "software_decoded_frames": 0
+        },
+        "mixed": {
+          "rx_mbps": 8.15158086997157,
+          "rx_mbps_range": [
+            7.422864220664933,
+            8.880297519278207
+          ],
+          "tx_mbps": 0.029061117282543927,
+          "fps": 17.49093687789344,
+          "fps_range": [
+            17.107361148020193,
+            17.874512607766686
+          ],
+          "kb_per_browser_frame": 480.4229751185369,
+          "p95_frame_ms": 76.65000000000146,
+          "sender_waypipe_cpu": 1.8568130217691885,
+          "sender_chrome_cpu": 7.54236694239628,
+          "viewer_waypipe_cpu": 0.6439468948616612,
+          "viewer_transport_cpu": 1.0463610110267012,
+          "rtt_median_ms": 25.624499999999998,
+          "decoded_buffer_fps": 16.94201368103737,
+          "psnr_db": 34.184125621481535,
+          "mae": 2.314828038215637,
+          "exact_pixels_percent": 20.381589977645305,
+          "text_edge_mae": 4.475196003913879,
+          "rtt_max_ms": 31.239,
+          "retrans_total": 0,
+          "hardware_decoded_frames": 421,
+          "software_decoded_frames": 0
+        }
+      }
+    },
+    "h264-1000k": {
+      "runs": 2,
+      "scenes": {
+        "text": {
+          "rx_mbps": 12.365171730170124,
+          "rx_mbps_range": [
+            12.131851351595333,
+            12.598492108744914
+          ],
+          "tx_mbps": 0.032060570435642775,
+          "fps": 17.96789666936191,
+          "fps_range": [
+            17.789692253287313,
+            18.146101085436506
+          ],
+          "kb_per_browser_frame": 709.760845751522,
+          "p95_frame_ms": 71.10000000000127,
+          "sender_waypipe_cpu": 1.5101868496007187,
+          "sender_chrome_cpu": 10.22627366998396,
+          "viewer_waypipe_cpu": 0.685424375549793,
+          "viewer_transport_cpu": 1.2903553206462623,
+          "rtt_median_ms": 26.682000000000002,
+          "decoded_buffer_fps": 17.420104382898675,
+          "psnr_db": 41.44537720474398,
+          "mae": 0.6264379024505615,
+          "exact_pixels_percent": 1.5586810730253353,
+          "text_edge_mae": 3.556431293487549,
+          "rtt_max_ms": 31.11,
+          "retrans_total": 0,
+          "hardware_decoded_frames": 432,
+          "software_decoded_frames": 0
+        },
+        "mixed": {
+          "rx_mbps": 16.078961342147377,
+          "rx_mbps_range": [
+            14.214628597680479,
+            17.943294086614273
+          ],
+          "tx_mbps": 0.02888107899711744,
+          "fps": 15.892088581947156,
+          "fps_range": [
+            15.337677626888194,
+            16.44649953700612
+          ],
+          "kb_per_browser_frame": 1050.644412121212,
+          "p95_frame_ms": 93.5,
+          "sender_waypipe_cpu": 1.5042467444071774,
+          "sender_chrome_cpu": 6.3633619394333945,
+          "viewer_waypipe_cpu": 0.6828524655757271,
+          "viewer_transport_cpu": 1.5263921610521713,
+          "rtt_median_ms": 26.990499999999997,
+          "decoded_buffer_fps": 15.386689662523825,
+          "psnr_db": 34.726701240064976,
+          "mae": 2.0673954486846924,
+          "exact_pixels_percent": 22.190131333830102,
+          "text_edge_mae": 3.9784018993377686,
+          "rtt_max_ms": 32.412,
+          "retrans_total": 2,
+          "hardware_decoded_frames": 383,
+          "software_decoded_frames": 0
+        }
+      }
+    }
+  },
+  "scope": "Snap browser host -> Starship viewer, one direct Tailscale path, 1600x1342 content at 1x scale",
+  "method": "Two 12-second scrolling scenes per run, A order followed by B reverse order; separate clean profiles; installed Waypipe binaries; zstd=1; 2-second warmups; debug disabled; video trace enabled equally for video cases",
+  "limits": [
+    "A small repeated synthetic workload; not a full browsing acceptance test.",
+    "requestAnimationFrame FPS reflects browser callbacks, not physical display FPS or input latency.",
+    "Decoded buffer counts can differ from presented frames.",
+    "Image scores use the final frame immediately after scrolling has stopped, not a score of every frame in motion.",
+    "PSNR is a pixel error score; visual inspection still matters.",
+    "Two repeats expose variation but do not establish statistical significance.",
+    "Existing production Chrome stayed open; measurements isolate the test SSH socket and test process trees.",
+    "No bandwidth cap or packet impairment was injected.",
+    "Viewer focus changed during the sweep; callback timing is observational and should not be used as a definitive smoothness ranking.",
+    "The 1M B capture timed out on its first attempt; it was repeated at the end using a fresh profile.",
+    "The optional GPU-lossless diagnostic did not complete and is excluded; the normal lossless mode also disables Chrome GPU rendering, so it is not a pure codec comparison."
+  ]
+}
