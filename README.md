@@ -43,9 +43,13 @@ advertises body and action support. Missing bindings or unsupported capabilities
 produce a warning and let the secure browser launch continue. Disabling
 notifications removes their Python requirement.
 
-Chrome starts with `--ozone-platform=wayland --disable-gpu
---disable-features=Vulkan --new-window`. Waypipe and the browser are installed by
-the user; the launcher does not install packages.
+Chrome starts with native Wayland and `--disable-features=Vulkan --new-window`.
+The standalone lossless default also disables Chrome GPU rendering. Managed
+video mode enables GPU rendering and requires `waypipe-remote-chrome` on both
+ends; its H.264 stream treats large Chrome surfaces as opaque. See
+[transport selection and recovery](docs/configuration.md#transport-and-compression).
+Waypipe and the browser are installed by the user or configuration manager;
+the launcher does not install packages.
 
 ### Secure browser storage
 

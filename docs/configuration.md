@@ -14,6 +14,8 @@ change them. Runtime timeout/path settings still govern each invocation. See
 | `--foreground` (`--no-tmux`) | Run transport and cleanup in the launching terminal |
 | `--chrome-command CMD` | Select a remote executable name or path, without shell syntax |
 | `--compression MODE` | Select Waypipe compression: `zstd=1` (default) or `lz4` |
+| `--transport MODE` | `lossless` (standalone default) or `video` (managed fleet default) |
+| `--video-codecs MODE` | `auto` hardware preference or `software` codecs |
 | `--with-yubikey` / `--no-yubikey` | Require forwarding / skip detection and forwarding |
 | `--yubikey-usb-id ID` | Select the local USB vendor/product |
 | `--yubikey-port PORT` | Set the USB/IP TCP port |
@@ -52,11 +54,45 @@ export REMOTE_CHROME_SECRET_SCHEMA=my_browser_libsecret_os_crypt_password_v2
 remote-chrome launch remote-host --chrome-command /opt/my-browser
 ```
 
-## Transport compression
+## Transport and compression
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `REMOTE_CHROME_COMPRESSION` | `zstd=1` | Waypipe compression; accepts `zstd=1` or `lz4`; `--compression` takes precedence |
+| `REMOTE_CHROME_TRANSPORT` | Configuration, then `lossless` | Select `video` or `lossless` |
+| `REMOTE_CHROME_VIDEO_CODECS` | Configuration, then `auto` | Select `auto` or `software` |
+| `REMOTE_CHROME_CONFIG` | `$XDG_CONFIG_HOME/remote-chrome/config`, or `~/.config/remote-chrome/config` | Optional data file with `transport=` and `video_codecs=` entries |
+
+Chezmoi selects video on Snap, Starship, and Carbon. Video requires the
+coinstalled `waypipe-remote-chrome` package on both ends, enables Chrome GPU
+rendering, and uses H.264 at `bpf=250000`. Large ARGB/ABGR surfaces are treated
+as opaque; this mode discards their transparency and uses lossy 4:2:0 video.
+Small alpha surfaces remain on the lossless path. Stock Waypipe is retained.
+
+The browser-host package selects NVIDIA when an accessible NVIDIA render node
+is present. Viewers use their compositor's GPU, as Waypipe requires. Snap
+normally uses NVIDIA encoding, Starship NVIDIA decoding, and Carbon Intel
+decoding. Browser hosts without NVIDIA use software encoding; Intel encoding
+is excluded because it produced incorrect colors in qualification. Intel's
+`ANV_DEBUG=video-decode` is scoped to the custom Waypipe process. Unsupported
+hardware codecs retain Waypipe's software fallback. Software video still uses
+Vulkan for buffer conversion; use lossless mode to disable Waypipe GPU usage.
+
+```bash
+remote-chrome launch snap --video-codecs software
+remote-chrome launch snap --transport lossless
+```
+
+Flags override environment variables, which override the data file. Reset
+replays the original transport and codec policy. Stop and launch a fresh
+session to select a different policy; a package or configuration update does
+not restart an existing session. Hardware selection is evaluated each time the
+recorded custom Waypipe command runs.
+
+Vulkan validation mode remains a diagnostic limitation of the tested hardware
+video path: NVIDIA reported video-image/profile errors, and hardware decoding
+stalled under `--debug`. Default launches omit validation. Do not interpret a
+successful ordinary launch as a validation-clean result.
 
 Fresh launches explicitly use Zstd level 1. Both hosts need Waypipe built with
 support for the selected codec. To use LZ4 for a new session:

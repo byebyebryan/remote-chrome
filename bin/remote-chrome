@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.4.0"
+VERSION="1.5.0"
 
 usage() {
   cat <<USAGE
@@ -20,6 +20,8 @@ Chrome options:
       --foreground         run Chrome remoting in the foreground
       --chrome-command CMD remote Chrome command, default: google-chrome-stable
       --compression MODE   Waypipe compression: zstd=1 (default) or lz4
+      --transport MODE     lossless or video (managed configuration selects video)
+      --video-codecs MODE  auto hardware selection or software
       --with-yubikey       require forwarding a local YubiKey
       --no-yubikey         skip YubiKey detection and forwarding
       --yubikey-usb-id ID  local USB id, default: 1050:0407
@@ -44,6 +46,9 @@ General options:
 Environment:
   REMOTE_CHROME_COMMAND
   REMOTE_CHROME_COMPRESSION
+  REMOTE_CHROME_TRANSPORT
+  REMOTE_CHROME_VIDEO_CODECS
+  REMOTE_CHROME_CONFIG
   REMOTE_CHROME_SESSION_PREFIX
   REMOTE_CHROME_YUBIKEY_USB_ID
   REMOTE_CHROME_USBIP_PORT
@@ -1587,6 +1592,58 @@ chrome_validate_compression() {
   esac
 }
 
+chrome_validate_transport() {
+  case "$1" in
+    lossless|video) return 0 ;;
+    *) echo "Invalid transport: $1. Use lossless or video." >&2; return 1 ;;
+  esac
+}
+
+chrome_validate_video_codecs() {
+  case "$1" in
+    auto|software) return 0 ;;
+    *) echo "Invalid video codecs: $1. Use auto or software." >&2; return 1 ;;
+  esac
+}
+
+# Deliberately parse data rather than sourcing a shell configuration. Environment
+# and command-line overrides still work when the managed defaults change.
+chrome_transport_defaults() {
+  chrome_transport=lossless
+  chrome_video_codecs=auto
+  local config="${REMOTE_CHROME_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/remote-chrome/config}"
+  local key value
+  if [ -f "$config" ]; then
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+      case "$key" in
+        transport) chrome_transport="$value" ;;
+        video_codecs) chrome_video_codecs="$value" ;;
+        ''|\#*) ;;
+        *) echo "Unknown remote-chrome configuration key: $key" >&2; return 1 ;;
+      esac
+    done <"$config"
+  fi
+  chrome_transport="${REMOTE_CHROME_TRANSPORT:-$chrome_transport}"
+  chrome_video_codecs="${REMOTE_CHROME_VIDEO_CODECS:-$chrome_video_codecs}"
+}
+
+chrome_waypipe_command=()
+
+chrome_set_transport_command() {
+  local compression="$1" transport="$2" codecs="$3"
+  chrome_validate_compression "$compression" || return 1
+  chrome_validate_transport "$transport" || return 1
+  chrome_validate_video_codecs "$codecs" || return 1
+  if [ "$transport" = video ]; then
+    local selector=hw
+    [ "$codecs" != software ] || selector=sw
+    chrome_waypipe_command=(waypipe-remote-chrome --compress "$compression"
+      --video "h264,$selector,bpf=250000" --remote-bin waypipe-remote-chrome ssh)
+  else
+    chrome_waypipe_command=(waypipe --no-gpu --compress "$compression" ssh)
+  fi
+}
+
 chrome_secure_command_line() {
   local compression="$1"
   shift
@@ -1602,7 +1659,18 @@ chrome_secure_command_line() {
   local argument quoted
 
   chrome_validate_compression "$compression" || return 1
-  local command_line="waypipe --no-gpu --compress $compression ssh"
+  local command_line=""
+  local -a transport_command=("${chrome_waypipe_command[@]}")
+  if [ "${#transport_command[@]}" -eq 0 ]; then
+    transport_command=(waypipe --no-gpu --compress "$compression" ssh)
+  fi
+  for argument in "${transport_command[@]}"; do
+    case "$argument" in
+      h264,hw,bpf=250000|h264,sw,bpf=250000) quoted="$argument" ;;
+      *) printf -v quoted '%q' "$argument" ;;
+    esac
+    command_line+="${command_line:+ }$quoted"
+  done
   if [ -n "$notify_remote_socket" ]; then
     printf -v quoted '%q' "-R"
     command_line+=" $quoted"
@@ -1677,6 +1745,22 @@ chrome_launch_target() {
         ;;
       --compression=*)
         chrome_validate_compression "${1#*=}" >/dev/null 2>&1 || return 1
+        shift
+        ;;
+      --transport|--video-codecs)
+        [ "$#" -ge 2 ] || return 1
+        case "$1" in
+          --transport) chrome_validate_transport "$2" >/dev/null 2>&1 || return 1 ;;
+          --video-codecs) chrome_validate_video_codecs "$2" >/dev/null 2>&1 || return 1 ;;
+        esac
+        shift 2
+        ;;
+      --transport=*)
+        chrome_validate_transport "${1#*=}" >/dev/null 2>&1 || return 1
+        shift
+        ;;
+      --video-codecs=*)
+        chrome_validate_video_codecs "${1#*=}" >/dev/null 2>&1 || return 1
         shift
         ;;
       --session|--chrome-command|--yubikey-usb-id|--yubikey-port)
@@ -1767,7 +1851,9 @@ chrome_launch() {
   local assume_yes=0
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
   local compression="${REMOTE_CHROME_COMPRESSION:-zstd=1}"
-  local chrome_args=("--ozone-platform=wayland" "--disable-gpu" "--disable-features=Vulkan" "--new-window")
+  chrome_transport_defaults || return 1
+  local transport="$chrome_transport" video_codecs="$chrome_video_codecs"
+  local chrome_args=("--ozone-platform=wayland" "--disable-features=Vulkan" "--new-window")
   local yubikey_args=()
   local notifications=1
   local secure_script
@@ -1810,6 +1896,18 @@ chrome_launch() {
         compression="${1#*=}"
         shift
         ;;
+      --transport)
+        [ "$#" -ge 2 ] || die "$1 requires a transport mode."
+        transport="$2"
+        shift 2
+        ;;
+      --transport=*) transport="${1#*=}"; shift ;;
+      --video-codecs)
+        [ "$#" -ge 2 ] || die "$1 requires a codec mode."
+        video_codecs="$2"
+        shift 2
+        ;;
+      --video-codecs=*) video_codecs="${1#*=}"; shift ;;
       --with-yubikey)
         yubikey_mode="force"
         shift
@@ -1878,13 +1976,17 @@ chrome_launch() {
 
   [ -n "$host" ] || die "Remote host is required. Example: $PROGRAM launch HOST"
   chrome_validate_compression "$compression" || return 1
+  chrome_set_transport_command "$compression" "$transport" "$video_codecs" || return 1
+  if [ "$transport" = lossless ]; then
+    chrome_args=(--disable-gpu "${chrome_args[@]}")
+  fi
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
   chrome_validate_password_store_args "${chrome_args[@]}"
   chrome_secret_identity "$chrome_command" || exit 1
   chrome_yubikey_mode="$yubikey_mode"
 
   need ssh
-  need waypipe
+  need "${chrome_waypipe_command[0]}"
   chrome_preflight "$host" "$chrome_command" "$foreground" "$notifications"
 
   local forwarding_expected=0
@@ -1956,7 +2058,7 @@ chrome_launch() {
   if [ "$notifications" = "1" ]; then
     notify_prepare_session "$session" "$host"
   fi
-  local -a command=(waypipe --no-gpu --compress "$compression" ssh)
+  local -a command=("${chrome_waypipe_command[@]}")
   if [ -n "$notify_remote_socket" ]; then
     command+=(-R "$notify_remote_socket:$notify_local_socket")
   fi
@@ -2051,6 +2153,7 @@ chrome_preflight() {
   local quoted_chrome_command
   local remote_requirements
   local python_requirement=""
+  local waypipe_command="${chrome_waypipe_command[0]:-waypipe}"
 
   if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
     die "No local Wayland/X display variables found. Run from a graphical session."
@@ -2062,13 +2165,13 @@ chrome_preflight() {
   fi
 
   printf -v quoted_chrome_command '%q' "$chrome_command"
-  remote_requirements="command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null$python_requirement && command -v $quoted_chrome_command >/dev/null"
+  remote_requirements="command -v bash >/dev/null && command -v $waypipe_command >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null$python_requirement && command -v $quoted_chrome_command >/dev/null"
   if [ "$foreground" = "0" ]; then
     ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "$remote_requirements" ||
-      die "Detached launch needs noninteractive SSH to $host plus remote bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command."
+      die "Detached launch needs noninteractive SSH to $host plus remote bash, $waypipe_command, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command."
   else
     ssh -o ConnectTimeout=5 "$host" "$remote_requirements" ||
-      die "Secure launch needs remote bash, waypipe, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command on $host."
+      die "Secure launch needs remote bash, $waypipe_command, xdg-dbus-proxy, secret-tool, ksecretd, busctl, and $chrome_command on $host."
   fi
 }
 
@@ -2835,6 +2938,7 @@ chrome_reset_remote_boot_id=""
 chrome_reset_remote_browser_allowlist=()
 # Older sessions omit --compress; new canonical commands record the codec.
 chrome_reset_waypipe_prefix='^waypipe[[:space:]]+--no-gpu[[:space:]]+(--compress[[:space:]]+(zstd=1|lz4)[[:space:]]+)?ssh[[:space:]]+(.*)$'
+chrome_reset_video_prefix='^waypipe-remote-chrome[[:space:]]+--compress[[:space:]]+(zstd=1|lz4)[[:space:]]+--video[[:space:]]+h264,(hw|sw),bpf=250000[[:space:]]+--remote-bin[[:space:]]+waypipe-remote-chrome[[:space:]]+ssh[[:space:]]+(.*)$'
 
 chrome_reset_read_pane() {
   local session="$1"
@@ -2873,7 +2977,8 @@ chrome_reset_read_pane() {
   if canonical_command="$(tmux show-options -qv -t "=$session:" \
     "$chrome_tmux_command_option" 2>/dev/null)" && [ -n "$canonical_command" ]; then
     chrome_reset_pane_command="$canonical_command"
-  elif [[ "$pane_start_command" =~ $chrome_reset_waypipe_prefix ]]; then
+  elif [[ "$pane_start_command" =~ $chrome_reset_waypipe_prefix ]] ||
+    [[ "$pane_start_command" =~ $chrome_reset_video_prefix ]]; then
     # Older sessions stored the direct command in pane_start_command. Do not
     # attempt to decode a newly wrapped `bash -c` pane command.
     chrome_reset_pane_command="$pane_start_command"
@@ -2901,12 +3006,15 @@ chrome_reset_parse_pane_host() {
   local command_line="$1"
   local remainder token argument
 
-  if [[ ! "$command_line" =~ $chrome_reset_waypipe_prefix ]]; then
+  if [[ "$command_line" =~ $chrome_reset_waypipe_prefix ]]; then
+    remainder="${BASH_REMATCH[3]}"
+  elif [[ "$command_line" =~ $chrome_reset_video_prefix ]]; then
+    remainder="${BASH_REMATCH[3]}"
+  else
     echo "The chrome pane is not a managed waypipe SSH command; refusing reset." >&2
     return 1
   fi
   chrome_reset_host=""
-  remainder="${BASH_REMATCH[3]}"
   # SSH options (including the optional -R notification forward) precede the
   # destination; skip them before taking the first non-option token as host.
   while [ -n "$remainder" ]; do
@@ -2986,6 +3094,7 @@ chrome_reset_find_local_ssh() {
     # local waypipe/SSH child has no shell quoting left in `ps` output.
     read -r -a argv <<<"$args"
     [ "${#argv[@]}" -gt 0 ] || continue
+    case "${argv[0]}" in ssh|*/ssh) ;; *) continue ;; esac
     server_seen=0
     socket_seen=0
     reverse_spec=""
@@ -3012,9 +3121,13 @@ chrome_reset_find_local_ssh() {
         --)
           if [ $((token_index + 2)) -lt "${#argv[@]}" ] && {
             [ "${argv[$((token_index + 1))]}" = "waypipe" ] ||
-            [[ "${argv[$((token_index + 1))]}" = */waypipe ]];
+            [[ "${argv[$((token_index + 1))]}" = */waypipe ]] ||
+            [ "${argv[$((token_index + 1))]}" = "waypipe-remote-chrome" ];
           }; then
-            server_seen=1
+            if [ "$token_index" -gt 0 ] &&
+              [ "${argv[$((token_index - 1))]}" = "$host" ]; then
+              server_seen=1
+            fi
           fi
           ;;
         --socket)
@@ -3029,10 +3142,6 @@ chrome_reset_find_local_ssh() {
           ;;
       esac
     done
-    case "$args" in
-      *" $host -- waypipe "*) ;;
-      *) continue ;;
-    esac
     [ "$server_seen" = "1" ] || continue
     [ "$socket_seen" = "1" ] || continue
     case "$reverse_spec" in
@@ -5163,12 +5272,13 @@ doctor_remote_chrome() {
   local notifications="$3"
   local quoted_chrome
   local python_requirement=""
+  local waypipe_command="${chrome_waypipe_command[0]:-waypipe}"
   printf -v quoted_chrome '%q' "$chrome_command"
   if [ "$notifications" = "1" ]; then
     python_requirement=" && command -v python3 >/dev/null"
   fi
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-    "command -v bash >/dev/null && command -v waypipe >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null$python_requirement && command -v $quoted_chrome >/dev/null"
+    "command -v bash >/dev/null && command -v $waypipe_command >/dev/null && command -v xdg-dbus-proxy >/dev/null && command -v secret-tool >/dev/null && command -v ksecretd >/dev/null && command -v busctl >/dev/null$python_requirement && command -v $quoted_chrome >/dev/null"
 }
 
 doctor_notifications() {
@@ -5242,6 +5352,8 @@ doctor_local_key() {
 
 chrome_doctor() {
   local host=""
+  chrome_transport_defaults || return 1
+  local transport="$chrome_transport" video_codecs="$chrome_video_codecs"
   local chrome_command="${REMOTE_CHROME_COMMAND:-google-chrome-stable}"
   local yubikey_mode="auto"
   local yk_args=()
@@ -5318,7 +5430,9 @@ chrome_doctor() {
     echo "doctor: set WAYLAND_DISPLAY or DISPLAY from a graphical session before launching." >&2
     code=1
   fi
-  for command_name in ssh waypipe tmux; do
+  chrome_set_transport_command "${REMOTE_CHROME_COMPRESSION:-zstd=1}" "$transport" "$video_codecs" || return 1
+  echo "doctor: launch defaults: transport=$transport video-codecs=$video_codecs"
+  for command_name in ssh "${chrome_waypipe_command[0]}" tmux; do
     if ! doctor_check "local command: $command_name" doctor_local_command "$command_name"; then
       code=1
     fi

@@ -27,6 +27,8 @@ export REMOTE_CHROME_VHCI_HCD_DRIVER_SYSFS="$test_suite_dir/vhci-driver"
 # exercise the notify helpers directly instead.
 export REMOTE_CHROME_NOTIFICATIONS=0
 unset REMOTE_CHROME_COMPRESSION
+unset REMOTE_CHROME_TRANSPORT REMOTE_CHROME_VIDEO_CODECS
+export REMOTE_CHROME_CONFIG="$test_suite_dir/no-config"
 yk_usbip_host_sysfs="$REMOTE_CHROME_USBIP_HOST_SYSFS"
 unset TMUX
 
@@ -1337,6 +1339,7 @@ printf '%s\n' "$@" >"$REMOTE_CHROME_TEST_WAYPIPE_ARGS"
 cat >/dev/null
 FAKE_WAYPIPE_COMPRESSION
   chmod +x "$test_dir/bin/waypipe"
+  ln -s waypipe "$test_dir/bin/waypipe-remote-chrome"
   export PATH="$test_dir/bin:$PATH"
   export REMOTE_CHROME_TEST_WAYPIPE_ARGS="$test_dir/args"
   XDG_RUNTIME_DIR="$test_dir"
@@ -1353,11 +1356,12 @@ FAKE_WAYPIPE_COMPRESSION
     esac
   }
 
-  for mode in detached foreground; do
+  for mode in detached foreground video-detached video-foreground; do
     for setting in default environment flag equals override; do
       unset REMOTE_CHROME_COMPRESSION
       launch_args=(test-host --no-yubikey --no-notifications)
-      [ "$mode" != foreground ] || launch_args+=(--foreground)
+      case "$mode" in foreground|video-foreground) launch_args+=(--foreground) ;; esac
+      case "$mode" in video-*) launch_args+=(--transport video) ;; esac
       expected=lz4
       case "$setting" in
         default) expected=zstd=1 ;;
@@ -1373,9 +1377,21 @@ FAKE_WAYPIPE_COMPRESSION
       rm -f "$REMOTE_CHROME_TEST_WAYPIPE_ARGS"
       output="$(chrome_launch "${launch_args[@]}" 2>&1)" ||
         fail "$mode/$setting launch failed: $output"
-      [ "$(sed -n '1,5p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
-        "$(printf '%s\n' --no-gpu --compress "$expected" ssh test-host)" ] ||
-        fail "$mode/$setting used the wrong Waypipe compression or host"
+      case "$mode" in
+        video-*)
+          [ "$(sed -n '1,8p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
+            "$(printf '%s\n' --compress "$expected" --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host)" ] ||
+            fail "$mode/$setting used the wrong video transport"
+          if command grep -qx -- --disable-gpu "$REMOTE_CHROME_TEST_WAYPIPE_ARGS"; then
+            fail "video launch disabled Chrome GPU rendering"
+          fi
+          ;;
+        *)
+          [ "$(sed -n '1,5p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
+            "$(printf '%s\n' --no-gpu --compress "$expected" ssh test-host)" ] ||
+            fail "$mode/$setting used the wrong Waypipe compression or host"
+          ;;
+      esac
     done
   done
 )
@@ -1419,6 +1435,59 @@ test_launch_target_accepts_compression_options() (
     fail "launch target parser rejected --compression= after the host"
   [ "$chrome_launch_target_host" = test-host ] || fail "launch target lost the equals host"
   [ "$chrome_launch_target_session" = work-browser ] || fail "launch target lost the equals session"
+)
+
+test_video_command_and_configuration_round_trip() (
+  local test_dir command_line output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  REMOTE_CHROME_CONFIG="$test_dir/config"
+  printf '%s\n' '# Managed defaults' transport=video video_codecs=auto >"$REMOTE_CHROME_CONFIG"
+  chrome_transport_defaults
+  [ "$chrome_transport/$chrome_video_codecs" = video/auto ] || fail "managed video defaults lost"
+  chrome_set_transport_command zstd=1 "$chrome_transport" "$chrome_video_codecs"
+  command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome \
+    chrome_libsecret_os_crypt_password_v2 '' '' '' /tmp/remote-chrome-test.bootstrap.sh)"
+  assert_contains "$command_line" 'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host'
+  chrome_reset_parse_pane_host "$command_line" || fail "video command cannot reset"
+  [ "$chrome_reset_host" = test-host ] || fail "video command reset targets wrong host"
+  chrome_launch_target test-host --transport video --video-codecs=software --session=video-test
+  [ "$chrome_launch_target_session" = video-test ] || fail "video flags bypass launch targeting"
+  REMOTE_CHROME_TRANSPORT=lossless REMOTE_CHROME_VIDEO_CODECS=software chrome_transport_defaults
+  [ "$chrome_transport/$chrome_video_codecs" = lossless/software ] || fail "environment did not override defaults"
+  chrome_set_transport_command lz4 video software
+  [ "${chrome_waypipe_command[4]}" = h264,sw,bpf=250000 ] || fail "software override not recorded"
+  command_line="$(chrome_secure_command_line lz4 test-host google-chrome-stable chrome \
+    chrome_libsecret_os_crypt_password_v2 '' '' '' /tmp/remote-chrome-test.bootstrap.sh)"
+  chrome_reset_parse_pane_host "$command_line" || fail "software video reset rejected"
+  for command_line in \
+    'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=250000 --remote-bin other ssh test-host x' \
+    'waypipe-remote-chrome --compress zstd=1 --video invalid --remote-bin waypipe-remote-chrome ssh test-host x'; do
+    if chrome_reset_parse_pane_host "$command_line" >/dev/null 2>&1; then
+      fail "reset accepted an unmanaged video command"
+    fi
+  done
+  printf '%s\n' 'transport=$(touch /tmp/remote-chrome-config-executed)' >"$REMOTE_CHROME_CONFIG"
+  chrome_transport_defaults
+  output="$(chrome_set_transport_command zstd=1 "$chrome_transport" auto 2>&1)" &&
+    fail "configuration shell text accepted"
+  assert_contains "$output" 'Invalid transport'
+)
+
+test_video_ssh_identity_accepts_only_selected_descendant() (
+  local current_uid
+  current_uid="$(id -u)"
+  ps() {
+    printf '%s\n' \
+      "4242 1 4242 $current_uid /bin/bash" \
+      "5000 4242 5000 $current_uid ssh -R /tmp/waypipe-server-video.sock:/tmp/waypipe-client-video.sock test-host -- waypipe-remote-chrome --socket /tmp/waypipe-server-video.sock server --foo" \
+      "5001 1 5001 $current_uid ssh -R /tmp/waypipe-server-other.sock:/tmp/waypipe-client-other.sock test-host -- waypipe-remote-chrome --socket /tmp/waypipe-server-other.sock server --foo"
+  }
+  chrome_reset_find_local_ssh 4242 test-host || fail "custom Waypipe child not recognized"
+  [ "$chrome_reset_remote_socket" = /tmp/waypipe-server-video.sock ] || fail "unrelated child matched"
+  if chrome_reset_find_local_ssh 4242 other-host >/dev/null 2>&1; then
+    fail "custom Waypipe child accepted for a different host"
+  fi
 )
 
 test_secure_bootstrap_encodes_minimal_proxy_policy() (
@@ -3703,7 +3772,7 @@ test_occupied_remote_port_preserves_existing_chrome() (
 test_version_flag_reports_version() (
   local output
   output="$(main --version)"
-  assert_contains "$output" "1.4.0"
+  assert_contains "$output" "1.5.0"
   assert_contains "$output" "$VERSION"
   [[ "$output" == *"$PROGRAM"* ]] || fail "version output omitted the program name"
 )
@@ -6294,6 +6363,8 @@ tests=(
   test_compression_launch_defaults_and_overrides
   test_invalid_compression_is_rejected_before_launch_or_reset
   test_launch_target_accepts_compression_options
+  test_video_command_and_configuration_round_trip
+  test_video_ssh_identity_accepts_only_selected_descendant
   test_secure_bootstrap_encodes_minimal_proxy_policy
   test_notification_command_shape_round_trips
   test_launch_target_accepts_notification_flag
