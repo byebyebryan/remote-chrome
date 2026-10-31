@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.7.0"
+VERSION="1.8.0"
 
 usage() {
   cat <<USAGE
@@ -15,7 +15,8 @@ Usage:
   $PROGRAM attach HOST
   $PROGRAM reset [HOST] [--session NAME] [--yes]
   $PROGRAM mark HOST [--session NAME]
-  $PROGRAM diagnostics HOST [--session NAME] [--since 20m] [--export FILE]
+  $PROGRAM diagnostics HOST [--session NAME] [--since 20m | --at ISO --window 5m]
+    [--timeline] [--resolution auto|raw|minute] [--watch [60s] | --probe [30s]] [--export FILE]
 
 Chrome options:
       --session NAME       tmux session name
@@ -8262,9 +8263,11 @@ chrome_diagnostics_run() {
   python3 - "$@" <<'REMOTE_CHROME_DIAGNOSTICS'
 """Embedded session diagnostics. Technical records only; never a control plane."""
 import argparse
+import collections
 import datetime as dt
 import errno
 import fcntl
+import hashlib
 import ipaddress
 import json
 import math
@@ -8275,6 +8278,7 @@ import selectors
 import shlex
 import signal
 import socket
+import struct
 import stat
 import subprocess
 import sys
@@ -8282,6 +8286,7 @@ import time
 import uuid
 
 SCHEMA = 1
+RECORD_SCHEMA = 2
 CHUNK = 4 * 1024 * 1024
 LINE = 32768
 READ_LIMIT = 32 * 1024 * 1024
@@ -8290,6 +8295,98 @@ BOOT = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 UID = os.getuid()
 HZ = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGE_SIZE")
+WIFI_SALT = os.urandom(16)
+CONTEXT_EVENTS = {'start', 'codec', 'network', 'host', 'wifi', 'display', 'helpers'}
+
+
+def tcp_info(raw):
+    """Length-checked Linux TCP_INFO UAPI; zero is data, short fields unknown.
+
+    include/uapi/linux/tcp.h appends fields without moving this stable prefix.
+    Native integers are intentional: this is a local kernel ABI, not wire data.
+    """
+    fields = {
+        'rto_ms': (8, 'I', .001), 'unacked': (24, 'I', 1),
+        'lost': (32, 'I', 1), 'last_sent_ms': (44, 'I', 1),
+        'last_received_ms': (52, 'I', 1), 'last_ack_ms': (56, 'I', 1),
+        'rtt_ms': (68, 'I', .001), 'rttvar_ms': (72, 'I', .001),
+        'cwnd': (80, 'I', 1), 'retrans_total': (100, 'I', 1),
+        'bytes_acked': (120, 'Q', 1), 'bytes_received': (128, 'Q', 1),
+        'segs_out': (136, 'I', 1), 'segs_in': (140, 'I', 1),
+        'notsent_bytes': (144, 'I', 1), 'min_rtt_ms': (148, 'I', .001),
+        'data_segs_in': (152, 'I', 1), 'data_segs_out': (156, 'I', 1),
+        'delivery_rate_bytes_sec': (160, 'Q', 1), 'busy_us': (168, 'Q', 1),
+        'rwnd_limited_us': (176, 'Q', 1), 'sndbuf_limited_us': (184, 'Q', 1),
+        'bytes_sent': (200, 'Q', 1), 'bytes_retrans': (208, 'Q', 1),
+        'dsack_dups': (216, 'I', 1), 'reord_seen': (220, 'I', 1),
+        'snd_wnd': (228, 'I', 1), 'total_rto': (240, 'H', 1),
+    }
+    result = {'tcp_info_bytes': len(raw), 'source': 'inet_diag'}
+    for name, (offset, fmt, scale) in fields.items():
+        result[name] = struct.unpack_from('=' + fmt, raw, offset)[0] * scale \
+            if len(raw) >= offset + struct.calcsize(fmt) else None
+    result['backoff'] = raw[4] if len(raw) > 4 else None
+    result['app_limited'] = bool(raw[7] & 1) if len(raw) > 7 else None
+    # Linux uses ~0U when no minimum RTT has been sampled yet.
+    if result['min_rtt_ms'] == 4294967.295:
+        result['min_rtt_ms'] = None
+    return result
+
+
+def kernel_socket(local, peer, allow_server=False):
+    """One exact, unprivileged SOCK_DIAG query, bounded in bytes and time."""
+    family = socket.AF_INET6 if ':' in local[0] else socket.AF_INET
+    def packed(ip):
+        return socket.inet_pton(family, ip).ljust(16, b'\0')
+    identity = struct.pack('!HH', local[1], peer[1]) + packed(local[0]) + packed(peer[0])
+    identity += struct.pack('=III', 0, 0xffffffff, 0xffffffff)
+    request = struct.pack('=BBBBI', family, socket.IPPROTO_TCP, 2, 0, 1 << 1) + identity
+    seq = os.getpid() & 0xffffffff
+    message = struct.pack('=IHHII', 16 + len(request), 20, 1, seq, 0) + request
+    try:
+        with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 4) as channel:
+            channel.settimeout(.2)
+            channel.sendto(message, (0, 0))
+            raw, _, flags, sender = channel.recvmsg(65536)
+            if sender[0] != 0 or flags & socket.MSG_TRUNC:
+                return None
+        offset = 0
+        while offset + 16 <= len(raw):
+            length, kind, _flags, got_seq, _pid = struct.unpack_from('=IHHII', raw, offset)
+            if length < 16 or offset + length > len(raw):
+                return None
+            body = raw[offset + 16:offset + length]
+            offset += (length + 3) & ~3
+            if kind != 20 or got_seq != seq or len(body) < 72 or body[0] != family:
+                continue
+            sport, dport = struct.unpack_from('!HH', body, 4)
+            size = 16 if family == socket.AF_INET6 else 4
+            src = socket.inet_ntop(family, body[8:8 + size])
+            dst = socket.inet_ntop(family, body[24:24 + size])
+            if ([src, sport], [dst, dport]) != (list(local), list(peer)):
+                continue
+            lo, hi = struct.unpack_from('=II', body, 44)
+            recvq, sendq, uid, inode = struct.unpack_from('=IIII', body, 56)
+            # sshd accepts the browser-side socket before dropping privilege;
+            # its kernel UID can remain root. Only the bootstrap's inherited
+            # exact SSH four-tuple may use this exception. Viewer FD selection
+            # always requires the current user and a proven owned SSH process.
+            if uid != UID and not (allow_server and uid == 0):
+                return None
+            result = dict(local=[src, sport], peer=[dst, dport], inode=str(inode),
+                          cookie=f'{lo | hi << 32:x}', recv_queue=recvq, send_queue=sendq, socket_uid=uid)
+            at = 72
+            while at + 4 <= len(body):
+                size, attr = struct.unpack_from('=HH', body, at)
+                if size < 4 or at + size > len(body):
+                    return None
+                if attr == 2:
+                    result.update(tcp_info(body[at + 4:at + size]))
+                at += (size + 3) & ~3
+            return result if result.get('tcp_info_bytes', 0) >= 104 else None
+    except (OSError, ValueError, struct.error):
+        return None
+    return None
 
 
 def now():
@@ -8308,8 +8405,9 @@ class Store:
     An open chunk is charged CHUNK bytes against quota, without preallocation.
     Every writer holds its chunk flock until close. Pruning never removes one.
     """
-    def __init__(self, days=30, cap=1073741824, base=None, create=True):
+    def __init__(self, days=30, cap=1073741824, base=None, create=True, stream='raw'):
         self.days, self.cap = days, cap
+        self.stream, self.context = stream, None
         self.fd = self.lock = self.writer = None
         self.size = self.opened = 0
         self.path = Path(base or os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
@@ -8384,9 +8482,17 @@ class Store:
                 held = os.fstat(descriptor)
                 stamp, size = held.st_mtime, held.st_size
                 # Keep locked closed chunks until the quota decision is complete.
-                opened.append((stamp, name, size, descriptor))
+                # Minute summaries share the quota, but raw detail is evicted
+                # first when both kinds are within the retention window.
+                try:
+                    first = json.loads(os.pread(descriptor, LINE, 0).split(b'\n', 1)[0])
+                    minute = first.get('stream') == 'minute'
+                except (ValueError, AttributeError):
+                    minute = False
+                opened.append((minute, stamp, name, size, descriptor))
                 total += size
-            for stamp, name, size, descriptor in opened:
+            cutoff = time.time() - self.days * 86400
+            for minute, stamp, name, size, descriptor in sorted(opened, key=lambda x: (x[1] >= cutoff, x[0], x[1])):
                 if stamp < time.time() - self.days * 86400 or total + reserve > self.cap:
                     current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
                     held = os.fstat(descriptor)
@@ -8396,7 +8502,7 @@ class Store:
                     total -= size
             return total + reserve <= self.cap
         finally:
-            for _, _, _, descriptor in opened:
+            for _, _, _, _, descriptor in opened:
                 os.close(descriptor)
 
     def prune(self):
@@ -8415,7 +8521,12 @@ class Store:
             self.writer = None
 
     def append(self, record):
-        raw = (json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode()
+        compact = record
+        if self.context:
+            compact = {k: v for k, v in record.items()
+                       if k not in self.context['identity'] and k not in ('utc', 'boot')}
+            compact['schema'] = RECORD_SCHEMA
+        raw = (json.dumps(compact, separators=(",", ":"), allow_nan=False) + "\n").encode()
         if len(raw) > LINE or len(raw) > CHUNK:
             raise ValueError("diagnostic record too large")
         if self.writer is not None and (self.size + len(raw) > CHUNK or time.monotonic() - self.opened >= 3600):
@@ -8436,6 +8547,14 @@ class Store:
                 self.writer = self.open_file(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
                 fcntl.flock(self.writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self.size, self.opened = 0, time.monotonic()
+                if self.context:
+                    header = dict(schema=RECORD_SCHEMA, event='context', stream=self.stream,
+                                  identity=self.context['identity'], state=self.context.get('state', {}), **now())
+                    encoded = (json.dumps(header, separators=(',', ':'), allow_nan=False) + '\n').encode()
+                    if len(encoded) > LINE or os.write(self.writer, encoded) != len(encoded):
+                        self.rotate()
+                        raise OSError(errno.ENOSPC, 'diagnostic context write failed')
+                    self.size += len(encoded)
             finally:
                 fcntl.flock(self.lock, fcntl.LOCK_UN)
         if not private(os.fstat(self.writer)):
@@ -8447,9 +8566,12 @@ class Store:
         self.size += written
         return True
 
-    def records(self, since, until, target=None, origin=None, session=None):
+    def records(self, since, until, target=None, origin=None, session=None,
+                budget=None, stream='raw', raw_after=None):
         used = 0
-        for stamp, name, _ in reversed(self.chunks()):
+        requested_stream = stream
+        budget = READ_LIMIT if budget is None else budget
+        for stamp, name, _ in self.chunks():
             if stamp < since:
                 continue
             try:
@@ -8457,18 +8579,42 @@ class Store:
             except FileNotFoundError:
                 continue
             with os.fdopen(descriptor, "rb") as stream:
+                identity, carried, emitted, file_stream = {}, {}, False, 'raw'
                 while True:
                     raw = stream.readline(LINE + 1)
                     if not raw:
                         break
                     used += len(raw)
-                    if used > READ_LIMIT:
+                    if used > budget:
                         raise ValueError("query read limit reached; request a shorter time window")
                     if len(raw) > LINE or not raw.endswith(b"\n"):
                         continue
                     try:
                         row = json.loads(raw)
-                        if row.get("schema") != SCHEMA or not since <= row["wall"] <= until:
+                        if row.get('schema') == RECORD_SCHEMA and row.get('event') == 'context':
+                            identity = row.get('identity', {})
+                            if not isinstance(identity, dict):
+                                break
+                            carried = row.get('state', {})
+                            file_stream = row.get('stream', 'raw')
+                            if not isinstance(carried, dict):
+                                carried = {}
+                            # The file stream kind is fixed by its private header.
+                            if requested_stream != 'all' and row.get('stream', 'raw') != requested_stream:
+                                break
+                            if any(value is not None and identity.get(key) != value for key, value in
+                                   [('target', target), ('origin', origin), ('session', session)]):
+                                break
+                            if file_stream == 'raw' and raw_after and stamp <= raw_after.get(identity.get('attempt'), -1):
+                                break
+                            continue
+                        if row.get('schema') == RECORD_SCHEMA:
+                            row = dict(identity, **row)
+                            row['stream'] = file_stream
+                            row.setdefault('utc', dt.datetime.fromtimestamp(row['wall'], dt.timezone.utc).isoformat(timespec='milliseconds'))
+                        if row.get("schema") not in (SCHEMA, RECORD_SCHEMA) or not math.isfinite(row['wall']):
+                            continue
+                        if requested_stream == 'minute' and row.get('event') != 'minute':
                             continue
                         if row.get("role") not in {"viewer", "browser"} or \
                                 any(not isinstance(row.get(k), str) for k in ("attempt", "host", "utc", "event")):
@@ -8480,9 +8626,52 @@ class Store:
                             continue
                         if session is not None and row.get("session") != session:
                             continue
+                        if file_stream == 'raw' and raw_after and row['event'] not in ('mark', 'probe') and \
+                                row['wall'] <= raw_after.get(row['attempt'], -1):
+                            if row['event'] in CONTEXT_EVENTS:
+                                carried[row['event']] = row
+                            continue
+                        if row['wall'] < since:
+                            if row['event'] in CONTEXT_EVENTS:
+                                carried[row['event']] = row
+                            if row['event'] == 'minute' and isinstance(row.get('state'), dict):
+                                carried.update(row['state'])
+                            continue
+                        if row['wall'] > until:
+                            continue
+                        if not emitted:
+                            for context in carried.values():
+                                if isinstance(context, dict) and context.get('event') in CONTEXT_EVENTS:
+                                    value = dict(context)
+                                    value.update(wall=since, utc=dt.datetime.fromtimestamp(since, dt.timezone.utc).isoformat(timespec='milliseconds'),
+                                                 carried=True, observed_utc=context.get('utc'), stream=file_stream)
+                                    yield value
+                            emitted = True
                         yield row
                     except (ValueError, TypeError, KeyError, AttributeError):
                         continue
+
+    def inventory(self, target=None, origin=None, session=None):
+        values = []
+        for stamp, name, size in self.chunks():
+            try:
+                descriptor = self.open_file(name, os.O_RDONLY)
+            except FileNotFoundError:
+                continue
+            with os.fdopen(descriptor, 'rb') as source:
+                raw = source.readline(LINE + 1)
+            try:
+                first = json.loads(raw)
+                identity = first.get('identity', first)
+                if any(value is not None and identity.get(key) != value for key, value in
+                       [('target', target), ('origin', origin), ('session', session)]):
+                    continue
+                values.append(dict(name=name, bytes=size, last_write=stamp,
+                                   first_wall=first.get('wall'), attempt=identity.get('attempt'),
+                                   stream=first.get('stream', 'raw')))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return values
 
     def close(self):
         self.rotate()
@@ -8551,12 +8740,13 @@ def browser_waypipe(owner):
     return None
 
 
-def bounded(command, timeout=0.7, limit=262144):
+def bounded(command, timeout=0.7, limit=262144, ok_codes=(0,)):
     """Bound time and output before parsing, including noisy/broken tools."""
     child = None
     try:
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                                 stderr=subprocess.DEVNULL, start_new_session=True,
+                                 env=dict(os.environ, LC_ALL='C'))
         result = bytearray()
         deadline = time.monotonic() + timeout
         with selectors.DefaultSelector() as selector:
@@ -8571,7 +8761,7 @@ def bounded(command, timeout=0.7, limit=262144):
                 part = os.read(child.stdout.fileno(), min(65536, limit + 1 - len(result)))
                 if not part:
                     child.wait(timeout=max(0.001, deadline - time.monotonic()))
-                    return result.decode(errors="replace") if child.returncode == 0 else None
+                    return result.decode(errors="replace") if child.returncode in ok_codes else None
                 result.extend(part)
                 if len(result) > limit:
                     return None
@@ -8616,6 +8806,16 @@ def parse_ss(raw):
             row["rttvar_ms"] = float(rtt[1]) if len(rtt) == 2 else None
             retrans = values.get("retrans", "").split("/")
             row["retrans_total"] = int(retrans[1]) if len(retrans) == 2 else None
+            row['source'] = 'ss'
+            # This stable TCP_INFO prefix exists on supported Linux kernels.
+            # ss intentionally suppresses retrans:0/0; do not lose 0 -> 1.
+            if row['retrans_total'] is None and 'cwnd' in values and 'rtt' in values:
+                row['retrans_total'] = 0
+            for name, key in [('bytes_acked', 'bytes_acked'), ('unacked', 'unacked'),
+                              ('notsent_bytes', 'notsent'), ('last_ack_ms', 'lastack'),
+                              ('data_segs_out', 'data_segs_out'), ('reord_seen', 'reord_seen')]:
+                row[name] = int(values[key]) if values.get(key, '').isdigit() else None
+            row['min_rtt_ms'] = float(values['minrtt']) if values.get('minrtt') else None
             rows.append(row)
         except (ValueError, IndexError):
             continue
@@ -8630,6 +8830,9 @@ def tcp_sample(role, rows, connection, selected):
             wanted = ([server, int(sport)], [client, int(cport)])
         except (ValueError, TypeError):
             return dict(available=False, reason="missing SSH connection identity")
+        structured = kernel_socket(*wanted, allow_server=True)
+        if structured:
+            return dict(available=True, scope='SSH connection including its forwarded channels', **structured)
         raw = bounded(["ss", "-tineHO", "src", server, "dst", client,
                        "sport", "=", str(sport), "dport", "=", str(cport)])
         sockets = [r for r in parse_ss(raw) if (r["local"], r["peer"]) == wanted]
@@ -8647,6 +8850,10 @@ def tcp_sample(role, rows, connection, selected):
                     inodes.add(link[8:-1])
         except OSError:
             return dict(available=False, reason="SSH socket descriptors unavailable")
+        if selected and selected['inode'] in inodes:
+            structured = kernel_socket(selected['local'], selected['peer'])
+            if structured and structured['inode'] in inodes and exact(ssh[0]['pid'], ssh[0]['start']):
+                return dict(available=True, scope='SSH connection including its forwarded channels', **structured)
         if selected:
             raw = bounded(["ss", "-tineHO", "src", selected["local"][0], "dst", selected["peer"][0],
                            "sport", "=", str(selected["local"][1]), "dport", "=", str(selected["peer"][1])])
@@ -8757,11 +8964,112 @@ def path_sample(peer):
                                        direct_address=direct, home_derp=p.get("Relay"), peer_relay=relay)
     except (ValueError, TypeError, KeyError, AttributeError):
         pass
+    # A route to the Tailscale IP only identifies tailscale0. Resolve the
+    # reported direct endpoint separately to identify the physical uplink.
+    underlay = peer if not result['tailscale'].get('available') else None
+    direct = result['tailscale'].get('direct_address')
+    if direct:
+        try:
+            underlay = address(direct)[0]
+        except (ValueError, IndexError):
+            underlay = None
+    result['underlay_route'] = None
+    if underlay:
+        try:
+            value = json.loads(bounded(['ip', '-j', 'route', 'get', underlay]) or 'null')
+            result['underlay_route'] = [{k: r.get(k) for k in ('dev', 'gateway', 'prefsrc', 'dst')}
+                                        for r in value][:4]
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return result
+
+
+def host_sample():
+    result = {'available': True, 'pressure': {}, 'interfaces': {}}
+    for kind in ('cpu', 'memory', 'io'):
+        try:
+            raw = (Path('/proc/pressure') / kind).read_text()[:2048]
+            result['pressure'][kind] = {p.split('=')[0]: float(p.split('=')[1])
+                                       for p in raw.splitlines()[0].split()[1:] if '=' in p}
+        except (OSError, ValueError, IndexError):
+            result['pressure'][kind] = None
+    try:
+        result['load'] = list(os.getloadavg())
+        for interface in list(Path('/sys/class/net').iterdir())[:64]:
+            if interface.name == 'lo' or interface.name.startswith(('veth', 'docker', 'br-')):
+                continue
+            values = {}
+            for name in ('rx_bytes', 'tx_bytes', 'rx_errors', 'tx_errors', 'rx_dropped', 'tx_dropped'):
+                try:
+                    values[name] = int((interface / 'statistics' / name).read_text())
+                except (OSError, ValueError):
+                    values[name] = None
+            try:
+                values['state'] = (interface / 'operstate').read_text().strip()
+            except OSError:
+                values['state'] = None
+            result['interfaces'][interface.name] = values
+    except OSError:
+        result['available'] = False
+    return result
+
+
+def wifi_sample():
+    """No scan, SSID or AP MAC is persisted; only existing association stats."""
+    result = {'available': False, 'interfaces': {}}
+    try:
+        interfaces = [p for p in Path('/sys/class/net').iterdir() if (p / 'wireless').exists()][:4]
+    except OSError:
+        return result
+    for interface in interfaces:
+        link = bounded(['iw', 'dev', interface.name, 'link'])
+        station = bounded(['iw', 'dev', interface.name, 'station', 'dump'])
+        info = {'available': link is not None or station is not None}
+        raw = (link or '') + '\n' + (station or '')
+        for key, pattern in {
+            'signal_dbm': r'(?m)^\s*signal:\s*(-?[\d.]+)',
+            'frequency_mhz': r'(?m)^\s*freq:\s*(\d+)',
+            'tx_rate_mbps': r'(?m)^\s*tx bitrate:\s*([\d.]+)',
+            'rx_rate_mbps': r'(?m)^\s*rx bitrate:\s*([\d.]+)',
+            'tx_retries': r'(?m)^\s*tx retries:\s*(\d+)',
+            'tx_failed': r'(?m)^\s*tx failed:\s*(\d+)',
+            'beacon_loss': r'(?m)^\s*beacon loss:\s*(\d+)',
+        }.items():
+            match = re.search(pattern, raw)
+            info[key] = float(match[1]) if match else None
+        # A process-lifetime random salt allows roam detection within one
+        # attempt without storing a linkable raw AP identity.
+        ap = re.search(r'(?:Connected to|Station)\s+([0-9a-fA-F:]{17})', raw)
+        info['association'] = hashlib.sha256(WIFI_SALT + ap[1].lower().encode()).hexdigest()[:16] if ap else None
+        result['interfaces'][interface.name] = info
+        result['available'] |= info['available']
+    return result
+
+
+def display_sample():
+    result = {'available': False, 'outputs': []}
+    if not os.environ.get('NIRI_SOCKET'):
+        return result
+    try:
+        outputs = json.loads(bounded(['niri', 'msg', '-j', 'outputs']) or 'null')
+        for name, value in list(outputs.items())[:16]:
+            current = value.get('current_mode')
+            modes = value.get('modes', [])
+            mode = modes[current] if type(current) is int and 0 <= current < len(modes) else None
+            result['outputs'].append({'name': name, 'current_mode_present': mode is not None,
+                                      'logical_present': value.get('logical') is not None,
+                                      'mode': {k: mode.get(k) for k in ('width', 'height', 'refresh_rate')} if mode else None,
+                                      'vrr_enabled': value.get('vrr_enabled')})
+        result['available'] = True
+    except (ValueError, TypeError, AttributeError):
+        pass
     return result
 
 
 def differences(current, previous, elapsed):
-    keys = ("bytes_sent", "bytes_received", "bytes_retrans", "retrans_total")
+    keys = ("bytes_sent", "bytes_received", "bytes_acked", "bytes_retrans", "retrans_total",
+            'data_segs_out', 'data_segs_in', 'busy_us', 'rwnd_limited_us', 'sndbuf_limited_us',
+            'reord_seen', 'dsack_dups', 'total_rto')
     if not current.get("available") or not previous or not previous.get("available"):
         return None, "baseline unavailable"
     if any(current.get(k) != previous.get(k) for k in ("local", "peer", "inode", "cookie")):
@@ -8787,54 +9095,83 @@ def collect(args):
     except OSError:
         pass
     stopped = False
-
     def stop(_number, _frame):
         nonlocal stopped
         stopped = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     identity = common(args)
-    identity.update(owner=dict(pid=args.owner, start=args.start),
-                    collector=dict(pid=os.getpid(), start=process(os.getpid())["start"]),
+    identity.update(schema=RECORD_SCHEMA, boot=BOOT, owner=dict(pid=args.owner, start=args.start),
+                    collector=dict(pid=os.getpid(), start=process(os.getpid())['start']),
                     policy=args.policy, launcher=args.version)
     store = Store(args.days, args.cap)
-    owner = exact(args.owner, args.start)
-    if not owner:
+    minutes = Store(args.days, args.cap, stream='minute')
+    state = {}
+    store.context = minutes.context = {'identity': identity, 'state': state}
+    if not exact(args.owner, args.start):
         store.close()
+        minutes.close()
         return 0
-    previous, prior_process, previous_clock = None, {}, None
-    selected, last_codec, last_path, last_helpers = None, None, None, None
-    next_path, next_prune, dropped = 0, 0, 0
+    analysis = Analysis(bucket_seconds=10)
+    previous, prior_process, previous_clock, process_clock = None, {}, None, None
+    selected, last_codec, last_path, last_helpers, last_wifi, last_display = None, None, None, None, None, None
+    next_process = next_path = next_host = next_wifi = next_prune = 0
+    dropped = 0
+    rows = {}
+    minute = int(time.time() // 60)
 
     def emit(event, **data):
         nonlocal dropped
+        record = dict(identity, **now(), event=event, **data)
+        if event in CONTEXT_EVENTS:
+            state[event] = record
+        analysis.feed(record)
         try:
             if dropped:
-                if store.append(dict(identity, **now(), event="collection_gap", lost_records=dropped)):
+                gap = dict(identity, **now(), event='collection_gap', lost_records=dropped)
+                if store.append(gap):
+                    analysis.feed(gap)
                     dropped = 0
                 else:
                     dropped += 1
                     return
-            if not store.append(dict(identity, **now(), event=event, **data)):
+            if not store.append(record):
                 dropped += 1
         except (OSError, ValueError):
             store.rotate()
             dropped += 1
 
+    def flush_minute():
+        nonlocal dropped
+        for aggregate in analysis.drain():
+            record = dict(identity, **now(), event='minute', aggregate=aggregate,
+                          raw_records_dropped=dropped, state=dict(state))
+            try:
+                if not minutes.append(record):
+                    dropped += 1
+            except (OSError, ValueError):
+                minutes.rotate()
+                dropped += 1
+
     abi = None
     try:
-        value = json.loads(bounded(["waypipe-remote-chrome", "--remote-chrome-info"]) or "null")
-        if isinstance(value, dict) and value.get("schema") == 1 and \
-                all(type(value.get(k)) is int and 0 < value[k] < 1000 for k in ("libavcodec_major", "libavutil_major")) and \
-                type(value.get("compatible")) is bool:
-            abi = {k: value.get(k) for k in ("libavcodec_major", "libavutil_major", "compatible")}
+        value = json.loads(bounded(['waypipe-remote-chrome', '--remote-chrome-info']) or 'null')
+        if isinstance(value, dict) and value.get('schema') == 1 and \
+                all(type(value.get(k)) is int and 0 < value[k] < 1000 for k in ('libavcodec_major', 'libavutil_major')) and \
+                type(value.get('compatible')) is bool:
+            abi = {k: value.get(k) for k in ('libavcodec_major', 'libavutil_major', 'compatible')}
     except ValueError:
         pass
-    emit("start", kernel=os.uname().release, waypipe_abi=abi,
-         previous_attempt=args.previous or None, sample_seconds=2, path_seconds=30,
-         retention_days=args.days, cap_bytes=args.cap)
+    clock_sync = bounded(['timedatectl', 'show', '--property=NTPSynchronized', '--value'])
+    emit('start', kernel=os.uname().release, waypipe_abi=abi, previous_attempt=args.previous or None,
+         sample_seconds=1, process_seconds=2, host_seconds=5, path_seconds=10,
+         retention_days=args.days, cap_bytes=args.cap,
+         clock_synchronized=True if clock_sync and clock_sync.strip() == 'yes' else
+             False if clock_sync and clock_sync.strip() == 'no' else None,
+         tools={'ss': (bounded(['ss', '--version']) or '').strip()[:128], 'python': sys.version.split()[0]},
+         estimator='TCP SRTT/RTTVAR; recent ACK progress is a freshness indicator, not packet timing')
     if args.previous:
-        emit("reset", previous_attempt=args.previous)
+        emit('reset', previous_attempt=args.previous)
     deadline = time.monotonic()
     try:
         while not stopped:
@@ -8842,80 +9179,97 @@ def collect(args):
             if not owner:
                 break
             clock = now()
-            if previous_clock:
-                elapsed = clock["mono"] - previous_clock["mono"]
-                if elapsed > 4.5 or abs((clock["wall"] - previous_clock["wall"]) - elapsed) > 1:
-                    emit("clock_or_sampling_gap", seconds=elapsed)
-                    previous, prior_process = None, {}
-            else:
-                elapsed = None
-            root = browser_waypipe(owner) if args.role == "browser" else owner
-            rows = tree(root["pid"]) if root else tree(owner["pid"])
-            # Re-prove the selected lifetime after traversal before attribution.
-            if not exact(args.owner, args.start) or (root and not exact(root["pid"], root["start"])):
-                break
+            current_minute = int(clock['wall'] // 60)
+            if current_minute != minute:
+                flush_minute()
+                minute = current_minute
+            elapsed = clock['mono'] - previous_clock['mono'] if previous_clock else None
+            if previous_clock and (elapsed > 2.5 or abs(clock['wall'] - previous_clock['wall'] - elapsed) > 1):
+                emit('clock_or_sampling_gap', seconds=elapsed)
+                previous, prior_process, process_clock = None, {}, None
+            measurements = []
+            if clock['mono'] >= next_process:
+                root = browser_waypipe(owner) if args.role == 'browser' else owner
+                rows = tree(root['pid']) if root else tree(owner['pid'])
+                if not exact(args.owner, args.start) or (root and not exact(root['pid'], root['start'])):
+                    break
+                process_elapsed = clock['mono'] - process_clock if process_clock else None
+                chrome_children = {r['pid'] for r in rows.values() if Path(r['exe']).name in
+                                   {'chrome', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'fake-chrome'}}
+                for _ in range(64):
+                    children = {r['pid'] for r in rows.values() if r['ppid'] in chrome_children}
+                    if children <= chrome_children:
+                        break
+                    chrome_children |= children
+                current = {}
+                for row in rows.values():
+                    kind = 'waypipe' if is_waypipe(row) else 'ssh' if Path(row['exe']).name == 'ssh' else \
+                        'chrome' if row['pid'] in chrome_children else None
+                    if not kind:
+                        continue
+                    key = (row['pid'], row['start'])
+                    old = prior_process.get(key)
+                    cpu = 100 * (row['ticks'] - old) / HZ / process_elapsed if old is not None and process_elapsed else None
+                    measurements.append(dict(pid=row['pid'], start=row['start'], kind=kind,
+                                             cpu_percent=cpu if cpu is not None and cpu >= 0 else None,
+                                             rss_bytes=row['rss']))
+                    current[key] = row['ticks']
+                prior_process, process_clock = current, clock['mono']
+                next_process = clock['mono'] + 2
+                codec = codec_snapshot(rows)
+                if codec != last_codec:
+                    emit('codec', **codec)
+                    last_codec = codec
+                helpers = helper_observation(args)
+                if helpers != last_helpers:
+                    emit('helpers', **helpers)
+                    last_helpers = helpers
             tcp = tcp_sample(args.role, rows, args.connection, selected)
             delta, discontinuity = differences(tcp, previous, elapsed)
-            if tcp.get("available"):
+            if tcp.get('available'):
                 selected = tcp
-            if discontinuity not in (None, "baseline unavailable"):
-                emit("tcp_discontinuity", reason=discontinuity)
-            measurements = []
-            chrome_roots = {r["pid"] for r in rows.values() if Path(r["exe"]).name in
-                            {"chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "fake-chrome"}}
-            chrome_children = set(chrome_roots)
-            for _ in range(64):
-                children = {r["pid"] for r in rows.values() if r["ppid"] in chrome_children}
-                if children <= chrome_children:
-                    break
-                chrome_children |= children
-            current_process = {}
-            for row in rows.values():
-                kind = "waypipe" if is_waypipe(row) else "ssh" if Path(row["exe"]).name == "ssh" else \
-                    "chrome" if row["pid"] in chrome_children else None
-                if not kind:
-                    continue
-                key = (row["pid"], row["start"])
-                old = prior_process.get(key)
-                cpu = 100 * (row["ticks"] - old) / HZ / elapsed if old is not None and elapsed else None
-                measurements.append(dict(pid=row["pid"], start=row["start"], kind=kind,
-                                         cpu_percent=cpu if cpu is not None and cpu >= 0 else None,
-                                         rss_bytes=row["rss"]))
-                current_process[key] = row["ticks"]
-            emit("sample", tcp=tcp, delta=delta, processes=measurements,
-                 process_limit=len(rows) >= 512)
-            codec = codec_snapshot(rows)
-            if codec != last_codec:
-                emit("codec", **codec)
-                last_codec = codec
-            helpers = helper_observation(args)
-            if helpers != last_helpers:
-                emit("helpers", **helpers)
-                last_helpers = helpers
-            if clock["mono"] >= next_path:
-                path = path_sample(tcp["peer"][0] if tcp.get("available") else None)
+            if discontinuity not in (None, 'baseline unavailable'):
+                emit('tcp_discontinuity', reason=discontinuity)
+            emit('sample', tcp=tcp, delta=delta, quality=sample_quality(tcp, delta),
+                 processes=measurements, process_limit=len(rows) >= 512)
+            if clock['mono'] >= next_host:
+                emit('host', **host_sample())
+                next_host = clock['mono'] + 5
+            if clock['mono'] >= next_path:
+                path = path_sample(tcp['peer'][0] if tcp.get('available') else None)
                 if path != last_path:
-                    emit("network", **path)
+                    emit('network', **path)
                     last_path = path
-                next_path = clock["mono"] + 30
-            if clock["mono"] >= next_prune:
+                next_path = clock['mono'] + 10
+            if clock['mono'] >= next_wifi:
+                wifi = wifi_sample()
+                if wifi != last_wifi:
+                    emit('wifi', **wifi)
+                    last_wifi = wifi
+                display = display_sample()
+                if display != last_display:
+                    emit('display', **display)
+                    last_display = display
+                next_wifi = clock['mono'] + 10
+            if clock['mono'] >= next_prune:
                 try:
                     store.prune()
                 except (OSError, ValueError):
-                    emit("retention_unavailable")
-                next_prune = clock["mono"] + 30
-            previous, prior_process, previous_clock = tcp, current_process, clock
-            deadline += 2
+                    emit('retention_unavailable')
+                next_prune = clock['mono'] + 30
+            previous, previous_clock = tcp, clock
+            deadline += 1
             if deadline < time.monotonic():
                 deadline = time.monotonic()
             while not stopped and time.monotonic() < deadline:
-                time.sleep(max(0, min(0.1, deadline - time.monotonic())))
-        emit("end", reason="collector_signal" if stopped else "owner_exited_or_replaced")
+                time.sleep(max(0, min(.1, deadline - time.monotonic())))
+        emit('end', reason='collector_signal' if stopped else 'owner_exited_or_replaced')
+        flush_minute()
     except Exception:
-        # No error messages from tools, paths or Chrome are persisted.
-        emit("collector_failure")
+        emit('collector_failure')
     finally:
         store.close()
+        minutes.close()
     return 0
 
 
@@ -8923,63 +9277,321 @@ def percentile(values, p):
     return sorted(values)[max(0, math.ceil(len(values) * p) - 1)] if values else None
 
 
+def metric_hist_add(hist, value, count=1):
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        return
+    # Bounded millisecond bins. These are sampled TCP estimates, not packets.
+    key = str(min(60000, int(round(value))))
+    hist[key] = hist.get(key, 0) + count
+
+
+def hist_percentile(hist, fraction=.95):
+    threshold = math.ceil(sum(hist.values()) * fraction)
+    seen = 0
+    for key in sorted(hist, key=float):
+        seen += hist[key]
+        if seen >= threshold:
+            return float(key)
+    return None
+
+
+def sample_quality(tcp, delta):
+    if not tcp.get('available'):
+        return {'activity': 'unavailable', 'rtt_recent_ack_progress': False}
+    if not delta:
+        return {'activity': 'baseline', 'rtt_recent_ack_progress': False}
+    acked = delta.get('bytes_acked')
+    pending = any(type(tcp.get(k)) in (int, float) and tcp[k] > 0
+                  for k in ('send_queue', 'notsent_bytes', 'unacked'))
+    progressed = any(type(delta.get(k)) in (int, float) and delta[k] > 0
+                     for k in ('bytes_acked', 'bytes_received'))
+    activity = 'active' if progressed else 'outstanding' if pending else 'idle'
+    if acked is None and not progressed:
+        activity = 'unknown'
+    age = tcp.get('last_ack_ms')
+    recent = type(acked) in (int, float) and acked > 0 and type(age) in (int, float) \
+        and age <= max(2000, 1500 * delta.get('seconds', 0))
+    return {'activity': activity, 'rtt_recent_ack_progress': recent}
+
+
+class Analysis:
+    """One bounded streaming analysis shared by recording, queries and watch.
+
+    Numeric bins are deliberately approximate (1 ms), and every TCP sample
+    retains its estimator semantics. Flags are observations, never diagnoses.
+    """
+    def __init__(self, bucket_seconds=10):
+        self.groups = {}
+        self.bucket = max(1, bucket_seconds)
+        self.truncated = False
+
+    @staticmethod
+    def stats(row):
+        return dict(attempt=row['attempt'], role=row['role'], host=row['host'],
+                    first=row['utc'], last=row['utc'], first_wall=row['wall'], last_wall=row['wall'],
+                    samples=0, unavailable=0, gaps=0, rtt_hist={}, variation_hist={}, legacy_rtt_hist={},
+                    rtt_eligible=0, legacy_samples=0, activity={}, tx_bytes=0, rx_bytes=0,
+                    traffic_seconds=0, rate_peak=0, retrans=0, retrans_observations=0,
+                    retrans_bytes=0, queue=None, unsent=None, cpu={}, rss={},
+                    codecs=[], networks=[], events=[], incidents=[], timeline={})
+
+    def group(self, row):
+        key = (row['attempt'], row['role'], row['host'])
+        if key not in self.groups:
+            if len(self.groups) >= 128:
+                self.truncated = True
+                return None
+            self.groups[key] = {'stats': self.stats(row), 'baseline': collections.deque(maxlen=300),
+                                'path': None, 'pending': 0, 'context': {}, 'last_host': None,
+                                'last_wifi': None}
+        return self.groups[key]
+
+    @staticmethod
+    def flag(g, row, kind, detail, value=None):
+        incidents = g['stats']['incidents']
+        for prior in reversed(incidents[-12:]):
+            if prior['kind'] == kind and 0 <= row['wall'] - prior['last_wall'] <= 3:
+                prior.update(last=row['utc'], last_wall=row['wall'], count=prior['count'] + 1)
+                if value is not None:
+                    prior['peak'] = max(prior.get('peak', value), value)
+                return
+        if len(incidents) >= 200:
+            incidents.pop(0)
+        incident = dict(kind=kind, detail=detail, first=row['utc'], last=row['utc'],
+                        first_wall=row['wall'], last_wall=row['wall'], count=1)
+        if value is not None:
+            incident['peak'] = value
+        incidents.append(incident)
+
+    def point(self, stats, wall):
+        bucket = str(int(wall // self.bucket) * self.bucket)
+        if bucket not in stats['timeline'] and len(stats['timeline']) >= 720:
+            stats['timeline'].pop(next(iter(stats['timeline'])))
+        return stats['timeline'].setdefault(bucket, dict(samples=0, tx=0, rx=0, seconds=0,
+                                                        rtt_max=None, queue_max=None, retrans=0,
+                                                        cpu={}, cpu_pressure_max=None))
+
+    def feed(self, row):
+        g = self.group(row)
+        if g is None:
+            return
+        s = g['stats']
+        if not row.get('carried'):
+            if row['wall'] < s['first_wall']:
+                s['first'], s['first_wall'] = row['utc'], row['wall']
+            if row['wall'] >= s['last_wall']:
+                s['last'], s['last_wall'] = row['utc'], row['wall']
+        event = row.get('event')
+        if event == 'minute':
+            for context in row.get('state', {}).values():
+                if isinstance(context, dict) and context.get('event') in CONTEXT_EVENTS:
+                    self.feed(dict(context, carried=True, wall=row['wall'], utc=row['utc']))
+            self.merge(g, row.get('aggregate', {}))
+            if row.get('raw_records_dropped', 0):
+                s['gaps'] += 1
+                self.flag(g, row, 'raw_detail_gap', 'Minute summary exists but raw records were skipped')
+            return
+        if event in CONTEXT_EVENTS:
+            existing = g['context'].get(event)
+            if row.get('carried') and existing and \
+                    (existing.get('observed_utc') or existing['utc']) > (row.get('observed_utc') or row['utc']):
+                return
+            g['context'][event] = row
+        if event == 'codec':
+            s['codecs'] = [{k: row[k] for k in ('utc', 'available', 'contexts', 'carried', 'observed_utc') if k in row}]
+        elif event == 'network':
+            peer = row.get('tailscale', {})
+            fingerprint = json.dumps([{k: peer.get(k) for k in ('mode', 'direct_address', 'peer_relay')},
+                                      row.get('underlay_route')], sort_keys=True)
+            if g['path'] is not None and fingerprint != g['path'] and not row.get('carried'):
+                self.flag(g, row, 'path_change', 'Reported connection path or physical route changed')
+                g['baseline'].clear()
+            g['path'] = fingerprint
+            s['networks'].append({k: row[k] for k in ('utc', 'tailscale', 'route', 'underlay_route', 'carried', 'observed_utc') if k in row})
+            s['networks'] = s['networks'][-20:]
+        elif event == 'host':
+            old = g['last_host'] or {}
+            for interface, values in row.get('interfaces', {}).items():
+                prior = old.get('interfaces', {}).get(interface, {})
+                for field in ('rx_errors', 'tx_errors', 'rx_dropped', 'tx_dropped'):
+                    a, b = prior.get(field), values.get(field)
+                    if type(a) is int and type(b) is int and b > a and not row.get('carried'):
+                        self.flag(g, row, 'link_counter_increase', f'{interface}: {field} increased', b - a)
+            pressure = row.get('pressure', {}).get('cpu') or {}
+            if type(pressure.get('avg10')) in (int, float) and not row.get('carried'):
+                self.point(s, row['wall'])['cpu_pressure_max'] = pressure['avg10']
+            if pressure.get('avg10', 0) >= 10 and not row.get('carried'):
+                self.flag(g, row, 'cpu_pressure', 'CPU pressure avg10 >= 10%; correlation only', pressure['avg10'])
+            g['last_host'] = row
+        elif event == 'wifi':
+            old = g['last_wifi'] or {}
+            for interface, values in row.get('interfaces', {}).items():
+                prior = old.get('interfaces', {}).get(interface, {})
+                a, b = prior.get('association'), values.get('association')
+                if a and b and a != b and not row.get('carried'):
+                    self.flag(g, row, 'wifi_roam', f'{interface}: association changed')
+                    g['baseline'].clear()
+                a, b = prior.get('tx_failed'), values.get('tx_failed')
+                if type(a) in (int, float) and type(b) in (int, float) and b > a and not row.get('carried'):
+                    self.flag(g, row, 'wifi_tx_failure', f'{interface}: Wi-Fi TX failures increased', b - a)
+            g['last_wifi'] = row
+        elif event in {'collection_gap', 'clock_or_sampling_gap', 'collector_failure', 'retention_unavailable'}:
+            s['gaps'] += 1
+            g['pending'] = 0
+            self.flag(g, row, 'telemetry_gap', 'Recording coverage is incomplete')
+        elif event in {'mark', 'start', 'end', 'reset', 'tcp_discontinuity', 'probe'}:
+            s['events'].append({k: row[k] for k in ('event', 'utc', 'reason', 'previous_attempt') if k in row})
+            s['events'] = s['events'][-100:]
+            if event == 'tcp_discontinuity':
+                g['baseline'].clear()
+                g['pending'] = 0
+        if event != 'sample':
+            return
+        s['samples'] += 1
+        tcp, delta = row.get('tcp', {}), row.get('delta') or {}
+        if not tcp.get('available'):
+            s['unavailable'] += 1
+        quality = row.get('quality') or sample_quality(tcp, delta)
+        activity = quality['activity']
+        s['activity'][activity] = s['activity'].get(activity, 0) + 1
+        rtt = tcp.get('rtt_ms')
+        eligible = quality['rtt_recent_ack_progress']
+        if eligible:
+            metric_hist_add(s['rtt_hist'], rtt)
+            metric_hist_add(s['variation_hist'], tcp.get('rttvar_ms'))
+            s['rtt_eligible'] += 1
+            if type(rtt) in (int, float):
+                if len(g['baseline']) >= 20:
+                    baseline = percentile(list(g['baseline']), .1)
+                    if rtt > max(baseline * 2.5, baseline + 30):
+                        self.flag(g, row, 'rtt_inflation', 'TCP RTT estimate rose above path baseline', rtt)
+                    variation = tcp.get('rttvar_ms')
+                    if type(variation) in (int, float) and variation > max(15, baseline * .5):
+                        self.flag(g, row, 'rtt_variation', 'TCP RTT deviation elevated during ACK progress', variation)
+                g['baseline'].append(rtt)
+        elif row.get('schema', 1) == 1:
+            metric_hist_add(s['legacy_rtt_hist'], rtt)
+            s['legacy_samples'] += 1
+        seconds = delta.get('seconds') or 0
+        if type(seconds) not in (int, float) or not 0 < seconds <= 5:
+            seconds = 0
+        tx, rx = delta.get('bytes_sent'), delta.get('bytes_received')
+        if seconds and type(tx) is int and type(rx) is int:
+            s['tx_bytes'] += tx
+            s['rx_bytes'] += rx
+            s['traffic_seconds'] += seconds
+            s['rate_peak'] = max(s['rate_peak'], (tx + rx) / seconds)
+        retrans = delta.get('retrans_total')
+        if type(retrans) is int:
+            s['retrans_observations'] += 1
+            s['retrans'] += retrans
+            if retrans:
+                self.flag(g, row, 'retransmission', 'TCP retransmission counter increased', retrans)
+        if type(delta.get('bytes_retrans')) is int:
+            s['retrans_bytes'] += delta['bytes_retrans']
+        for field, output in [('send_queue', 'queue'), ('notsent_bytes', 'unsent')]:
+            if type(tcp.get(field)) is int:
+                s[output] = max(s[output] or 0, tcp[field])
+        pending = (tcp.get('send_queue') or 0) > 0 or (tcp.get('notsent_bytes') or 0) > 0
+        if pending and delta.get('bytes_acked') == 0 and seconds:
+            g['pending'] += seconds
+            if g['pending'] >= 2:
+                self.flag(g, row, 'ack_stall', 'Outstanding data without acknowledged-byte progress for >= 2 seconds', g['pending'])
+        else:
+            g['pending'] = 0
+        totals = {}
+        for proc in row.get('processes', []):
+            item = totals.setdefault(proc['kind'], [0, 0, False])
+            item[1] += proc.get('rss_bytes', 0)
+            if proc.get('cpu_percent') is not None:
+                item[0] += proc['cpu_percent']
+                item[2] = True
+        for kind, (cpu, rss, available) in totals.items():
+            if available:
+                s['cpu'][kind] = max(s['cpu'].get(kind, 0), cpu)
+            s['rss'][kind] = max(s['rss'].get(kind, 0), rss)
+        point = self.point(s, row['wall'])
+        point['samples'] += 1
+        if seconds and type(tx) is int and type(rx) is int:
+            point['tx'] += tx
+            point['rx'] += rx
+            point['seconds'] += seconds
+        if eligible and type(rtt) in (int, float):
+            point['rtt_max'] = max(point['rtt_max'] or 0, rtt)
+        if type(tcp.get('send_queue')) is int:
+            point['queue_max'] = max(point['queue_max'] or 0, tcp['send_queue'])
+        if type(retrans) is int:
+            point['retrans'] += retrans
+        for kind, (cpu, _rss, available) in totals.items():
+            if available:
+                point['cpu'][kind] = max(point['cpu'].get(kind, 0), cpu)
+
+    def merge(self, group, value):
+        s = group['stats']
+        for key in ('samples', 'unavailable', 'gaps', 'rtt_eligible', 'legacy_samples', 'tx_bytes',
+                    'rx_bytes', 'traffic_seconds', 'retrans', 'retrans_observations', 'retrans_bytes'):
+            s[key] += value.get(key, 0)
+        for key in ('rtt_hist', 'variation_hist', 'legacy_rtt_hist', 'activity'):
+            for name, count in value.get(key, {}).items():
+                s[key][name] = s[key].get(name, 0) + count
+        for key in ('rate_peak', 'queue', 'unsent'):
+            if value.get(key) is not None:
+                s[key] = max(s[key] or 0, value[key])
+        for key in ('cpu', 'rss'):
+            for kind, amount in value.get(key, {}).items():
+                s[key][kind] = max(s[key].get(kind, 0), amount)
+        if value.get('first_wall', s['first_wall']) < s['first_wall']:
+            s['first'], s['first_wall'] = value['first'], value['first_wall']
+        if value.get('last_wall', s['last_wall']) > s['last_wall']:
+            s['last'], s['last_wall'] = value['last'], value['last_wall']
+        for key in ('codecs', 'networks', 'events', 'incidents'):
+            s[key] = (s[key] + value.get(key, []))[-(200 if key == 'incidents' else 100):]
+        for when, point in value.get('timeline', {}).items():
+            key = str(int(float(when) // self.bucket) * self.bucket)
+            prior = self.point(s, float(key))
+            for field in ('samples', 'tx', 'rx', 'seconds', 'retrans'):
+                prior[field] += point.get(field, 0)
+            for field in ('rtt_max', 'queue_max', 'cpu_pressure_max'):
+                if point.get(field) is not None:
+                    prior[field] = max(prior[field] or 0, point[field])
+            for kind, amount in point.get('cpu', {}).items():
+                prior['cpu'][kind] = max(prior['cpu'].get(kind, 0), amount)
+            if len(s['timeline']) > 720:
+                s['timeline'].pop(next(iter(s['timeline'])))
+
+    def summaries(self):
+        result = []
+        for group in self.groups.values():
+            s = group['stats']
+            output = {k: v for k, v in s.items() if k not in ('rtt_hist', 'variation_hist', 'legacy_rtt_hist')}
+            output.update(rtt_p95_ms=hist_percentile(s['rtt_hist']),
+                          rttvar_p95_ms=hist_percentile(s['variation_hist']),
+                          legacy_rtt_p95_ms=hist_percentile(s['legacy_rtt_hist']),
+                          traffic_peak_bytes_sec=s['rate_peak'] if s['traffic_seconds'] else None,
+                          retrans=s['retrans'] if s['retrans_observations'] else None,
+                          context={k: v for k, v in group['context'].items() if k in CONTEXT_EVENTS},
+                          flags_truncated=len(s['incidents']) >= 200)
+            result.append(output)
+        return result
+
+    def drain(self):
+        result = []
+        for group in self.groups.values():
+            stats = group['stats']
+            if stats['samples'] or stats['events'] or stats['gaps']:
+                result.append(stats)
+            context = next(reversed(group['context'].values()), None)
+            if context is None:
+                context = dict(attempt=stats['attempt'], role=stats['role'], host=stats['host'], **now())
+            group['stats'] = self.stats(dict(context, **now()))
+        return result
+
+
 def summarize(records):
-    groups = {}
-    for row in sorted(records, key=lambda r: r["wall"]):
-        key = (row["attempt"], row["role"], row["host"])
-        g = groups.setdefault(key, dict(attempt=key[0], role=key[1], host=key[2],
-                                       first=row["utc"], last=row["utc"], samples=0,
-                                       unavailable=0, gaps=0, rtts=[], variations=[], rate=[], retrans=0,
-                                       retrans_observations=0, queue=None, cpu={}, rss={}, codecs=[], networks=[], events=[]))
-        g["last"] = row["utc"]
-        event = row.get("event")
-        if event == "sample":
-            g["samples"] += 1
-            tcp, delta = row.get("tcp", {}), row.get("delta")
-            if not tcp.get("available"):
-                g["unavailable"] += 1
-            for field, output in (("rtt_ms", "rtts"), ("rttvar_ms", "variations")):
-                if type(tcp.get(field)) in (float, int):
-                    g[output].append(tcp[field])
-            if type(tcp.get("send_queue")) is int:
-                g["queue"] = max(g["queue"] or 0, tcp["send_queue"])
-            if delta and delta.get("seconds", 0) > 0:
-                counts = [delta.get(k) for k in ("bytes_sent", "bytes_received")]
-                if all(type(v) is int for v in counts):
-                    g["rate"].append(sum(counts) / delta["seconds"])
-                if type(delta.get("retrans_total")) is int:
-                    g["retrans"] += delta["retrans_total"]
-                    g["retrans_observations"] += 1
-            totals = {}
-            for proc in row.get("processes", []):
-                t = totals.setdefault(proc["kind"], [0, 0, False])
-                t[1] += proc.get("rss_bytes", 0)
-                if proc.get("cpu_percent") is not None:
-                    t[0] += proc["cpu_percent"]
-                    t[2] = True
-            for kind, (cpu, rss, available) in totals.items():
-                if available:
-                    g["cpu"][kind] = max(g["cpu"].get(kind, 0), cpu)
-                g["rss"][kind] = max(g["rss"].get(kind, 0), rss)
-        elif event == "codec":
-            g["codecs"].append({k: row[k] for k in ("utc", "available", "contexts") if k in row})
-        elif event == "network":
-            g["networks"].append({k: row[k] for k in ("utc", "tailscale", "route") if k in row})
-        elif event in {"collection_gap", "clock_or_sampling_gap", "collector_failure", "retention_unavailable"}:
-            g["gaps"] += 1
-        elif event in {"mark", "start", "end", "reset", "tcp_discontinuity"} or \
-                (event == "helpers" and (row.get("startup_error") or row.get("helper_alive") is False)):
-            g["events"].append({k: row[k] for k in ("event", "utc", "reason", "previous_attempt") if k in row})
-    result = []
-    for g in groups.values():
-        g["rtt_p95_ms"] = percentile(g.pop("rtts"), 0.95)
-        g["rttvar_p95_ms"] = percentile(g.pop("variations"), 0.95)
-        rates = g.pop("rate")
-        g["traffic_peak_bytes_sec"] = max(rates) if rates else None
-        if not g.pop("retrans_observations"):
-            g["retrans"] = None
-        result.append(g)
-    return result
+    analysis = Analysis()
+    for row in records:
+        analysis.feed(row)
+    return analysis.summaries()
 
 
 def duration(value):
@@ -8992,87 +9604,234 @@ def duration(value):
     return seconds
 
 
-def report(label, data):
-    print(label + ": " + data.get("status", "available"))
-    if not data.get("summaries"):
-        print("  No recorded samples in this window; collection starts on a deliberate launch/reset.")
-    for g in data.get("summaries", []):
-        print(f"  {g['attempt']} {g['host']} {g['role']}: {g['samples']} samples, "
-              f"{g['unavailable']} TCP unavailable, {g['gaps']} gaps")
+def report(label, data, timeline=False):
+    print(label + ': ' + data.get('status', 'available'))
+    if data.get('resolution'):
+        print('  resolution: ' + data['resolution'] + '; RTT bins: 1 ms; flags are observations, not diagnoses')
+    storage = data.get('storage') or {}
+    if storage:
+        oldest = storage.get('oldest_utc') or 'none'
+        print(f"  retained for this target: {storage.get('bytes', 0) / 1048576:.2f} MiB; oldest chunk {oldest}; cap shared across all targets")
+    if not data.get('summaries'):
+        print('  No recorded samples in this window; collection starts on a deliberate launch/reset.')
+    for g in data.get('summaries', []):
+        print(f"  {g['attempt']} {g['host']} {g['role']}: {g['samples']} samples, {g['unavailable']} TCP unavailable, {g['gaps']} gaps")
         print(f"    {g['first']} to {g['last']}")
-        def fmt(value, suffix, scale=1):
-            return "unavailable" if value is None else f"{value / scale:.1f}{suffix}"
-        print("    RTT p95 " + fmt(g["rtt_p95_ms"], " ms") + "; variation p95 " +
-              fmt(g["rttvar_p95_ms"], " ms") + "; peak traffic " +
-              fmt(g["traffic_peak_bytes_sec"], " KiB/s", 1024) +
-              "; interval retransmissions " + str(g["retrans"] if g["retrans"] is not None else "unavailable") +
-              "; max send queue " + fmt(g['queue'], " bytes"))
-        if g["cpu"]:
-            print("    peak process CPU " + ", ".join(f"{k}={v:.1f}%" for k, v in sorted(g["cpu"].items())))
-        if g["events"]:
-            print("    events: " + ", ".join(e["event"] + "@" + e["utc"] for e in g["events"][-12:]))
-        if g["codecs"]:
-            counts = {}
-            for context in g["codecs"][-1].get("contexts", []):
-                for key in ("encoder_hw", "encoder_sw", "decoder_hw", "decoder_sw"):
-                    counts[key] = counts.get(key, 0) + context.get(key, 0)
-            print("    last codec observation: " + (json.dumps(counts, sort_keys=True) if counts else "unavailable"))
-        if g["networks"]:
-            print("    passive path observations: " + ", ".join(n["tailscale"].get("mode", "unavailable")
-                  + "@" + n["utc"] for n in g["networks"][-6:]))
+        def fmt(value, suffix='', scale=1):
+            return 'unavailable' if value is None else f'{value / scale:.1f}{suffix}'
+        print('    ACK-progress TCP RTT p95 ' + fmt(g.get('rtt_p95_ms'), ' ms') +
+              '; TCP deviation p95 ' + fmt(g.get('rttvar_p95_ms'), ' ms') +
+              f"; eligible samples {g.get('rtt_eligible', 0)}")
+        if g.get('legacy_rtt_p95_ms') is not None:
+            print('    legacy sampled RTT p95 ' + fmt(g['legacy_rtt_p95_ms'], ' ms') + ' (freshness unavailable)')
+        print('    peak traffic ' + fmt(g.get('traffic_peak_bytes_sec'), ' KiB/s', 1024) +
+              '; interval retransmissions ' + str(g.get('retrans') if g.get('retrans') is not None else 'unavailable') +
+              '; max send queue ' + fmt(g.get('queue'), ' bytes') +
+              '; max unsent ' + fmt(g.get('unsent'), ' bytes'))
+        print('    activity samples: ' + ', '.join(f'{k}={v}' for k, v in sorted(g.get('activity', {}).items())))
+        if g.get('cpu'):
+            print('    peak process CPU ' + ', '.join(f'{k}={v:.1f}%' for k, v in sorted(g['cpu'].items())))
+        for event in g.get('events', [])[-8:]:
+            print('    event: ' + event['event'] + '@' + event['utc'])
+        if g.get('codecs'):
+            print('    codec context: ' + json.dumps(g['codecs'][-1], separators=(',', ':')))
+        if g.get('networks'):
+            last = g['networks'][-1]
+            print('    path context: ' + last.get('tailscale', {}).get('mode', 'unavailable') +
+                  '@' + str(last.get('observed_utc') or last.get('utc')))
+        incidents = g.get('incidents', [])
+        if not incidents:
+            print('    incident flags: none in the available observations')
+        for incident in incidents[-20:]:
+            print(f"    flag: {incident['first']}..{incident['last']} {incident['kind']}: {incident['detail']} ({incident['count']} observations)")
+        if g.get('flags_truncated'):
+            print('    incident list capped; shorten the time window for full detail')
+        if timeline:
+            print('    timeline: UTC | max eligible TCP RTT ms | TX/RX KiB/s | max send queue bytes | retransmissions | CPU % | CPU pressure avg10')
+            for wall, point in sorted(g.get('timeline', {}).items(), key=lambda item: float(item[0])):
+                utc = dt.datetime.fromtimestamp(float(wall), dt.timezone.utc).isoformat(timespec='seconds')
+                seconds = point.get('seconds') or 0
+                tx = point.get('tx', 0) / seconds / 1024 if seconds else None
+                rx = point.get('rx', 0) / seconds / 1024 if seconds else None
+                cpu = ','.join(f'{k}={v:.1f}' for k, v in sorted(point.get('cpu', {}).items())) or 'unavailable'
+                print(f"      {utc} | {fmt(point.get('rtt_max'))} | {fmt(tx)}/{fmt(rx)} | {fmt(point.get('queue_max'))} | {point.get('retrans', 0)} | {cpu} | {fmt(point.get('cpu_pressure_max'))}")
+    if data.get('partial'):
+        print('  PARTIAL: ' + data['partial'])
 
 
 def query(args):
     store = Store(args.days, args.cap)
     try:
         store.prune()
-        records = list(store.records(args.since_wall, args.until_wall, args.target,
-                                     args.origin or None, args.session or None))
-        return dict(schema=SCHEMA, status="available", summaries=summarize(records),
-                    records=records if args.include_records else [])
+        inventory = store.inventory(args.target, args.origin or None, args.session or None)
+        preferred = getattr(args, 'resolution', 'auto')
+        long_range = args.until_wall - args.since_wall > 7200
+        use_minutes = preferred == 'minute' or (preferred == 'auto' and long_range)
+        minute_until = {}
+        analysis = Analysis(bucket_seconds=max(10, math.ceil((args.until_wall - args.since_wall) / 1200) * 10))
+        records, partial = [], None
+        # Raw exports remain explicitly bounded; normal analysis is streaming
+        # over the capped store, with minute summaries for long ranges.
+        budget = READ_LIMIT if args.include_records else args.cap + CHUNK
+        try:
+            if use_minutes and not args.include_records:
+                for row in store.records(args.since_wall, args.until_wall, args.target,
+                                         args.origin or None, args.session or None, budget=budget, stream='minute'):
+                    analysis.feed(row)
+                    if row['event'] == 'minute':
+                        last = row.get('aggregate', {}).get('last_wall')
+                        if type(last) in (int, float):
+                            minute_until[row['attempt']] = max(minute_until.get(row['attempt'], -1), last)
+            for row in store.records(args.since_wall, args.until_wall, args.target,
+                                     args.origin or None, args.session or None, budget=budget,
+                                     stream='raw', raw_after=minute_until if not args.include_records else None):
+                if args.include_records:
+                    records.append(row)
+                analysis.feed(row)
+        except ValueError as error:
+            if args.include_records:
+                raise
+            partial = str(error)
+        if analysis.truncated:
+            partial = 'attempt limit reached; narrow the session or window'
+        stamps = [x['first_wall'] for x in inventory if type(x['first_wall']) in (int, float)]
+        storage = dict(bytes=sum(x['bytes'] for x in inventory), cap_bytes=args.cap, retention_days=args.days,
+                       chunks=len(inventory), raw_chunks=sum(x['stream'] == 'raw' for x in inventory),
+                       minute_chunks=sum(x['stream'] == 'minute' for x in inventory),
+                       oldest_utc=dt.datetime.fromtimestamp(min(stamps), dt.timezone.utc).isoformat(timespec='seconds') if stamps else None)
+        return dict(schema=SCHEMA, status='partial' if partial else 'available', partial=partial,
+                    summaries=analysis.summaries(), records=records, storage=storage,
+                    resolution='raw' if args.include_records or not minute_until else 'minute with raw tail and fallback for older attempts; boundary minutes may overlap requested window',
+                    generated_wall=time.time(), requested_since=args.since_wall, requested_until=args.until_wall)
     finally:
         store.close()
 
 
-def query_cli(args):
+def incident_window(args):
     until = time.time()
-    args.since_wall, args.until_wall = until - duration(args.since), until
+    if args.at:
+        try:
+            moment = dt.datetime.fromisoformat(args.at.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise ValueError('--at needs an ISO timestamp with timezone, e.g. 2026-10-31T14:00:00-07:00') from error
+        if moment.tzinfo is None:
+            raise ValueError('--at timestamp must include a timezone')
+        half = duration(args.window) / 2
+        center = moment.timestamp()
+        if center > until:
+            raise ValueError('--at cannot be in the future')
+        return center - half, min(until, center + half)
+    return until - duration(args.since), until
+
+
+def query_cli(args):
+    args.since_wall, args.until_wall = incident_window(args)
     args.include_records = bool(args.export)
     args.origin = socket.gethostname()
+    if args.watch:
+        return watch_cli(args)
+    if args.probe:
+        probe_cli(args)
+        args.until_wall = time.time()
     local = query(args)
-    report("Local", local)
-    remote = dict(status="unavailable (SSH or diagnostics helper unavailable)")
-    command = ["remote-chrome", "_diagnostics-query", args.target, "--origin", args.origin,
-               "--since-wall", str(args.since_wall), "--until-wall", str(until),
-               "--days", str(args.days), "--cap", str(args.cap)]
+    report('Local', local, args.timeline)
+    remote = dict(status='unavailable (SSH or diagnostics helper unavailable)')
+    command = ['remote-chrome', '_diagnostics-query', args.target, '--origin', args.origin,
+               '--since-wall', str(args.since_wall), '--until-wall', str(args.until_wall),
+               '--days', str(args.days), '--cap', str(args.cap)]
     if args.session:
-        command += ["--session", args.session]
+        command += ['--session', args.session]
     if args.include_records:
-        command += ["--include-records"]
-    raw = bounded(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                   "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=1",
-                   args.target, shlex.join(command)], timeout=10, limit=READ_LIMIT)
+        command += ['--include-records']
+    # The new options are deliberately omitted for raw/auto to query v1 peers.
+    if args.resolution != 'auto':
+        command += ['--resolution', args.resolution]
+    before = time.time()
+    raw = bounded(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                   '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=1',
+                   args.target, shlex.join(command)], timeout=20, limit=READ_LIMIT)
+    after = time.time()
     try:
-        data = json.loads(raw or "null")
-        if isinstance(data, dict) and data.get("schema") == SCHEMA:
+        data = json.loads(raw or 'null')
+        if isinstance(data, dict) and data.get('schema') == SCHEMA:
             remote = data
     except ValueError:
         pass
-    report("Browser endpoint", remote)
+    report('Browser endpoint', remote, args.timeline)
+    remote_clock = remote.get('generated_wall')
+    if type(remote_clock) in (int, float):
+        offset = remote_clock - (before + after) / 2
+        print(f'Cross-host clock offset estimate {offset * 1000:+.0f} ms, conservative uncertainty +/-{(after - before) * 500:.0f} ms (includes query time).')
+    else:
+        print('Cross-host clock alignment unavailable from this peer version.')
     if args.export:
         output = Path(args.export)
-        store_path = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "remote-chrome/diagnostics"
+        store_path = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'remote-chrome/diagnostics'
         if output.resolve().is_relative_to(store_path.resolve()):
-            raise ValueError("export must be outside the managed diagnostic store")
+            raise ValueError('export must be outside the managed diagnostic store')
         descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
-            stream.write(json.dumps(dict(schema=SCHEMA, event="export", since=args.since_wall,
-                                         until=until, remote_status=remote.get("status"))) + "\n")
-            for record in local.get("records", []) + remote.get("records", []):
-                stream.write(json.dumps(record, separators=(",", ":")) + "\n")
-        print("Exported selected time window: " + str(output))
-    print("TCP connection counters include forwarded channels; these are not frame latency measurements.")
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(json.dumps(dict(schema=SCHEMA, event='export', since=args.since_wall,
+                                         until=args.until_wall, remote_status=remote.get('status'))) + '\n')
+            for record in local.get('records', []) + remote.get('records', []):
+                stream.write(json.dumps(record, separators=(',', ':')) + '\n')
+        print('Exported selected time window: ' + str(output))
+    print('TCP connection counters include forwarded channels; these are not frame latency or capacity measurements.')
     return 0
+
+
+def watch_cli(args):
+    if args.export or args.probe or args.at:
+        raise ValueError('--watch cannot be combined with --export, --probe or --at')
+    seconds = duration(args.watch)
+    if seconds > 3600:
+        raise ValueError('--watch is bounded to at most 1h')
+    print('Watching local diagnostic files only; no repeated SSH or active probes. Ctrl-C stops.')
+    deadline = time.monotonic() + seconds
+    try:
+        while True:
+            args.until_wall = time.time()
+            args.since_wall = max(args.until_wall - 60, args.since_wall)
+            report('Local watch', query(args), args.timeline)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(5, left))
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def probe_cli(args):
+    seconds = duration(args.probe)
+    if seconds > 120:
+        raise ValueError('--probe is bounded to at most 120s')
+    store = Store(args.days, args.cap)
+    try:
+        rows = store.records(time.time() - 300, time.time(), args.target, args.origin, args.session or None)
+        sample = None
+        for row in rows:
+            if row.get('event') == 'sample' and row.get('tcp', {}).get('available') and \
+                    (sample is None or row['wall'] > sample['wall']):
+                sample = row
+        if sample is None:
+            raise ValueError('no recent owned TCP peer available for a probe')
+        peer = str(ipaddress.ip_address(sample['tcp']['peer'][0]))
+        print(f'Active ICMP probe: {seconds} packets over at most {seconds + 2}s; separate from application TCP timing.')
+        raw = bounded(['ping', '-n', '-q', '-c', str(seconds), '-i', '1', '-W', '1', peer],
+                      timeout=seconds + 2, limit=4096, ok_codes=(0, 1))
+        counts = re.search(r'(\d+) packets transmitted, (\d+) (?:packets )?received', raw or '')
+        timings = re.search(r'=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', raw or '')
+        result = dict(available=counts is not None, method='ICMP active probe', peer=peer,
+                      sent=int(counts[1]) if counts else None, received=int(counts[2]) if counts else None,
+                      rtt_ms=dict(zip(('min', 'average', 'max', 'mdev'), map(float, timings.groups()))) if timings else None)
+        record = {k: sample[k] for k in ('schema', 'attempt', 'role', 'origin', 'target', 'session', 'host')}
+        record.update(now(), event='probe', **result)
+        if not store.append(record):
+            raise ValueError('probe completed but diagnostic quota or lock unavailable')
+        print('Probe result: ' + json.dumps(result, separators=(',', ':')))
+    finally:
+        store.close()
 
 
 def mark(args):
@@ -9144,6 +9903,12 @@ def main(argv=None):
     parser.add_argument("--until-wall", type=float, default=0)
     parser.add_argument("--include-records", action="store_true")
     parser.add_argument("--export")
+    parser.add_argument('--at')
+    parser.add_argument('--window', default='5m')
+    parser.add_argument('--resolution', choices=('auto', 'raw', 'minute'), default='auto')
+    parser.add_argument('--timeline', action='store_true')
+    parser.add_argument('--watch', nargs='?', const='60s')
+    parser.add_argument('--probe', nargs='?', const='30s')
     parser.add_argument("--attempt", default="")
     parser.add_argument("--previous", default="")
     parser.add_argument("--role", choices=("viewer", "browser"), default="viewer")

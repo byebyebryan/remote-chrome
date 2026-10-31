@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import struct
 import tempfile
 import time
 import types
@@ -257,6 +258,7 @@ class DiagnosticsTests(unittest.TestCase):
         with patch.object(d, "bounded", side_effect=answer):
             row = d.path_sample("100.1.1.1")
         self.assertEqual(row["tailscale"]["mode"], "unknown")
+        self.assertIsNone(row['underlay_route'])
         self.assertNotIn("privatekey", json.dumps(row))
 
     def test_bounded_tools_timeout_and_output_limit(self):
@@ -401,6 +403,284 @@ class DiagnosticsTests(unittest.TestCase):
             config.write_text(text)
             self.assertNotEqual(subprocess.run(command, env=env, capture_output=True).returncode, 0)
         self.assertFalse((LAUNCHER.parent.parent / "should-not-exist").exists())
+
+    def measured(self, wall, **changes):
+        tcp = dict(available=True, bytes_sent=100, bytes_received=100, bytes_acked=100,
+                   send_queue=0, notsent_bytes=0, unacked=0, last_ack_ms=10,
+                   rtt_ms=10, rttvar_ms=1, retrans_total=0)
+        tcp.update(changes.pop('tcp', {}))
+        delta = dict(seconds=1, bytes_sent=100, bytes_received=100, bytes_acked=100,
+                     retrans_total=0, bytes_retrans=0)
+        delta.update(changes.pop('delta', {}))
+        row = record(attempt='11111111-1111-4111-8111-111111111111', tcp=tcp, delta=delta, processes=[])
+        row.update(schema=2, wall=wall, mono=wall,
+                   utc=d.dt.datetime.fromtimestamp(wall, d.dt.timezone.utc).isoformat())
+        row.update(changes)
+        return row
+
+    def query_args(self, **changes):
+        values = dict(days=30, cap=1073741824, target='snap', origin=socket.gethostname(),
+                      session='', since_wall=time.time() - 60, until_wall=time.time() + 1,
+                      include_records=False, resolution='auto')
+        values.update(changes)
+        return types.SimpleNamespace(**values)
+
+    def test_tcp_info_known_zero_and_short_abi_are_distinct(self):
+        full = d.tcp_info(bytes(280))
+        self.assertEqual(full['retrans_total'], 0)
+        self.assertEqual(full['bytes_retrans'], 0)
+        self.assertEqual(full['notsent_bytes'], 0)
+        short = d.tcp_info(bytes(104))
+        self.assertEqual(short['retrans_total'], 0)
+        self.assertIsNone(short['bytes_retrans'])
+        self.assertIsNone(short['notsent_bytes'])
+
+    def test_kernel_socket_matches_own_loopback_tcp_info(self):
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            with socket.create_connection(listener.getsockname()) as client:
+                accepted, _ = listener.accept()
+                with accepted:
+                    client.sendall(b'diagnostics-fixture')
+                    accepted.recv(1024)
+                    actual = d.kernel_socket(client.getsockname(), client.getpeername())
+                    if actual is None:
+                        self.skipTest('SOCK_DIAG not available in this environment')
+                    expected = d.tcp_info(client.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 512))
+                    for key in ('bytes_sent', 'bytes_acked', 'retrans_total', 'bytes_retrans', 'notsent_bytes'):
+                        self.assertEqual(actual[key], expected[key])
+
+    def test_ss_suppressed_retrans_zero_does_not_lose_first_retransmission(self):
+        zero = d.parse_ss('ESTAB 0 0 100.1.1.1:1 100.2.2.2:2 ino:1 sk:a rtt:10/1 cwnd:10')[0]
+        one = d.parse_ss('ESTAB 0 0 100.1.1.1:1 100.2.2.2:2 ino:1 sk:a rtt:10/1 cwnd:10 retrans:0/1')[0]
+        self.assertEqual(zero['retrans_total'], 0)
+        delta, _ = d.differences(dict(zero, available=True), dict(zero, available=True), 1)
+        self.assertEqual(delta['retrans_total'], 0)
+        delta, _ = d.differences(dict(one, available=True), dict(zero, available=True), 1)
+        self.assertEqual(delta['retrans_total'], 1)
+
+    def test_root_accepted_socket_requires_explicit_browser_exception(self):
+        local, peer = ['127.0.0.1', 22], ['127.0.0.2', 42000]
+        body = bytearray(72)
+        body[0] = socket.AF_INET
+        struct.pack_into('!HH', body, 4, local[1], peer[1])
+        body[8:12] = socket.inet_aton(local[0])
+        body[24:28] = socket.inet_aton(peer[0])
+        struct.pack_into('=IIII', body, 56, 0, 0, 0, 123)
+        body += struct.pack('=HH', 108, 2) + bytes(104)
+        message = struct.pack('=IHHII', 16 + len(body), 20, 0, os.getpid(), 0) + body
+        channel = unittest.mock.MagicMock()
+        channel.__enter__.return_value = channel
+        channel.recvmsg.return_value = (message, [], 0, (0, 0))
+        with patch.object(d, 'UID', 1000), patch.object(d.socket, 'socket', return_value=channel):
+            self.assertIsNone(d.kernel_socket(local, peer))
+            self.assertEqual(d.kernel_socket(local, peer, allow_server=True)['socket_uid'], 0)
+            self.assertIsNone(d.kernel_socket(local, ['127.0.0.3', 42000], allow_server=True))
+
+    def test_idle_rtt_estimate_is_excluded_from_eligible_distribution(self):
+        active = self.measured(100)
+        idle = self.measured(101, tcp={'rtt_ms': 500, 'last_ack_ms': 60000},
+                             delta={'bytes_sent': 0, 'bytes_received': 0, 'bytes_acked': 0})
+        g = d.summarize([active] + [dict(idle, wall=102 + i) for i in range(100)])[0]
+        self.assertEqual(g['rtt_p95_ms'], 10)
+        self.assertEqual(g['rtt_eligible'], 1)
+        self.assertEqual(g['activity']['idle'], 100)
+        self.assertIsNone(d.summarize([idle])[0]['rtt_p95_ms'])
+
+    def test_legacy_rtt_has_explicit_freshness_limit(self):
+        row = self.measured(100, schema=1)
+        del row['delta']['bytes_acked']
+        del row['tcp']['last_ack_ms']
+        g = d.summarize([row])[0]
+        self.assertIsNone(g['rtt_p95_ms'])
+        self.assertEqual(g['legacy_rtt_p95_ms'], 10)
+
+    def test_rtt_spike_requires_baseline_and_ack_progress(self):
+        rows = [self.measured(i) for i in range(25)]
+        rows.append(self.measured(25, tcp={'rtt_ms': 120, 'rttvar_ms': 40}))
+        flags = d.summarize(rows)[0]['incidents']
+        self.assertIn('rtt_inflation', {f['kind'] for f in flags})
+        self.assertIn('rtt_variation', {f['kind'] for f in flags})
+        self.assertNotIn('rtt_inflation', {f['kind'] for f in d.summarize(rows[-1:])[0]['incidents']})
+
+    def test_ack_stall_requires_outstanding_data_and_known_progress_counter(self):
+        rows = [self.measured(i, tcp={'send_queue': 1000, 'notsent_bytes': 500},
+                              delta={'bytes_acked': 0, 'bytes_sent': 0, 'bytes_received': 0}) for i in range(4)]
+        flags = d.summarize(rows)[0]['incidents']
+        self.assertIn('ack_stall', {f['kind'] for f in flags})
+        for row in rows:
+            row['delta']['bytes_acked'] = None
+        self.assertNotIn('ack_stall', {f['kind'] for f in d.summarize(rows)[0]['incidents']})
+
+    def test_path_change_resets_rtt_baseline(self):
+        analysis = d.Analysis()
+        for i in range(25):
+            analysis.feed(self.measured(i))
+        base = self.measured(25)
+        for i, mode in enumerate(('direct', 'peer-relay')):
+            analysis.feed(dict(base, wall=25 + i, event='network', tailscale={'mode': mode}))
+        analysis.feed(self.measured(27, tcp={'rtt_ms': 120}))
+        flags = {f['kind'] for f in analysis.summaries()[0]['incidents']}
+        self.assertIn('path_change', flags)
+        self.assertNotIn('rtt_inflation', flags)
+
+    def test_compact_rotation_preserves_identity_and_prior_context(self):
+        store = self.store()
+        row = self.measured(time.time() - 10)
+        identity = {k: row[k] for k in ('schema', 'attempt', 'role', 'origin', 'target', 'session', 'host', 'boot')}
+        codec = dict(identity, **d.now(), event='codec', available=True, contexts=[])
+        store.context = dict(identity=identity, state={'codec': codec})
+        store.append(row)
+        store.rotate()
+        store.append(dict(row, wall=row['wall'] + 2))
+        store.rotate()
+        loaded = list(store.records(row['wall'] + 1, row['wall'] + 3))
+        sample = next(r for r in loaded if r['event'] == 'sample')
+        self.assertEqual(sample['attempt'], row['attempt'])
+        self.assertEqual(sample['tcp'], row['tcp'])
+        self.assertTrue(any(r.get('carried') and r['event'] == 'codec' for r in loaded))
+        for path in store.path.glob('*.jsonl'):
+            raw = [json.loads(s) for s in path.read_text().splitlines()]
+            self.assertEqual(raw[0]['event'], 'context')
+            self.assertNotIn('attempt', raw[-1])
+
+    def test_minute_history_does_not_double_count_raw_samples(self):
+        wall = time.time() - 120
+        row = self.measured(wall)
+        raw = self.store()
+        raw.append(row)
+        minute = d.Store(base=self.base, stream='minute')
+        self.addCleanup(minute.close)
+        identity = {k: row[k] for k in ('schema', 'attempt', 'role', 'origin', 'target', 'session', 'host', 'boot')}
+        minute.context = dict(identity=identity, state={})
+        analysis = d.Analysis()
+        analysis.feed(row)
+        minute.append(dict(row, event='minute', wall=wall + 59, aggregate=analysis.drain()[0]))
+        raw.append(self.measured(wall + 70))
+        result = d.query(self.query_args(since_wall=wall - 10800, until_wall=time.time()))
+        self.assertEqual(result['summaries'][0]['samples'], 2)
+        self.assertIn('minute', result['resolution'])
+        self.assertEqual(result['summaries'][0]['tx_bytes'], 200)
+
+    def test_minute_context_before_window_is_carried_forward(self):
+        wall = time.time() - 120
+        row = self.measured(wall)
+        minute = d.Store(base=self.base, stream='minute')
+        self.addCleanup(minute.close)
+        identity = {k: row[k] for k in ('schema', 'attempt', 'role', 'origin', 'target', 'session', 'host', 'boot')}
+        minute.context = dict(identity=identity, state={})
+        path = dict(row, event='network', tailscale={'mode': 'direct'})
+        analysis = d.Analysis()
+        analysis.feed(row)
+        minute.append(dict(row, event='minute', aggregate=analysis.drain()[0], state={'network': path}))
+        later = self.measured(wall + 70)
+        analysis.feed(later)
+        minute.append(dict(later, event='minute', aggregate=analysis.drain()[0]))
+        rows = list(minute.records(wall + 30, time.time(), stream='minute'))
+        self.assertTrue(any(r.get('carried') and r['event'] == 'network' for r in rows))
+
+    def test_normal_query_streams_beyond_export_read_limit(self):
+        store = self.store()
+        store.append(self.measured(time.time()))
+        with patch.object(d, 'READ_LIMIT', 10):
+            result = d.query(self.query_args())
+            self.assertEqual(result['summaries'][0]['samples'], 1)
+            with self.assertRaisesRegex(ValueError, 'shorter time window'):
+                d.query(self.query_args(include_records=True))
+
+    def test_rollup_and_raw_histograms_have_same_distribution(self):
+        rows = [self.measured(i, tcp={'rtt_ms': i + .2}) for i in range(60)]
+        rows[1]['processes'] = [dict(kind='waypipe', cpu_percent=12, rss_bytes=4096)]
+        rows.append(dict(rows[-1], event='host', pressure={'cpu': {'avg10': 3}}))
+        expected = d.summarize(rows)[0]
+        analysis = d.Analysis()
+        for row in rows:
+            analysis.feed(row)
+        minute = dict(rows[-1], event='minute', aggregate=analysis.drain()[0])
+        actual = d.summarize([minute])[0]
+        for key in ('samples', 'rtt_p95_ms', 'rttvar_p95_ms', 'tx_bytes', 'rx_bytes', 'retrans', 'timeline'):
+            self.assertEqual(actual[key], expected[key])
+
+    def test_wifi_persists_allowlist_without_ssid_or_mac(self):
+        # Test a real-shaped response through the allowlist without touching Wi-Fi.
+        fake = self.base / 'wlan-fixture'
+        (fake / 'wireless').mkdir(parents=True)
+        original = d.Path.iterdir
+        def listing(path):
+            return iter([fake]) if str(path) == '/sys/class/net' else original(path)
+        raw = 'Connected to aa:bb:cc:dd:ee:ff\n SSID: PRIVATE\n signal: -49 dBm\n tx bitrate: 72.2 MBit/s\n tx retries: 12\n tx failed: 1\n'
+        with patch.object(d.Path, 'iterdir', listing), patch.object(d, 'bounded', return_value=raw):
+            result = d.wifi_sample()
+        encoded = json.dumps(result)
+        self.assertNotIn('PRIVATE', encoded)
+        self.assertNotIn('aa:bb:cc:dd:ee:ff', encoded)
+        self.assertEqual(result['interfaces']['wlan-fixture']['tx_retries'], 12)
+
+    def test_incident_window_requires_timezone(self):
+        args = types.SimpleNamespace(at='2026-10-31T14:00:00-07:00', window='5m', since='20m')
+        with patch.object(d.time, 'time', return_value=1793484000):
+            left, right = d.incident_window(args)
+        self.assertLessEqual(right - left, 300)
+        args.at = '2026-10-31T14:00:00'
+        with self.assertRaisesRegex(ValueError, 'timezone'):
+            d.incident_window(args)
+        args.at = '2099-10-31T14:00:00-07:00'
+        with self.assertRaisesRegex(ValueError, 'future'):
+            d.incident_window(args)
+
+    def test_watch_reads_local_only_and_is_bounded(self):
+        args = self.query_args()
+        args.watch, args.export, args.probe, args.at, args.timeline = '1s', None, None, None, False
+        with patch.object(d, 'query', return_value={'status': 'available'}), \
+                patch.object(d, 'bounded') as tools, patch.object(d.time, 'sleep'), \
+                patch.object(d.time, 'monotonic', side_effect=[1, 3]), contextlib.redirect_stdout(io.StringIO()):
+            d.watch_cli(args)
+        tools.assert_not_called()
+
+    def test_active_probe_requires_flag_and_records_distinct_icmp_results(self):
+        store = self.store()
+        row = self.measured(time.time(), tcp={'peer': ['100.1.1.1', 22]})
+        store.append(row)
+        args = self.query_args()
+        args.probe = '2s'
+        raw = '2 packets transmitted, 1 received, 50% packet loss\nrtt min/avg/max/mdev = 10/10/10/0 ms\n'
+        with patch.object(d, 'bounded', return_value=raw) as tool, contextlib.redirect_stdout(io.StringIO()):
+            d.probe_cli(args)
+        self.assertEqual(tool.call_args.args[0][0], 'ping')
+        probe = next(r for r in store.records(0, time.time()) if r['event'] == 'probe')
+        self.assertEqual((probe['sent'], probe['received']), (2, 1))
+        self.assertEqual(probe['method'], 'ICMP active probe')
+
+    def test_collector_generates_readable_compact_samples_and_minute_tail(self):
+        helper = self.base / 'helper.py'
+        helper.write_text(SOURCE)
+        owner = subprocess.Popen(['sleep', '30'])
+        collector = subprocess.Popen(['python3', str(helper), 'collect', 'snap', '--owner', str(owner.pid),
+                                      '--start', d.process(owner.pid)['start'], '--attempt', str(uuid.uuid4()),
+                                      '--origin', socket.gethostname(), '--days', '30', '--cap', '1073741824'])
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                chunks = list((self.base / 'remote-chrome/diagnostics').glob('*.jsonl'))
+                if chunks and any('"event":"sample"' in p.read_text() for p in chunks):
+                    break
+                time.sleep(.02)
+            owner.terminate()
+            owner.wait()
+            self.assertEqual(collector.wait(timeout=5), 0)
+            store = self.store()
+            rows = list(store.records(0, time.time(), stream='all'))
+            self.assertTrue(any(r['event'] == 'sample' for r in rows))
+            self.assertTrue(any(r['event'] == 'minute' for r in rows))
+            self.assertFalse(any(r['event'] == 'collector_failure' for r in rows))
+        finally:
+            if owner.poll() is None:
+                owner.terminate()
+                owner.wait()
+            if collector.poll() is None:
+                collector.terminate()
+                collector.wait(timeout=5)
 
 
 if __name__ == "__main__":

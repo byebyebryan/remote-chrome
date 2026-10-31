@@ -295,7 +295,15 @@ class SecureNotifications(unittest.TestCase):
         bootstrap, _ = self.holding_bootstrap()
         directory = self.root / "state/remote-chrome/diagnostics"
         def recorded():
-            return [r for path in directory.glob("*.jsonl") for r in events(path)]
+            records = []
+            for path in directory.glob("*.jsonl"):
+                identity = {}
+                for row in events(path):
+                    if row.get('event') == 'context':
+                        identity = row['identity']
+                    else:
+                        records.append(dict(identity, **row))
+            return records
         wait_for(lambda: any(r["event"] == "sample" for r in recorded()), "diagnostic sample absent")
         bootstrap.terminate()
         self.assertEqual(bootstrap.wait(timeout=8), 143)

@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-31",
+  "launcher": "1.8.0",
+  "kind": "passive recorder cost pilot",
+  "method": {
+    "duration_seconds": 20,
+    "sampler_store": "temporary private directory, removed afterwards",
+    "workload": "existing Carbon-to-Snap daily-use tunnel; no controlled browser workload",
+    "cpu": "collector plus its child tools, divided by wall time; percent of one core",
+    "baseline_launcher": "1.7.0",
+    "production_owners_unchanged": true,
+    "production_tunnels_restarted": false
+  },
+  "results": [
+    {
+      "host": "snap",
+      "version": "1.7.0",
+      "wall_seconds": 20.105,
+      "cpu_seconds": 0.4129,
+      "cpu_percent_one_core": 2.054,
+      "tcp_samples": 10,
+      "available_tcp_samples": 10
+    },
+    {
+      "host": "snap",
+      "version": "1.8.0",
+      "wall_seconds": 20.017,
+      "cpu_seconds": 0.2705,
+      "cpu_percent_one_core": 1.351,
+      "tcp_samples": 20,
+      "available_tcp_samples": 20,
+      "tcp_source": "inet_diag",
+      "bytes_written": 62796
+    },
+    {
+      "host": "carbon",
+      "version": "1.7.0",
+      "wall_seconds": 20.043,
+      "cpu_seconds": 0.5456,
+      "cpu_percent_one_core": 2.722,
+      "tcp_samples": 10,
+      "available_tcp_samples": 10
+    },
+    {
+      "host": "carbon",
+      "version": "1.8.0",
+      "wall_seconds": 20.021,
+      "cpu_seconds": 0.427,
+      "cpu_percent_one_core": 2.133,
+      "tcp_samples": 20,
+      "available_tcp_samples": 20,
+      "tcp_source": "inet_diag after initial ss discovery"
+    }
+  ],
+  "limitations": [
+    "Short sequential observations, not a performance benchmark or a smoothness comparison.",
+    "Workload and network were not held constant.",
+    "RSS high-water measurements were cumulative across child runs, so no memory comparison is asserted.",
+    "The new structured reader initially fell back to ss on Snap because accepted sshd sockets retained root ownership; the final Snap pilot used the narrow exact inherited SSH connection exception.",
+    "Starship remained in away mode; no display workload or transport matrix was run.",
+    "Existing production recorders retained version 1.7.0 until the next deliberate launch/reset."
+  ]
+}
