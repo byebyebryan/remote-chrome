@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.6.0"
+VERSION="1.6.1"
 
 usage() {
   cat <<USAGE
@@ -1638,7 +1638,7 @@ chrome_set_transport_command() {
     local selector=hw
     [ "$codecs" != software ] || selector=sw
     chrome_waypipe_command=(waypipe-remote-chrome --compress "$compression"
-      --video "h264,$selector,bpf=500000" --remote-bin waypipe-remote-chrome ssh)
+      --video "h264,$selector,bpf=250000" --remote-bin waypipe-remote-chrome ssh)
   else
     chrome_waypipe_command=(waypipe --no-gpu --compress "$compression" ssh)
   fi

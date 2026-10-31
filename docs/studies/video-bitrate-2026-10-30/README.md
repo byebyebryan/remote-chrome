@@ -1,6 +1,10 @@
 # H.264 bitrate decision, October 30, 2026
 
-## Decision
+The initial 500k decision below was superseded by the
+[network-priority revision](#network-priority-revision-october-30-2026) at the
+end of this record. The original measurements and decisions are retained.
+
+## Initial decision
 
 Use **`bpf=500000`** for new video sessions, replacing `bpf=250000` in launcher
 1.5.2. Apply the launcher through chezmoi on Snap, Starship, and Carbon.
@@ -279,8 +283,28 @@ explicit away state were restored. Launcher bytes/modes, package recipe and
 FFmpeg ABI remained correct on Snap, Starship and Carbon; unrelated chezmoi
 files were preserved.
 
-Defaults remain hardware-preferred H.264 at 500000 bits/frame with `zstd=1`.
+At completion of this matrix, defaults remained hardware-preferred H.264 at
+500000 bits/frame with `zstd=1`.
 Carbon's controlled performance comparison stays pending while its desktop is
 in use; its earlier functional hardware/software/lossless/reset checks passed.
 Ordinary-page smoothness and artifact acceptance remain a user check. The
 existing `--transport lossless` option remains available for exact pixels.
+
+## Network-priority revision, October 30, 2026
+
+Launcher 1.6.1 returns fresh video launches to **`bpf=250000`** on Snap,
+Starship, and Carbon. The user's priority is fewer intermittent stalls on a
+variable network, with input latency a secondary measurement. This deliberately
+trades some text clarity for lower traffic and more network headroom.
+
+In the original sweep, 250k received 3.14 Mbit/s for documents and 3.72 Mbit/s
+for images, versus 6.26 and 8.15 Mbit/s at 500k: approximately 50% and 54% less
+traffic. Document text-edge error was 7.24 at 250k versus 3.80 at 500k. These
+are measured quality/traffic tradeoffs, not evidence that the lower target has
+already resolved ordinary-browsing stalls. The transport matrix above compared
+500k with lossless; it did not compare 250k with 500k under network impairment.
+
+Hardware preference, `zstd=1`, and the stock lossless recovery path are
+unchanged. Both 250k and 500k recorded commands remain supported across reset;
+existing sessions are not restarted or silently retargeted. Stop and freshly
+launch a 500k session to adopt 250k. No Waypipe package rebuild is needed.

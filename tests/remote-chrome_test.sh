@@ -1386,7 +1386,7 @@ FAKE_WAYPIPE_COMPRESSION
       case "$mode" in
         video-*)
           [ "$(sed -n '1,8p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
-            "$(printf '%s\n' --compress "$expected" --video h264,hw,bpf=500000 --remote-bin waypipe-remote-chrome ssh test-host)" ] ||
+            "$(printf '%s\n' --compress "$expected" --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host)" ] ||
             fail "$mode/$setting used the wrong video transport"
           if command grep -qx -- --disable-gpu "$REMOTE_CHROME_TEST_WAYPIPE_ARGS"; then
             fail "video launch disabled Chrome GPU rendering"
@@ -1463,7 +1463,7 @@ test_video_command_and_configuration_round_trip() (
   chrome_set_transport_command zstd=1 "$chrome_transport" "$chrome_video_codecs"
   command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome \
     chrome_libsecret_os_crypt_password_v2 '' '' '' /tmp/remote-chrome-test.bootstrap.sh)"
-  assert_contains "$command_line" 'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=500000 --remote-bin waypipe-remote-chrome ssh test-host'
+  assert_contains "$command_line" 'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host'
   chrome_reset_parse_pane_host "$command_line" || fail "video command cannot reset"
   [ "$chrome_reset_host" = test-host ] || fail "video command reset targets wrong host"
   chrome_launch_target test-host --transport video --video-codecs=software --session=video-test
@@ -1471,12 +1471,12 @@ test_video_command_and_configuration_round_trip() (
   REMOTE_CHROME_TRANSPORT=lossless REMOTE_CHROME_VIDEO_CODECS=software chrome_transport_defaults
   [ "$chrome_transport/$chrome_video_codecs" = lossless/software ] || fail "environment did not override defaults"
   chrome_set_transport_command lz4 video software
-  [ "${chrome_waypipe_command[4]}" = h264,sw,bpf=500000 ] || fail "software override not recorded"
+  [ "${chrome_waypipe_command[4]}" = h264,sw,bpf=250000 ] || fail "software override not recorded"
   command_line="$(chrome_secure_command_line lz4 test-host google-chrome-stable chrome \
     chrome_libsecret_os_crypt_password_v2 '' '' '' /tmp/remote-chrome-test.bootstrap.sh)"
   chrome_reset_parse_pane_host "$command_line" || fail "software video reset rejected"
   # Both defaults remain canonical, including the optional notification forward.
-  # Keep the exact saved command: reset must not silently upgrade its bitrate.
+  # Keep the exact saved command: reset must not silently change its bitrate.
   local bpf codec compression
   for bpf in 250000 500000; do
     for codec in hw sw; do
