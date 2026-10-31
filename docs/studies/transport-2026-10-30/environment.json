@@ -1,0 +1,40 @@
+{
+  "snap": {
+    "chrome": "Google Chrome 156.0.8078.79",
+    "kernel": "7.2.11-arch1-1",
+    "packages": [
+      "waypipe-remote-chrome 0.11.3-4",
+      "waypipe 0.11.3-1",
+      "ffmpeg 2:9.0.2-2",
+      "niri 26.04-1",
+      "nvidia-utils 610.57.04-1",
+      "mesa 1:26.2.6-1"
+    ],
+    "logical_cpus": 20,
+    "cpu_model": "12th Gen Intel(R) Core(TM) i9-12900H",
+    "architecture": "x86_64",
+    "chrome_binary": {
+      "size": 302792008,
+      "mtime_ns": 1793391179000000000
+    }
+  },
+  "starship": {
+    "chrome": "Google Chrome 156.0.8078.79",
+    "kernel": "7.2.11-arch1-1",
+    "packages": [
+      "waypipe-remote-chrome 0.11.3-4",
+      "waypipe 0.11.3-1",
+      "ffmpeg 2:9.0.2-2",
+      "niri 26.04-1",
+      "nvidia-utils 610.57.04-1",
+      "mesa 1:26.2.6-1"
+    ],
+    "logical_cpus": 24,
+    "cpu_model": "AMD Ryzen 9 7900X 12-Core Processor",
+    "architecture": "x86_64",
+    "chrome_binary": {
+      "size": 302792008,
+      "mtime_ns": 1793391269000000000
+    }
+  }
+}

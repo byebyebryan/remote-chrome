@@ -1,0 +1,258 @@
+{
+  "host": "starship",
+  "resume": true,
+  "cases": [
+    {
+      "name": "study-v5-starship-delay-h264-r1",
+      "condition": "delay",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-delay-lossless-r1",
+      "condition": "delay",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-loss-lossless-r1",
+      "condition": "loss",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-loss-h264-r1",
+      "condition": "loss",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-cap-h264-r1",
+      "condition": "cap",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-cap-lossless-r1",
+      "condition": "cap",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-jitter-lossless-r1",
+      "condition": "jitter",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-jitter-h264-r1",
+      "condition": "jitter",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-native-h264-r1",
+      "condition": "native",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-native-lossless-r1",
+      "condition": "native",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-proxy-lossless-r1",
+      "condition": "proxy",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-proxy-h264-r1",
+      "condition": "proxy",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 0
+    },
+    {
+      "name": "study-v5-starship-proxy-lossless-r2",
+      "condition": "proxy",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-proxy-h264-r2",
+      "condition": "proxy",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-native-h264-r2",
+      "condition": "native",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-native-lossless-r2",
+      "condition": "native",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-jitter-lossless-r2",
+      "condition": "jitter",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-jitter-h264-r2",
+      "condition": "jitter",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-cap-h264-r2",
+      "condition": "cap",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-cap-lossless-r2",
+      "condition": "cap",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-loss-lossless-r2",
+      "condition": "loss",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-loss-h264-r2",
+      "condition": "loss",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-delay-h264-r2",
+      "condition": "delay",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-delay-lossless-r2",
+      "condition": "delay",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 1
+    },
+    {
+      "name": "study-v5-starship-delay-h264-r3",
+      "condition": "delay",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-delay-lossless-r3",
+      "condition": "delay",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-loss-lossless-r3",
+      "condition": "loss",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-loss-h264-r3",
+      "condition": "loss",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-cap-h264-r3",
+      "condition": "cap",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-cap-lossless-r3",
+      "condition": "cap",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-jitter-lossless-r3",
+      "condition": "jitter",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-jitter-h264-r3",
+      "condition": "jitter",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-native-h264-r3",
+      "condition": "native",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-native-lossless-r3",
+      "condition": "native",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-proxy-lossless-r3",
+      "condition": "proxy",
+      "mode": "lossless",
+      "duration": 60,
+      "repeat": 2
+    },
+    {
+      "name": "study-v5-starship-proxy-h264-r3",
+      "condition": "proxy",
+      "mode": "h264",
+      "duration": 60,
+      "repeat": 2
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "purpose": "V5 study code with final postprocessing and independent consistency checks. Exact measured bytes are retained in the private frozen archive; publication adjustments are listed below. Copy this directory to /tmp/remote-chrome-next-pass-20261030 on the recorded hosts before reproducing. The runner focuses its browser, injects keys and creates private network namespaces with sudo; an available desktop is required. This is a one-off experiment, not an installed service.",
+  "measurement_code_unchanged": "Verified against frozen hashes from before the matrix; see measurement-harness-verification.json. Postprocessing metadata and consistency checks were refined separately.",
+  "files": [
+    {
+      "name": "analyze-study.py",
+      "bytes": 14168,
+      "sha256": "fba09395c2cce44ab50dd36f56ee99ecc24f47a6e2029c45dbf04d04779a06c6"
+    },
+    {
+      "name": "audit-study.py",
+      "bytes": 4088,
+      "sha256": "fc4f107a2d59bb866e993913f0a162951b7eeb891f584bd86ba67984064f4879"
+    },
+    {
+      "name": "cdp.mjs",
+      "bytes": 1141,
+      "sha256": "ca1afd5aecde3d4e586222506fc49393e650e99e01ef6424114463ea6d782f39"
+    },
+    {
+      "name": "collect-study.py",
+      "bytes": 1249,
+      "sha256": "9f3416769113d70b70e95d39b5ace925d2ea6bdd9022993e945de92f6ddfebf9"
+    },
+    {
+      "name": "endpoint-proxy.py",
+      "bytes": 624,
+      "sha256": "71580c89c2d758c379d93116df2b58f881637f2f959cf35a73b767c469e1aebe"
+    },
+    {
+      "name": "image-meter.py",
+      "bytes": 4826,
+      "sha256": "9ab937b60af51b01bafbd040fd233f577115a88eafd856a0b3df865e814bf1dd"
+    },
+    {
+      "name": "metric-sampler.py",
+      "bytes": 939,
+      "sha256": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d"
+    },
+    {
+      "name": "netlab.py",
+      "bytes": 4191,
+      "sha256": "faa6fed990ea389507439821ebcdf78758b17b87489e035edecda847e8cb273e"
+    },
+    {
+      "name": "plan-starship-v5.json",
+      "bytes": 5664,
+      "sha256": "db0634ae33776055e299dafaa1126183b6b5a2c7c0f24829ef203d3b8fbe9031"
+    },
+    {
+      "name": "probe.py",
+      "bytes": 2861,
+      "sha256": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d"
+    },
+    {
+      "name": "secure-bootstrap.sh",
+      "bytes": 49980,
+      "sha256": "365bb1fb8b64159a9b111299adc9d4d721d700fd7f62e97d6549bb3571af8b60"
+    },
+    {
+      "name": "server-probe.py",
+      "bytes": 1543,
+      "sha256": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9"
+    },
+    {
+      "name": "study-case.mjs",
+      "bytes": 10064,
+      "sha256": "48dbbedc8c9c928f8d276aa059223af31da7272042d36d3bfbae558a0338bc46"
+    },
+    {
+      "name": "study-runner.py",
+      "bytes": 4522,
+      "sha256": "33f4667ec06fa7f264f9e10707c4ccf43000160903d97d96a6885d1c03f09ec6"
+    },
+    {
+      "name": "viewer-control.py",
+      "bytes": 3390,
+      "sha256": "73838f69a2778946210bfdcf645e4a677df9b5bb5eed06a4cb01e3116aa11c39"
+    },
+    {
+      "name": "workload.html",
+      "bytes": 2818,
+      "sha256": "a7578c4500f4cbd25b600a940dee711a31d15f25c64395cd3bde351c7719dc68"
+    }
+  ],
+  "publication_adjustments": [
+    {
+      "file": "viewer-control.py",
+      "reason": "Removed trailing whitespace on one otherwise blank line to satisfy repository whitespace validation; no executable statement changed.",
+      "measured_sha256": "e25f55edf1c9fd99445604754a40c0145464299a193118e84b3dbe2b7e12f093",
+      "published_sha256": "73838f69a2778946210bfdcf645e4a677df9b5bb5eed06a4cb01e3116aa11c39"
+    }
+  ]
+}

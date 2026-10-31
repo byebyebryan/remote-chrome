@@ -1,0 +1,16 @@
+{
+  "snap": [
+    "nodejs 26.12.1-2",
+    "python 3.14.8-1",
+    "grim 1.5.0-2",
+    "wtype 0.4-2",
+    "iproute2 7.3.0-1"
+  ],
+  "starship": [
+    "nodejs 26.13.0-1",
+    "python 3.14.8-1",
+    "grim 1.5.0-2",
+    "wtype 0.4-2",
+    "iproute2 7.3.0-1"
+  ]
+}

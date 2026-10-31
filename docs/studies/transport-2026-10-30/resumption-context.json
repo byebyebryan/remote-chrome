@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "carbon_performance": "Deferred at explicit user request because desktop is in use; no additional Carbon GUI tests. Functional qualification remains in checkpoint.json.",
+  "starship_display": {
+    "cause_of_initial_low_rate": "Explicit desktop-away latch kept the compositor display off. Raw Niri power-on attempts were reblanked.",
+    "action": "desktop-away resume",
+    "before": {
+      "away": true,
+      "transition": "manual away",
+      "displays": {
+        "card1-DP-1": "Off"
+      }
+    },
+    "after": {
+      "away": false,
+      "transition": "explicit resume",
+      "displays": {
+        "card1-DP-1": "On"
+      }
+    },
+    "direct_local_gtk": {
+      "before": {
+        "elapsed": 5.488625101046637,
+        "ticks": 5,
+        "fps": 0.9109749541914496
+      },
+      "after": {
+        "elapsed": 5.488438693981152,
+        "ticks": 625,
+        "fps": 113.87573677107858
+      }
+    },
+    "interpretation": "This resolves the one-Hz local calibration confound. It does not identify the cause of an earlier episode of choppiness on a different path."
+  },
+  "harness_revision_policy": {
+    "v2": "Four full native/proxy cases completed, then delayed H264 stopped on an indeterminate marker. All excluded from v5 aggregates.",
+    "v3": "Added separate complemented input/frame fields and input CRC. Coupled rejection gate stopped on 74 invalid frame counters; all 18 inputs reflected. Excluded from v5 aggregates.",
+    "v4": "Separated input and frame validity. One attempt failed before measurement on transient missing focused output; bounded post-resize focus settling fixed that. Next delayed60s run had102 invalidinputmarkers/1199captures,81invalidframecodes and18/18 observed inputs; failed the input marker gate. Excluded from v5 aggregates.",
+    "v5": "Frozen before main matrix. Baseline retains native rate/input/marker requirements. Full trials retain marker failures and the same <5% input marker quality flag; network/CPU evidence is independent, and group latency comparisons exclude trials failing that gate. Invalid frame counters remain separate diagnostics."
+  },
+  "remaining_acceptance": [
+    "Carbon controlled performance deferred",
+    "Ordinary browsing smoothness and artifacts require user observation; synthetic scenes do not settle acceptance."
+  ]
+}

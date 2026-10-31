@@ -1,0 +1,10 @@
+{
+  "observed_at": "during first repeat",
+  "peer": "starship",
+  "peer_endpoint_present": true,
+  "relay_region_field": "sea",
+  "route_interface": "enp0s13f0u2u4u2",
+  "native_route_is_fixed": false,
+  "client_server_version_warning": "client1.104.4,daemon1.104.2",
+  "note": "CurAddr was present in passive Tailscale status; no active ping or route change was made."
+}

@@ -1,0 +1,17 @@
+{
+  "remote_core_matches_frozen": true,
+  "core_sha256": {
+    "study-runner.py": "33f4667ec06fa7f264f9e10707c4ccf43000160903d97d96a6885d1c03f09ec6",
+    "study-case.mjs": "48dbbedc8c9c928f8d276aa059223af31da7272042d36d3bfbae558a0338bc46",
+    "viewer-control.py": "e25f55edf1c9fd99445604754a40c0145464299a193118e84b3dbe2b7e12f093",
+    "image-meter.py": "9ab937b60af51b01bafbd040fd233f577115a88eafd856a0b3df865e814bf1dd",
+    "workload.html": "a7578c4500f4cbd25b600a940dee711a31d15f25c64395cd3bde351c7719dc68",
+    "probe.py": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d",
+    "server-probe.py": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9",
+    "metric-sampler.py": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d",
+    "netlab.py": "faa6fed990ea389507439821ebcdf78758b17b87489e035edecda847e8cb273e",
+    "endpoint-proxy.py": "71580c89c2d758c379d93116df2b58f881637f2f959cf35a73b767c469e1aebe",
+    "cdp.mjs": "ca1afd5aecde3d4e586222506fc49393e650e99e01ef6424114463ea6d782f39",
+    "secure-bootstrap.sh": "365bb1fb8b64159a9b111299adc9d4d721d700fd7f62e97d6549bb3571af8b60"
+  }
+}

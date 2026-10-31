@@ -1,0 +1,2598 @@
+{
+  "schema": 1,
+  "created_at_utc": "2026-10-31T05:40:42.207294+00:00",
+  "archive_root": "/home/bryan/.cache/remote-chrome/studies/transport-2026-10-30/starship-v5",
+  "purpose": "Private durable raw study records, prior excluded attempts, frozen measurement revisions and final postprocessing. Browser profiles are excluded and were removed after verifying no owned graphics processes remained.",
+  "artifacts": [
+    {
+      "path": "final-harness/analyze-study.py",
+      "bytes": 14168,
+      "sha256": "fba09395c2cce44ab50dd36f56ee99ecc24f47a6e2029c45dbf04d04779a06c6"
+    },
+    {
+      "path": "final-harness/audit-study.py",
+      "bytes": 4088,
+      "sha256": "fc4f107a2d59bb866e993913f0a162951b7eeb891f584bd86ba67984064f4879"
+    },
+    {
+      "path": "final-harness/cdp.mjs",
+      "bytes": 1141,
+      "sha256": "ca1afd5aecde3d4e586222506fc49393e650e99e01ef6424114463ea6d782f39"
+    },
+    {
+      "path": "final-harness/collect-study.py",
+      "bytes": 1249,
+      "sha256": "9f3416769113d70b70e95d39b5ace925d2ea6bdd9022993e945de92f6ddfebf9"
+    },
+    {
+      "path": "final-harness/endpoint-proxy.py",
+      "bytes": 624,
+      "sha256": "71580c89c2d758c379d93116df2b58f881637f2f959cf35a73b767c469e1aebe"
+    },
+    {
+      "path": "final-harness/image-meter.py",
+      "bytes": 4826,
+      "sha256": "9ab937b60af51b01bafbd040fd233f577115a88eafd856a0b3df865e814bf1dd"
+    },
+    {
+      "path": "final-harness/manifest.json",
+      "bytes": 3542,
+      "sha256": "865094ebbedf24aba0fef2dd6d2d17028963112bed9ab884ad8342efbc194585"
+    },
+    {
+      "path": "final-harness/metric-sampler.py",
+      "bytes": 939,
+      "sha256": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d"
+    },
+    {
+      "path": "final-harness/netlab.py",
+      "bytes": 4191,
+      "sha256": "faa6fed990ea389507439821ebcdf78758b17b87489e035edecda847e8cb273e"
+    },
+    {
+      "path": "final-harness/plan-starship-v5.json",
+      "bytes": 5664,
+      "sha256": "db0634ae33776055e299dafaa1126183b6b5a2c7c0f24829ef203d3b8fbe9031"
+    },
+    {
+      "path": "final-harness/probe.py",
+      "bytes": 2861,
+      "sha256": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d"
+    },
+    {
+      "path": "final-harness/secure-bootstrap.sh",
+      "bytes": 49980,
+      "sha256": "365bb1fb8b64159a9b111299adc9d4d721d700fd7f62e97d6549bb3571af8b60"
+    },
+    {
+      "path": "final-harness/server-probe.py",
+      "bytes": 1543,
+      "sha256": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9"
+    },
+    {
+      "path": "final-harness/study-case.mjs",
+      "bytes": 10064,
+      "sha256": "48dbbedc8c9c928f8d276aa059223af31da7272042d36d3bfbae558a0338bc46"
+    },
+    {
+      "path": "final-harness/study-runner.py",
+      "bytes": 4522,
+      "sha256": "33f4667ec06fa7f264f9e10707c4ccf43000160903d97d96a6885d1c03f09ec6"
+    },
+    {
+      "path": "final-harness/viewer-control.py",
+      "bytes": 3390,
+      "sha256": "73838f69a2778946210bfdcf645e4a677df9b5bb5eed06a4cb01e3116aa11c39"
+    },
+    {
+      "path": "final-harness/workload.html",
+      "bytes": 2818,
+      "sha256": "a7578c4500f4cbd25b600a940dee711a31d15f25c64395cd3bde351c7719dc68"
+    },
+    {
+      "path": "harness-v2/analyze-study.py",
+      "bytes": 10961,
+      "sha256": "ff0337a257f829cbaae8aa40b3eb4c75e4b17a3cf204d2c86305418fc4412d04"
+    },
+    {
+      "path": "harness-v2/collect-study.py",
+      "bytes": 1249,
+      "sha256": "e19c486d72d85e5ffc76fb6a4356e585b7e04c456b888d410b1a3e6754146ba0"
+    },
+    {
+      "path": "harness-v2/image-meter.py",
+      "bytes": 3144,
+      "sha256": "56ec9f2c2fb3e79f80d7a100d958136d09454020fdcfcc218b9313565e62e52b"
+    },
+    {
+      "path": "harness-v2/metric-sampler.py",
+      "bytes": 939,
+      "sha256": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d"
+    },
+    {
+      "path": "harness-v2/probe.py",
+      "bytes": 2861,
+      "sha256": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d"
+    },
+    {
+      "path": "harness-v2/server-probe.py",
+      "bytes": 1543,
+      "sha256": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9"
+    },
+    {
+      "path": "harness-v2/study-case.mjs",
+      "bytes": 9550,
+      "sha256": "6b4d50e8da15f8c8c65a8bebf0b2e0543f84ef5e5b20c983009c348a39db195d"
+    },
+    {
+      "path": "harness-v2/study-runner.py",
+      "bytes": 4522,
+      "sha256": "48d67c912060930d81fe3ff016bd795417eb8169f951c7182eed0deb213fa61c"
+    },
+    {
+      "path": "harness-v2/workload.html",
+      "bytes": 2697,
+      "sha256": "b9f1e5fae2a78b1953921ec7d97996406d02efbff56de42f6d6a706047f47c22"
+    },
+    {
+      "path": "harness-v3/analyze-study.py",
+      "bytes": 11365,
+      "sha256": "d15c8820c4bafa7b3c0741cfe97ee370005b65d6726e78c7528772ac7ac66920"
+    },
+    {
+      "path": "harness-v3/collect-study.py",
+      "bytes": 1249,
+      "sha256": "aef3e3e23981ff3d23fcbef8177f1c5b2b60a78ee188b369be061d9bb764d625"
+    },
+    {
+      "path": "harness-v3/image-meter.py",
+      "bytes": 4436,
+      "sha256": "0506c2c6af2e6ea166fb7e6a64d0bfc414952ae1138feed90b2a033d7341c22e"
+    },
+    {
+      "path": "harness-v3/metric-sampler.py",
+      "bytes": 939,
+      "sha256": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d"
+    },
+    {
+      "path": "harness-v3/probe.py",
+      "bytes": 2861,
+      "sha256": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d"
+    },
+    {
+      "path": "harness-v3/server-probe.py",
+      "bytes": 1543,
+      "sha256": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9"
+    },
+    {
+      "path": "harness-v3/study-case.mjs",
+      "bytes": 9551,
+      "sha256": "ff0072f6ccd09b54b248fb615074db12f0fb5785268f0747e0eba73ce6862f8f"
+    },
+    {
+      "path": "harness-v3/study-runner.py",
+      "bytes": 4522,
+      "sha256": "48d67c912060930d81fe3ff016bd795417eb8169f951c7182eed0deb213fa61c"
+    },
+    {
+      "path": "harness-v3/workload.html",
+      "bytes": 2818,
+      "sha256": "a7578c4500f4cbd25b600a940dee711a31d15f25c64395cd3bde351c7719dc68"
+    },
+    {
+      "path": "harness-v4/image-meter.py",
+      "bytes": 4732,
+      "sha256": "9d2bbdf0f168a77486df95deba89e7e3394f0eaec3498a38a8f08ee64ac4376e"
+    },
+    {
+      "path": "harness-v4/metric-sampler.py",
+      "bytes": 939,
+      "sha256": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d"
+    },
+    {
+      "path": "harness-v4/netlab.py",
+      "bytes": 4191,
+      "sha256": "faa6fed990ea389507439821ebcdf78758b17b87489e035edecda847e8cb273e"
+    },
+    {
+      "path": "harness-v4/plan-starship-v4.json",
+      "bytes": 5664,
+      "sha256": "85e026d74c0a7fd4bc602dba3edd8a6f48838216f42f801603c753a3f8db942d"
+    },
+    {
+      "path": "harness-v4/probe.py",
+      "bytes": 2861,
+      "sha256": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d"
+    },
+    {
+      "path": "harness-v4/server-probe.py",
+      "bytes": 1543,
+      "sha256": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9"
+    },
+    {
+      "path": "harness-v4/study-case.mjs",
+      "bytes": 9846,
+      "sha256": "dd7187ce87370ac06ee98c0494d9d5df36cf66a7bbc26132d0a8edcb5ca8f3fc"
+    },
+    {
+      "path": "harness-v4/study-runner.py",
+      "bytes": 4522,
+      "sha256": "bc8473400089269d32d0c3a54e2aab54001b5b7f622df3d7f126fc260aa44987"
+    },
+    {
+      "path": "harness-v4/viewer-control.py",
+      "bytes": 3391,
+      "sha256": "e25f55edf1c9fd99445604754a40c0145464299a193118e84b3dbe2b7e12f093"
+    },
+    {
+      "path": "harness-v4/workload.html",
+      "bytes": 2818,
+      "sha256": "a7578c4500f4cbd25b600a940dee711a31d15f25c64395cd3bde351c7719dc68"
+    },
+    {
+      "path": "harness-v5/analyze-study.py",
+      "bytes": 12587,
+      "sha256": "a4f4b25a46a71c73e823d230f253806f03fb34b907c797500357a648a526c038"
+    },
+    {
+      "path": "harness-v5/audit-study.py",
+      "bytes": 4088,
+      "sha256": "fc4f107a2d59bb866e993913f0a162951b7eeb891f584bd86ba67984064f4879"
+    },
+    {
+      "path": "harness-v5/cdp.mjs",
+      "bytes": 1141,
+      "sha256": "ca1afd5aecde3d4e586222506fc49393e650e99e01ef6424114463ea6d782f39"
+    },
+    {
+      "path": "harness-v5/collect-study.py",
+      "bytes": 1249,
+      "sha256": "9f3416769113d70b70e95d39b5ace925d2ea6bdd9022993e945de92f6ddfebf9"
+    },
+    {
+      "path": "harness-v5/endpoint-proxy.py",
+      "bytes": 624,
+      "sha256": "71580c89c2d758c379d93116df2b58f881637f2f959cf35a73b767c469e1aebe"
+    },
+    {
+      "path": "harness-v5/image-meter.py",
+      "bytes": 4826,
+      "sha256": "9ab937b60af51b01bafbd040fd233f577115a88eafd856a0b3df865e814bf1dd"
+    },
+    {
+      "path": "harness-v5/manifest.json",
+      "bytes": 2739,
+      "sha256": "ebcb060cf242a27c7cf9b3c0d75daa2d8e512e1c8b0c346ca4e3a3013a8b4b37"
+    },
+    {
+      "path": "harness-v5/metric-sampler.py",
+      "bytes": 939,
+      "sha256": "453e3df82adc984bc9a29b5f0069c9f21b57526384667e08800f5e03d0eb803d"
+    },
+    {
+      "path": "harness-v5/netlab.py",
+      "bytes": 4191,
+      "sha256": "faa6fed990ea389507439821ebcdf78758b17b87489e035edecda847e8cb273e"
+    },
+    {
+      "path": "harness-v5/plan-starship-v5.json",
+      "bytes": 5664,
+      "sha256": "db0634ae33776055e299dafaa1126183b6b5a2c7c0f24829ef203d3b8fbe9031"
+    },
+    {
+      "path": "harness-v5/probe.py",
+      "bytes": 2861,
+      "sha256": "3428df884aa7eda77c554b63167d9be729a199e11a9efe5b4fc89c76c0c6b41d"
+    },
+    {
+      "path": "harness-v5/secure-bootstrap.sh",
+      "bytes": 49980,
+      "sha256": "365bb1fb8b64159a9b111299adc9d4d721d700fd7f62e97d6549bb3571af8b60"
+    },
+    {
+      "path": "harness-v5/server-probe.py",
+      "bytes": 1543,
+      "sha256": "1f905de22ff6b20fb6be6dcd81980092ecd3f40bc9d9b13cb42e330bbcd574a9"
+    },
+    {
+      "path": "harness-v5/study-case.mjs",
+      "bytes": 10064,
+      "sha256": "48dbbedc8c9c928f8d276aa059223af31da7272042d36d3bfbae558a0338bc46"
+    },
+    {
+      "path": "harness-v5/study-runner.py",
+      "bytes": 4522,
+      "sha256": "33f4667ec06fa7f264f9e10707c4ccf43000160903d97d96a6885d1c03f09ec6"
+    },
+    {
+      "path": "harness-v5/viewer-control.py",
+      "bytes": 3391,
+      "sha256": "e25f55edf1c9fd99445604754a40c0145464299a193118e84b3dbe2b7e12f093"
+    },
+    {
+      "path": "harness-v5/workload.html",
+      "bytes": 2818,
+      "sha256": "a7578c4500f4cbd25b600a940dee711a31d15f25c64395cd3bde351c7719dc68"
+    },
+    {
+      "path": "initial-carbon/pilot-carbon-native-h264.image-metrics.json",
+      "bytes": 13370,
+      "sha256": "d6e3494fdb6ce0e619621dde7a1c5a9528987767611227bfee7f6269823e2a69"
+    },
+    {
+      "path": "initial-carbon/pilot-carbon-native-h264.result.json",
+      "bytes": 26635,
+      "sha256": "a6dea8d01d86f9c0f13218b9ba39f5621b3a98596ed5b6d44fa744d0c89ba19d"
+    },
+    {
+      "path": "initial-carbon/pilot-carbon-native-h264.runner.json",
+      "bytes": 3438,
+      "sha256": "62d25199a81b0d46dccb64395519a4e23a1b1cc129ec547c64fdcb742c1c4fd6"
+    },
+    {
+      "path": "initial-carbon/pilot-carbon-native-h264.transport-metrics.jsonl",
+      "bytes": 27746,
+      "sha256": "b492aa87e4b2ca553113a2797d3d16c282430711260b0cb29115d52c33e2a0bb"
+    },
+    {
+      "path": "initial-starship/calib-starship-noimage-h264.result.json",
+      "bytes": 1962,
+      "sha256": "f5d3bf3462b40169b50a00c113264c9210257277ef884441b34f971a77f7ed84"
+    },
+    {
+      "path": "initial-starship/calib-starship-noimage-h264.runner.json",
+      "bytes": 3684,
+      "sha256": "69a8c95bbf4851c9e6761c0e26e223eacf35926a8f687fba6df8fd918861e0a9"
+    },
+    {
+      "path": "initial-starship/calib2-starship-foreground-h264.image-metrics.json",
+      "bytes": 22726,
+      "sha256": "83f101ae6e8a9043382b9e33680c5c1437a02b9ac651579a1ecb2e4f8f41e1f6"
+    },
+    {
+      "path": "initial-starship/calib2-starship-foreground-h264.result.json",
+      "bytes": 55093,
+      "sha256": "2291af40d8d11264b5f8750055a776a7f75292091fc9b16d80983d9f32d68bcb"
+    },
+    {
+      "path": "initial-starship/calib2-starship-foreground-h264.runner.json",
+      "bytes": 3396,
+      "sha256": "dca726109090ff3705cf57f3e6d2aca95fd8fb0ba5868ba0c2c37530c2dd2bd0"
+    },
+    {
+      "path": "initial-starship/calib2-starship-foreground-h264.transport-metrics.jsonl",
+      "bytes": 56918,
+      "sha256": "d4701c9123ce6d1d5b4338f03a42250399e31963dacf4fedd79d7efb3dabb06f"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-lossless.image-metrics.json",
+      "bytes": 23022,
+      "sha256": "2ed95c966dfb17e74d183fe302626d4372e5359a27ca46b590aa71086bebb9a5"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-lossless.result.json",
+      "bytes": 41046,
+      "sha256": "317fa338da232c1dfbc1776f24f6991757aa1a2ff7a4ad675e0ea32a2fd2f451"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-lossless.runner.json",
+      "bytes": 3232,
+      "sha256": "9b1b94b9d3eba957e3e9730548df4946ce665cb3e05fa8eb1ddd60441318b188"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-lossless.transport-metrics.jsonl",
+      "bytes": 51932,
+      "sha256": "4dc65b87b5e6ab5c5ff9b66ad43ede96500c43af3325a93af9baaff8a766d0af"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-sw264.image-metrics.json",
+      "bytes": 22726,
+      "sha256": "2bdf4bdf8638d1281126790d69a2297045ec7ab9263f2faf06fea4a403c06052"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-sw264.result.json",
+      "bytes": 52887,
+      "sha256": "18461cd8ac159bcdb8185e871a2029d67410b64542cd799e3f47ade06aafce80"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-sw264.runner.json",
+      "bytes": 3243,
+      "sha256": "ef3ae18ff6b1b7812b89e650bd12ecbbb3baeb89ae6a20d64c6a357f87717ecd"
+    },
+    {
+      "path": "initial-starship/calib2-starship-image-sw264.transport-metrics.jsonl",
+      "bytes": 53448,
+      "sha256": "31f2d4474c083689e7a2d32ac6c00a89f714d311550ad2b5249cfb943a7db71d"
+    },
+    {
+      "path": "initial-starship/calib2-starship-noimage-h264.result.json",
+      "bytes": 52978,
+      "sha256": "b039c23a727bc239aae5654475765a75bdcea9bf41c05d407777b90416c2377b"
+    },
+    {
+      "path": "initial-starship/calib2-starship-noimage-h264.runner.json",
+      "bytes": 3180,
+      "sha256": "7ab340c308e8c0b5ed8f890e0ad8731de01e2c1eb37075af072c7461dc931d4a"
+    },
+    {
+      "path": "initial-starship/calib2-starship-noimage-h264.transport-metrics.jsonl",
+      "bytes": 54206,
+      "sha256": "aed2ef0c1dbbc92078b22dffdee95786cc21f69eb86e03e817b3bae8cc9defde"
+    },
+    {
+      "path": "initial-starship/calib3-starship-await-h264.result.json",
+      "bytes": 53212,
+      "sha256": "d3917ef0a6542c0d95209b90fe71b7d7d045b46ce24eb34b02c9ec6bc21811fd"
+    },
+    {
+      "path": "initial-starship/calib3-starship-await-h264.runner.json",
+      "bytes": 3202,
+      "sha256": "a54946709738ce488083ddad11efd0531f3cb20d84e9613f615f9ab248b9efb0"
+    },
+    {
+      "path": "initial-starship/calib3-starship-await-h264.transport-metrics.jsonl",
+      "bytes": 43272,
+      "sha256": "5482fa7f1cc60f747815fc868aabacb28b65876c3ca6ababa69645ddc1e2386f"
+    },
+    {
+      "path": "initial-starship/calib3-starship-scroll-h264.result.json",
+      "bytes": 52942,
+      "sha256": "510874b75c8bbaa764ac305c46ccb1a26988e5413953bd46e9f735ee583376a0"
+    },
+    {
+      "path": "initial-starship/calib3-starship-scroll-h264.runner.json",
+      "bytes": 3207,
+      "sha256": "17e7b684fa0fb66c8f8db9b3f6cef802b669bec479e8716ed8a4276b5e3c6d17"
+    },
+    {
+      "path": "initial-starship/calib3-starship-scroll-h264.transport-metrics.jsonl",
+      "bytes": 43060,
+      "sha256": "166efcceabc0ec47426d7bb525a448a6b3b863c1b1c49f173cb8e4ece4c429a9"
+    },
+    {
+      "path": "initial-starship/calib3-starship-unlimited-h264.result.json",
+      "bytes": 1047157,
+      "sha256": "37562549892b1021f8e09126520ebd42bcb1aa112e304db336b4565d0011df4f"
+    },
+    {
+      "path": "initial-starship/calib3-starship-unlimited-h264.runner.json",
+      "bytes": 3250,
+      "sha256": "02a10deabbff1760223697a62c19444610535ba97ad07740cda89f15bd2d5d09"
+    },
+    {
+      "path": "initial-starship/calib3-starship-unlimited-h264.transport-metrics.jsonl",
+      "bytes": 49417,
+      "sha256": "94b4c66bd276c4a7e20a456e5a7483cb2975fbc8bfa5cf496fecd34b4a58c56e"
+    },
+    {
+      "path": "initial-starship/calib4-starship-nomux-h264.result.json",
+      "bytes": 52804,
+      "sha256": "d77c3586672e2abd849c95f01a7f4ead068b9dcff214faa8dc94b9cfc9b8f574"
+    },
+    {
+      "path": "initial-starship/calib4-starship-nomux-h264.runner.json",
+      "bytes": 3196,
+      "sha256": "51285bb14efd4a74f148e4b6658c67dc22cd6d3ab5607eb7810354f9295d7446"
+    },
+    {
+      "path": "initial-starship/calib4-starship-nomux-h264.transport-metrics.jsonl",
+      "bytes": 46890,
+      "sha256": "9ea060423e79c8eb38bc8a8f798ae3e6fc6580fdf6384d908287b1f772173a27"
+    },
+    {
+      "path": "initial-starship/calib4-starship-nori-h264.result.json",
+      "bytes": 26486,
+      "sha256": "6192e2430cac12f402ab75c8234bf4f7b296be48315df3291a05cae7c25cdf8d"
+    },
+    {
+      "path": "initial-starship/calib4-starship-nori-h264.runner.json",
+      "bytes": 3236,
+      "sha256": "c9b99e43549c4b1cb55b7ad75f929cbb8f759b84dfbf84b9805fb7066b82e63b"
+    },
+    {
+      "path": "initial-starship/local-starship-baseline.result.json",
+      "bytes": 9236,
+      "sha256": "a353c9c981ebde87298cadacd7b6ecbe779f4c3e9baae7fe82dbfde6b3cc8bde"
+    },
+    {
+      "path": "initial-starship/pilot-starship-native-h264.image-metrics.json",
+      "bytes": 17856,
+      "sha256": "5323dd1fda1f68fe35a6158a55dbc4a7776e84155237cf05f0b2edf58731a67b"
+    },
+    {
+      "path": "initial-starship/pilot-starship-native-h264.result.json",
+      "bytes": 53807,
+      "sha256": "11eeeea071b8ceb1564d86e0f7d0a244d9aa725d491556270c89c02bd84ae421"
+    },
+    {
+      "path": "initial-starship/pilot-starship-native-h264.runner.json",
+      "bytes": 3219,
+      "sha256": "d19ebdd5a70a80a6d05e2f2df59066d8d0c6e2b9c2103cac803db3113b725100"
+    },
+    {
+      "path": "initial-starship/pilot-starship-native-h264.transport-metrics.jsonl",
+      "bytes": 43210,
+      "sha256": "7a3a6e28768559f580dd0e060f76210b11a42551b262212cbe483d8cebf6ca30"
+    },
+    {
+      "path": "initial-starship/pilot2-starship-proxy-h264.result.json",
+      "bytes": 1544,
+      "sha256": "2742fc4c15d0945d9db7acc4b7e9c7e06ae80aed5c0e4c31c819def8ef61482b"
+    },
+    {
+      "path": "initial-starship/pilot2-starship-proxy-h264.runner.json",
+      "bytes": 3152,
+      "sha256": "e3ceab6183de1cbc675a39f2817bdfafa64b0bc5bc149928a69199bf0bb32cf8"
+    },
+    {
+      "path": "initial-starship/pilot3-starship-proxy-h264.image-metrics.json",
+      "bytes": 22656,
+      "sha256": "fc2135bf3b870ab6b228413bed80d2efe55dd5d7b78d048dc165d5a26f5ffc9b"
+    },
+    {
+      "path": "initial-starship/pilot3-starship-proxy-h264.result.json",
+      "bytes": 53068,
+      "sha256": "fb1f8c3f1f0e8fe5ae80ff307d40389c5cf637d34d0205aed585f5220e9192e0"
+    },
+    {
+      "path": "initial-starship/pilot3-starship-proxy-h264.runner.json",
+      "bytes": 3238,
+      "sha256": "68b6ed55d782325822e8211ffc149e6fcbd2fbb1a2e4fff729ccf24df9ac4216"
+    },
+    {
+      "path": "initial-starship/pilot3-starship-proxy-h264.transport-metrics.jsonl",
+      "bytes": 54398,
+      "sha256": "8874ece8533e0c12fde0dc676bbf9f5f722a3c426007930a172528ffb4cd0534"
+    },
+    {
+      "path": "initial-starship/pilot4-starship-native-h264.image-metrics.json",
+      "bytes": 23023,
+      "sha256": "8994e6157102174432c5af5a78b4bc9662fc69506ea59e8dc3452d4473175218"
+    },
+    {
+      "path": "initial-starship/pilot4-starship-native-h264.result.json",
+      "bytes": 53376,
+      "sha256": "b46b806c48e9c232ef3054700b305690b15c9d0bf4fe9bd441a3e9b6cc7a2a37"
+    },
+    {
+      "path": "initial-starship/pilot4-starship-native-h264.runner.json",
+      "bytes": 3220,
+      "sha256": "7da0d4b34f0ad6f07c784b36175ce10f0de4b00bd1a5eef5f77878681ca230d0"
+    },
+    {
+      "path": "initial-starship/pilot4-starship-native-h264.transport-metrics.jsonl",
+      "bytes": 54171,
+      "sha256": "f2ad36f6d417bcd55a3e0bce36f3a6c81a26600114d29cbc526602a506c034e4"
+    },
+    {
+      "path": "metadata/acceptance.json",
+      "bytes": 87629,
+      "sha256": "408bcff8b09140258dac2abffbde21aaee80f7a5818961e1fed38d159b6c59d1"
+    },
+    {
+      "path": "metadata/carbon-before.json",
+      "bytes": 555,
+      "sha256": "a5cb2787061c5c315bf45803e785ba373375f74acb3f77a0426b9c42d7e2cff2"
+    },
+    {
+      "path": "metadata/carbon-calibration-inventory.json",
+      "bytes": 793,
+      "sha256": "568b20cff89a6c1adc02f8134b6cb48c4f85c5ceb7971859eb67d6e14a035f53"
+    },
+    {
+      "path": "metadata/carbon-display.json",
+      "bytes": 114,
+      "sha256": "ed198c174e47ecf956c4a4c98f718d867c67253193f1b14e982c2de740ea8496"
+    },
+    {
+      "path": "metadata/carbon-hw250.acceptance.json",
+      "bytes": 12810,
+      "sha256": "7aff7a5535aa219eaa026a2aa7760a7a63ac455b03c9ecdc002d31956f1ff15e"
+    },
+    {
+      "path": "metadata/carbon-hw500.acceptance.json",
+      "bytes": 12812,
+      "sha256": "21dcd4bf365bba44b60fba8482c8fd8d10d6068985f4e3a98b09a5b26677be03"
+    },
+    {
+      "path": "metadata/carbon-lossless.acceptance.json",
+      "bytes": 5318,
+      "sha256": "3580c028434386e92c44693af7752ea502799a97c0fc82c4360ba257ba9621bf"
+    },
+    {
+      "path": "metadata/carbon-sw500.acceptance.json",
+      "bytes": 11298,
+      "sha256": "d8452bac3d43e2a4514a6fae2a579f8653cfc25572317591c7ef2e395cf438e9"
+    },
+    {
+      "path": "metadata/carbon-viewer-before.json",
+      "bytes": 892,
+      "sha256": "bfa3214e2af7f2130a928d3b851a81f60a99d3ee748aaf4a99436e33ea325d15"
+    },
+    {
+      "path": "metadata/chezmoi-dirty-before.json",
+      "bytes": 2395,
+      "sha256": "27ef3c55644bee579519253d00bbab127f716becb93ffa84f4cd5768ad071d9a"
+    },
+    {
+      "path": "metadata/environment-curated.json",
+      "bytes": 994,
+      "sha256": "f0f97d6b691350675fa59da3dfd21245b6ba90daa4be318be6df1b910e916791"
+    },
+    {
+      "path": "metadata/final-cleanup-details.json",
+      "bytes": 3865,
+      "sha256": "a8fa7f6f61eaaac59d8e5dc19dcb84259d21e6733b7a4cc0eb44ec3585d1e3ac"
+    },
+    {
+      "path": "metadata/fleet-confirmation.json",
+      "bytes": 2957,
+      "sha256": "976906581b096113ab90b842760d676b08b84647ba4f9be3266a3437f68f504e"
+    },
+    {
+      "path": "metadata/fleet-final-verification.json",
+      "bytes": 3767,
+      "sha256": "17ffec9498457c1c6d60f8d7675cd69c558abcebc30ce4964b2d16910ae2ba45"
+    },
+    {
+      "path": "metadata/gtk-after-hide-clock.json",
+      "bytes": 2942,
+      "sha256": "8350f1e82b4d9cc97f772e0a9b97b9461ace5df744a461758873992077d8f1b2"
+    },
+    {
+      "path": "metadata/gtk-frameclock.json",
+      "bytes": 2846,
+      "sha256": "5f04eac312ac5cb597bcd1394e97cff842b4eec2bc8b650d1c6d943ea55141a3"
+    },
+    {
+      "path": "metadata/harness-runtime.json",
+      "bytes": 259,
+      "sha256": "fc82895183589511dbea9e6630ee78eb5245ccab43ec493f6ec5c8140188d44d"
+    },
+    {
+      "path": "metadata/measurement-harness-verification.json",
+      "bytes": 1141,
+      "sha256": "89b60f962f7d92ac827935efc2aaca10a0299d04e81a8cc88e1f127fdc5119b5"
+    },
+    {
+      "path": "metadata/netlab-prototype.json",
+      "bytes": 7839,
+      "sha256": "3c62925bbf84a30544a1670c7381264cea3ca88cbaae285bb2278cf3a3ad9b1b"
+    },
+    {
+      "path": "metadata/network-profile-calibration.json",
+      "bytes": 41487,
+      "sha256": "1308f30b0395343ff3b68373ac97fea8eac0e424b3d4606aa27d50b3090aa77f"
+    },
+    {
+      "path": "metadata/network-profile-calibration.stdout.json",
+      "bytes": 21473,
+      "sha256": "268ae1666b90dd648a22a78c21896f6fd0c972007d52a14bb1c124f62a4d91e4"
+    },
+    {
+      "path": "metadata/path-context.json",
+      "bytes": 372,
+      "sha256": "2f43acadbd91ea2afcfe72337ae9195eed3f8daf686d88547a86675bd0afc853"
+    },
+    {
+      "path": "metadata/pilot-starship-native-h264.image-metrics.json",
+      "bytes": 17856,
+      "sha256": "5323dd1fda1f68fe35a6158a55dbc4a7776e84155237cf05f0b2edf58731a67b"
+    },
+    {
+      "path": "metadata/pilot-starship-native-h264.result.json",
+      "bytes": 53807,
+      "sha256": "11eeeea071b8ceb1564d86e0f7d0a244d9aa725d491556270c89c02bd84ae421"
+    },
+    {
+      "path": "metadata/pilot-starship-native-h264.runner.json",
+      "bytes": 3219,
+      "sha256": "d19ebdd5a70a80a6d05e2f2df59066d8d0c6e2b9c2103cac803db3113b725100"
+    },
+    {
+      "path": "metadata/pilot3-starship-proxy-h264.image-metrics.json",
+      "bytes": 22656,
+      "sha256": "fc2135bf3b870ab6b228413bed80d2efe55dd5d7b78d048dc165d5a26f5ffc9b"
+    },
+    {
+      "path": "metadata/pilot3-starship-proxy-h264.result.json",
+      "bytes": 53068,
+      "sha256": "fb1f8c3f1f0e8fe5ae80ff307d40389c5cf637d34d0205aed585f5220e9192e0"
+    },
+    {
+      "path": "metadata/pilot4-starship-native-h264.image-metrics.json",
+      "bytes": 23023,
+      "sha256": "8994e6157102174432c5af5a78b4bc9662fc69506ea59e8dc3452d4473175218"
+    },
+    {
+      "path": "metadata/pilot4-starship-native-h264.result.json",
+      "bytes": 53376,
+      "sha256": "b46b806c48e9c232ef3054700b305690b15c9d0bf4fe9bd441a3e9b6cc7a2a37"
+    },
+    {
+      "path": "metadata/plan-carbon.json",
+      "bytes": 5590,
+      "sha256": "227c97168fceb112ab1a6672a345e8cddb9318951e1533f15708b47864bc7b3d"
+    },
+    {
+      "path": "metadata/plan-starship-v2.json",
+      "bytes": 5664,
+      "sha256": "32f8f722fd40195f4f1a31ee567a811cf8be735decf96919754acabc5acd3602"
+    },
+    {
+      "path": "metadata/plan-starship-v3.json",
+      "bytes": 5664,
+      "sha256": "14212b16b2fab5ad4d93ca6cae6f4d78343c2238c762f5813feeb218c08e55cf"
+    },
+    {
+      "path": "metadata/plan-starship-v4.json",
+      "bytes": 5664,
+      "sha256": "85e026d74c0a7fd4bc602dba3edd8a6f48838216f42f801603c753a3f8db942d"
+    },
+    {
+      "path": "metadata/plan-starship-v5.json",
+      "bytes": 5664,
+      "sha256": "db0634ae33776055e299dafaa1126183b6b5a2c7c0f24829ef203d3b8fbe9031"
+    },
+    {
+      "path": "metadata/plan-starship.json",
+      "bytes": 5664,
+      "sha256": "6d18b52b461b7c0ce32707ef62f9ecef653c731121b3729a9b5760f727c0558f"
+    },
+    {
+      "path": "metadata/progress.json",
+      "bytes": 3506,
+      "sha256": "7ed2b5762dfc24c040fedf590045e5ae111ad3ec57b9c6e66896c1d6b82dbdb9"
+    },
+    {
+      "path": "metadata/resume-pilot-plan.json",
+      "bytes": 267,
+      "sha256": "0a02574c6c40025e813dca1ad19915d6f3501c3c666bf6154431d52042d71ab5"
+    },
+    {
+      "path": "metadata/resumed-shaped-pilot-plan.json",
+      "bytes": 358,
+      "sha256": "bca9f326c82d0c4e94b5b7dcb6cbb86341ceb489a09125c38bdcb996543b950d"
+    },
+    {
+      "path": "metadata/resumption-context.json",
+      "bytes": 2354,
+      "sha256": "d041b23dd459eda47e25cfe1114111be51accfc7e275b3012afd4627511c8e2c"
+    },
+    {
+      "path": "metadata/snap-before.json",
+      "bytes": 10210,
+      "sha256": "e1cfe9d114a3fafdee8e557a74e50452d37b58b451b6924bd180a69f6a1c4496"
+    },
+    {
+      "path": "metadata/snap-display.json",
+      "bytes": 225,
+      "sha256": "a935deeff7323c52642460af212a66117cc413d53de4f410413cb542fc8a9ef8"
+    },
+    {
+      "path": "metadata/starship-analysis.json",
+      "bytes": 326362,
+      "sha256": "a6ddd96296d60b616795c3ef74fc7fe50e1b3e224227a2b6b6c23d629161f7f3"
+    },
+    {
+      "path": "metadata/starship-audit.json",
+      "bytes": 12455,
+      "sha256": "24c5da86a96dc3c587bf4ece0925c98feed69ccb4ea849004fe74522fba0a8f1"
+    },
+    {
+      "path": "metadata/starship-away-restored.json",
+      "bytes": 1789,
+      "sha256": "ae2b2ce8605aec0fb057cff57b6103bca9660884b27990f7e1be4fb0fcb91327"
+    },
+    {
+      "path": "metadata/starship-away-resume.json",
+      "bytes": 4376,
+      "sha256": "f730efb660a8762ef2b3fac218eaeb4f252489e2a9269ab49c760e556f039eb0"
+    },
+    {
+      "path": "metadata/starship-before.json",
+      "bytes": 505,
+      "sha256": "191b0c47761ff2b6fbb60032acacc9744f031014aa3b347d866bc9a1282ccf5c"
+    },
+    {
+      "path": "metadata/starship-calibration-inventory.json",
+      "bytes": 7439,
+      "sha256": "611d81542cbd88251da08d636607ba6581f425e6b3daf8af91ef2bc318ca9f2c"
+    },
+    {
+      "path": "metadata/starship-display-diagnostic.json",
+      "bytes": 8130,
+      "sha256": "f6742243ad51970e9528412225883acce256a3d762abd09b3c1b63cc8bc7f115"
+    },
+    {
+      "path": "metadata/starship-display.json",
+      "bytes": 116,
+      "sha256": "2d5e73bfb333e4e2fb806c8da2cc96c4465b13cb1ff511b1a1c1d39b37bd9a53"
+    },
+    {
+      "path": "metadata/starship-hw250.acceptance.json",
+      "bytes": 12852,
+      "sha256": "22c1ecbe6dc2b4860e0a0ed953a35924337825ea29c9c4cf88233a341ea7de37"
+    },
+    {
+      "path": "metadata/starship-hw500.acceptance.json",
+      "bytes": 12851,
+      "sha256": "55bc8e9633295b4963a6d0cda72dc6869b84645d5d9e12847cc21f23f3388a34"
+    },
+    {
+      "path": "metadata/starship-live-progress.json",
+      "bytes": 18339,
+      "sha256": "e88a5659a6226686c2cfe4a1ced5f92cfde2de0dac1978f896d7255fef70d65c"
+    },
+    {
+      "path": "metadata/starship-lossless.acceptance.json",
+      "bytes": 5347,
+      "sha256": "fbaba1deaa4b9dadbec1005ecb7c141090e8917362abfe1c704f24e74989fb60"
+    },
+    {
+      "path": "metadata/starship-power-on-probe.json",
+      "bytes": 3185,
+      "sha256": "9e795aa2a396a731bf75f87e72d0fa1e5f76c59a9bcec3da2b11709a0ff8ebfd"
+    },
+    {
+      "path": "metadata/starship-sw500.acceptance.json",
+      "bytes": 11323,
+      "sha256": "1ffdfc379d018efc5abb827730874c82dfe5cd8c27b968ba0aaad5dfa5b4fd76"
+    },
+    {
+      "path": "metadata/starship-swaync-hide-probe.json",
+      "bytes": 1040,
+      "sha256": "5f7e20b1f3da36c8f2c17de20d8da3ef1786301c460c95b9ed311a342bc847a4"
+    },
+    {
+      "path": "metadata/starship-v2-matrix.log",
+      "bytes": 1501,
+      "sha256": "b3f164393046a82379d782eb7196508b560a922b59e50d325ad199845f1b172c"
+    },
+    {
+      "path": "metadata/starship-v3-matrix.log",
+      "bytes": 721,
+      "sha256": "32581cc546766b9654e6558cb1e40d9d99c429829ccf669b37d8651800013ea8"
+    },
+    {
+      "path": "metadata/starship-v4-matrix-retry.log",
+      "bytes": 807,
+      "sha256": "cc8f0e0710f2f97c5780c2d17bbada2abc6d47ca016b1cebcae9af18dbaf4c43"
+    },
+    {
+      "path": "metadata/starship-v4-matrix.log",
+      "bytes": 245,
+      "sha256": "e7d4588abc009d88faf8455f798174be4a238a18b29ea154b7510d3a2e65debc"
+    },
+    {
+      "path": "metadata/starship-v5-matrix.log",
+      "bytes": 10243,
+      "sha256": "422d374ea2936526a3ec6ebb7166333c894ea69ed766b321014b8b58400a9b66"
+    },
+    {
+      "path": "metadata/starship-viewer-before.json",
+      "bytes": 3222,
+      "sha256": "689b128c2a4215315fc06afbcbf0d2186056dfeb4bdbdae8a64095cd0985fa03"
+    },
+    {
+      "path": "metadata/study-environment-start.json",
+      "bytes": 12473,
+      "sha256": "9a1b45201689997892f015c63708432334c4312bb3b6c7c10c40f402380f6cec"
+    },
+    {
+      "path": "raw/calibration-v5-starship-1793422511.image-metrics.json",
+      "bytes": 27963,
+      "sha256": "5d5f7b42a6ae3dce878c17903848d9462d880beb4952632c35f04dd2ef27a2a2"
+    },
+    {
+      "path": "raw/calibration-v5-starship-1793422511.result.json",
+      "bytes": 62485,
+      "sha256": "eaf45b71b56eb9a363125b1ea98826fb729ec0b2e13632f8ed806674ec892f79"
+    },
+    {
+      "path": "raw/calibration-v5-starship-1793422511.runner.json",
+      "bytes": 3305,
+      "sha256": "bf5cb462157ff8470ba5bffccca3dfb9634b7be2cdac63be57dfa1b6c186b611"
+    },
+    {
+      "path": "raw/calibration-v5-starship-1793422511.transport-metrics.jsonl",
+      "bytes": 67763,
+      "sha256": "0286ef896a657709b188418b9791182b911eea5afa22ad5f6ce214f040f30ccd"
+    },
+    {
+      "path": "raw/calibration-v5-starship-1793422511.waypipe.log",
+      "bytes": 1214,
+      "sha256": "ce0d57b712bbdeb0e6a14d26509db4a6c9762bf38762207531cafb76e54f7d1d"
+    },
+    {
+      "path": "raw/resume-starship-native-calibration-1793421095.image-metrics.json",
+      "bytes": 27904,
+      "sha256": "478e371f8f8801db47c048d69d030abbfb741706746aec6ff75bb36cb52322ac"
+    },
+    {
+      "path": "raw/resume-starship-native-calibration-1793421095.result.json",
+      "bytes": 59918,
+      "sha256": "211aaadb9a09f2885a96ddefece272ba1a8cf5410f2b76f0f7c14b78cb1a2250"
+    },
+    {
+      "path": "raw/resume-starship-native-calibration-1793421095.runner.json",
+      "bytes": 3264,
+      "sha256": "9e5afdbf02e4ed0254cb8a3cd6df5f8ea132ead9b510eb7e75c5646b52ce1a39"
+    },
+    {
+      "path": "raw/resume-starship-native-calibration-1793421095.transport-metrics.jsonl",
+      "bytes": 65669,
+      "sha256": "612bd885d1baa23285c17be7147e7e36ef856c60981076a7ad2cec80f1b7a2eb"
+    },
+    {
+      "path": "raw/resumed-cap-lossless-1793421285.image-metrics.json",
+      "bytes": 25111,
+      "sha256": "41af4a903e0a1efe47ef8732dfe9d00c46b60a54f2f705eb709424bb5bf80e55"
+    },
+    {
+      "path": "raw/resumed-cap-lossless-1793421285.result.json",
+      "bytes": 46629,
+      "sha256": "f77baf10a6f4dc8dcc20550dc88dbdee65891c4087883bb22f920ee3645b9455"
+    },
+    {
+      "path": "raw/resumed-cap-lossless-1793421285.runner.json",
+      "bytes": 3832,
+      "sha256": "20467f125a29aff7a17182c059b9121060ac880cdacfbe17052d278f1eb93205"
+    },
+    {
+      "path": "raw/resumed-cap-lossless-1793421285.transport-metrics.jsonl",
+      "bytes": 85362,
+      "sha256": "5c1bf5986912e4c6deb6195da25e8db4ddee0e85b63c1938df56f3ed7e9aa810"
+    },
+    {
+      "path": "raw/resumed-proxy-h264-1793421285.image-metrics.json",
+      "bytes": 28087,
+      "sha256": "10c5b2f2349daea751f7b771e5facf7a90272bfaf3c2410f75c2999b9a5cb47b"
+    },
+    {
+      "path": "raw/resumed-proxy-h264-1793421285.result.json",
+      "bytes": 62700,
+      "sha256": "8d4e54b8fdb340ab36fbad9a61cb0eb8a0fab7eb56d40ea60ba87b7722524294"
+    },
+    {
+      "path": "raw/resumed-proxy-h264-1793421285.runner.json",
+      "bytes": 3230,
+      "sha256": "8df0bc5c714fe6425509bc7d31a83163f510756c68572d2b7fc7307b207280d7"
+    },
+    {
+      "path": "raw/resumed-proxy-h264-1793421285.transport-metrics.jsonl",
+      "bytes": 84483,
+      "sha256": "16f773d281559ab7331e4607182c29fbddb93b572bc84a5310778d0e21a21375"
+    },
+    {
+      "path": "raw/study-starship-network-cleanup.json",
+      "bytes": 134596,
+      "sha256": "cfa0ba87ce4b3b2f893b5fb507ab59e9ac235a241e161117c405d6c1511c5227"
+    },
+    {
+      "path": "raw/study-v2-starship-delay-h264-r1.image-metrics.json",
+      "bytes": 74049,
+      "sha256": "4aa4b17fe4b857ef96b722967ee081ce7fad239250227881574af1f3064235a8"
+    },
+    {
+      "path": "raw/study-v2-starship-delay-h264-r1.result.json",
+      "bytes": 31728,
+      "sha256": "ca8d97bf6be73d14686d34e560ee0048aad2b38bdcb0ffe4a8e89239734d7874"
+    },
+    {
+      "path": "raw/study-v2-starship-delay-h264-r1.runner.json",
+      "bytes": 3926,
+      "sha256": "08b61920bd77df3585083aae6ccfd6a8f904983e1cd37645179fdb1ffe304e33"
+    },
+    {
+      "path": "raw/study-v2-starship-delay-h264-r1.transport-metrics.jsonl",
+      "bytes": 230458,
+      "sha256": "4d6f4f73be6ab3a635f2f42f5d7950fc61837198c8caf6becd0e94f84732736e"
+    },
+    {
+      "path": "raw/study-v2-starship-delay-h264-r1.waypipe.log",
+      "bytes": 905,
+      "sha256": "635f8bde5f6e85467aa51e333e66bc9d469753bb4927ac5adbdd133959d62cae"
+    },
+    {
+      "path": "raw/study-v2-starship-native-h264-r1.image-metrics.json",
+      "bytes": 168512,
+      "sha256": "227a3c5c582e37d9b424b60c282f2c74a8adea4a353dc2dd43ce3309405ac585"
+    },
+    {
+      "path": "raw/study-v2-starship-native-h264-r1.result.json",
+      "bytes": 84393,
+      "sha256": "40b2f71ade1102484d29f4e76533dc12ea23b2a22cf97393f10adec59b269327"
+    },
+    {
+      "path": "raw/study-v2-starship-native-h264-r1.runner.json",
+      "bytes": 3236,
+      "sha256": "c0142a842a356e28a5d2fd87ee5c3383dab7352900d9ad1a4e03df12e222224b"
+    },
+    {
+      "path": "raw/study-v2-starship-native-h264-r1.transport-metrics.jsonl",
+      "bytes": 389393,
+      "sha256": "a224936f4bee23ce02a600bad2aea65ab0327c69bf2746cbad9ece93a7d3e9c7"
+    },
+    {
+      "path": "raw/study-v2-starship-native-h264-r1.waypipe.log",
+      "bytes": 846,
+      "sha256": "1a577beea00135e3f8ef27e6070d3830eb4b9d60334af9d581bd57ec000c8688"
+    },
+    {
+      "path": "raw/study-v2-starship-native-lossless-r1.image-metrics.json",
+      "bytes": 169182,
+      "sha256": "99df53e39234ccfea64e080246f015bd67bca6359a36c421beed3e083a1b84b1"
+    },
+    {
+      "path": "raw/study-v2-starship-native-lossless-r1.result.json",
+      "bytes": 75893,
+      "sha256": "ae20b062c3b1f11cf818bf5c927e45b1f5a0092c8b933380f653a40af77dca5a"
+    },
+    {
+      "path": "raw/study-v2-starship-native-lossless-r1.runner.json",
+      "bytes": 3250,
+      "sha256": "8038db11d267b2d1cbbad5e59d75684bfb1f2a5f87cb7db317872be4c7f132bf"
+    },
+    {
+      "path": "raw/study-v2-starship-native-lossless-r1.transport-metrics.jsonl",
+      "bytes": 383383,
+      "sha256": "2d14e1bd865bb83352e860b50356831d2f7688ac04d25512ddfaae8028c9f9ef"
+    },
+    {
+      "path": "raw/study-v2-starship-native-lossless-r1.waypipe.log",
+      "bytes": 383,
+      "sha256": "6b977c509648a7e8fd1833c3722c081d163d75c3855e5402735ccdbb0f4cf9bb"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-h264-r1.image-metrics.json",
+      "bytes": 167816,
+      "sha256": "8274b02ffd94d7f8e0f6c8bfae3f07f6270260eec1c1367d798bec68f3ddfe8b"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-h264-r1.result.json",
+      "bytes": 82706,
+      "sha256": "55557260247297e4f9a515a9d8ea327fd1f3e0532d8a25f34a02ecdad8e9d6de"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-h264-r1.runner.json",
+      "bytes": 3296,
+      "sha256": "f9df341f7f50a982ccfac53e5fc8083904dced3d87bc8bd579e233e0b69e638d"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-h264-r1.transport-metrics.jsonl",
+      "bytes": 472801,
+      "sha256": "83f1ae11a7d729f4fd80ed3df711fe5ba2de42d6332b330a628b4b64b8514000"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-h264-r1.waypipe.log",
+      "bytes": 1141,
+      "sha256": "27b5d4ec08097db3661b411dd87b14a126bb19a800cd2c2193e012317569cea3"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-lossless-r1.image-metrics.json",
+      "bytes": 169274,
+      "sha256": "d0bce9a9cea2f2ecd002214659308a836b66a44d38a11fb1cf6c207c5ab27025"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-lossless-r1.result.json",
+      "bytes": 75622,
+      "sha256": "1aa74636b5de14e9248b624c1fb2fc51c16ec9a49e61ffe14c2a6cd145348d3f"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-lossless-r1.runner.json",
+      "bytes": 3277,
+      "sha256": "c0044c35646c0921450a3e5ec79355b306ad7b03b635734774825c50e8d6b4c6"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-lossless-r1.transport-metrics.jsonl",
+      "bytes": 473136,
+      "sha256": "b98b265ea3be5700538b658412e8948824b205f066afe1b415f08574b2904b7f"
+    },
+    {
+      "path": "raw/study-v2-starship-proxy-lossless-r1.waypipe.log",
+      "bytes": 383,
+      "sha256": "9224c03bf5405289e9305d2b863271a4e62f9bd5d974e6a9cfbe70e60260f508"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.image-metrics.json",
+      "bytes": 153344,
+      "sha256": "06b96054377d2719f2b0b3ae8a8ae18caf6e448af24c010e928ff3d988034d69"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-1.png",
+      "bytes": 1226,
+      "sha256": "8872227168c70014e0a67820897732e66f6f264cf4963a10dd4a83a54179958e"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-1.ppm.gz",
+      "bytes": 1738,
+      "sha256": "2c1c1176c16c8218947551636b8917e01b621a515b1fbaf61b3073dd4c3ef8ac"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-10.png",
+      "bytes": 2491,
+      "sha256": "f6ca47485f0d6d3d1deac924d158704b1bb4ac8f8275883f30f566ad86a858e6"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-10.ppm.gz",
+      "bytes": 2675,
+      "sha256": "2928115228fe54185c56b5cf74a9e0c0ac3cda488772899d4653680c63a44c28"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-2.png",
+      "bytes": 1226,
+      "sha256": "8872227168c70014e0a67820897732e66f6f264cf4963a10dd4a83a54179958e"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-2.ppm.gz",
+      "bytes": 1738,
+      "sha256": "2c1c1176c16c8218947551636b8917e01b621a515b1fbaf61b3073dd4c3ef8ac"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-3.ppm.gz",
+      "bytes": 1738,
+      "sha256": "2c1c1176c16c8218947551636b8917e01b621a515b1fbaf61b3073dd4c3ef8ac"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-4.ppm.gz",
+      "bytes": 2110,
+      "sha256": "ca111a73cbeb7d76778197714e7894cbc4eb262951c9f9c8cd0ddd85c8b4c22a"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-5.ppm.gz",
+      "bytes": 2110,
+      "sha256": "ca111a73cbeb7d76778197714e7894cbc4eb262951c9f9c8cd0ddd85c8b4c22a"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-6.ppm.gz",
+      "bytes": 2110,
+      "sha256": "ca111a73cbeb7d76778197714e7894cbc4eb262951c9f9c8cd0ddd85c8b4c22a"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-7.ppm.gz",
+      "bytes": 2458,
+      "sha256": "570e9a7e0bf796ca2daa327c2299cb64fd219dfd45db219092912365c12104dd"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-8.ppm.gz",
+      "bytes": 2458,
+      "sha256": "570e9a7e0bf796ca2daa327c2299cb64fd219dfd45db219092912365c12104dd"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.rejected-9.ppm.gz",
+      "bytes": 2675,
+      "sha256": "2928115228fe54185c56b5cf74a9e0c0ac3cda488772899d4653680c63a44c28"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.result.json",
+      "bytes": 31819,
+      "sha256": "ba81192968d9e5c549496064bbfcf4d003f5ed11afb35f7e981d5cf8563f1ae1"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.runner.json",
+      "bytes": 3958,
+      "sha256": "e606f4efae372818ae175ef46d93e3908878440ffe4c647b6c48c2d85e2f43a4"
+    },
+    {
+      "path": "raw/study-v3-starship-delay-h264-r1.transport-metrics.jsonl",
+      "bytes": 469347,
+      "sha256": "f469661d2bbd0d5d13ffebb57ccfc11b80285305b8540ec2c28c4e200e78f8c3"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.image-metrics.json",
+      "bytes": 163502,
+      "sha256": "5a594776f3828f155e29cd48ab74df6bb97ddef8a59c14472825389e92a06390"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-1.png",
+      "bytes": 1354,
+      "sha256": "0f8e931747cc805c47164cc67d76173f3cfd27e2e869d9ae2f74ca676c5ffa5d"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-1.ppm",
+      "bytes": 345615,
+      "sha256": "afab85382c088f5a18d62e8a114f660512c023748e2953ac29d073730a6e37fd"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-1.ppm.gz",
+      "bytes": 1847,
+      "sha256": "7d03b8a0ddc4cc409c6b4d48e606e0e57e070fba35c29f057a1387b9a5ca6cf1"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-10.png",
+      "bytes": 1488,
+      "sha256": "19ec8ba43ec0ef8afc7043de856b10ad9e89281e21b245aab3ef3c4ebc56fcd5"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-10.ppm",
+      "bytes": 345615,
+      "sha256": "0250ddcd245f63084399b41da2275f625f9d734d2ff3fc257147fbb92e1fcf15"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-10.ppm.gz",
+      "bytes": 1994,
+      "sha256": "358c31f7a7e39c22af8aa523ce4a248c5d8e61795b657d1474fab6097e8b4ec5"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-2.png",
+      "bytes": 1354,
+      "sha256": "0f8e931747cc805c47164cc67d76173f3cfd27e2e869d9ae2f74ca676c5ffa5d"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-2.ppm",
+      "bytes": 345615,
+      "sha256": "afab85382c088f5a18d62e8a114f660512c023748e2953ac29d073730a6e37fd"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-2.ppm.gz",
+      "bytes": 1847,
+      "sha256": "7d03b8a0ddc4cc409c6b4d48e606e0e57e070fba35c29f057a1387b9a5ca6cf1"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-3.png",
+      "bytes": 1432,
+      "sha256": "8652eaef1a7d70c27bc9529aac6e0de16152cade20ce2ba123e58f610e48e070"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-3.ppm",
+      "bytes": 345615,
+      "sha256": "945479964fccc108eb570055e04ee7cac6fc243e1353e500d6a1d174df850ea9"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-3.ppm.gz",
+      "bytes": 1868,
+      "sha256": "9bbbcadb4d37fe4be10a52b8b78dfd3ff9e8891a17ac25218df88a95e2f8254d"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-4.ppm.gz",
+      "bytes": 1868,
+      "sha256": "9bbbcadb4d37fe4be10a52b8b78dfd3ff9e8891a17ac25218df88a95e2f8254d"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-5.ppm.gz",
+      "bytes": 1823,
+      "sha256": "af1c6222d97f9b88f9dc6cee183fd9cfb1eb6d09d4927838a72a21b228a083b3"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-6.ppm.gz",
+      "bytes": 1823,
+      "sha256": "af1c6222d97f9b88f9dc6cee183fd9cfb1eb6d09d4927838a72a21b228a083b3"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-7.ppm.gz",
+      "bytes": 1890,
+      "sha256": "ada3e1401dfd410f10a3b52df9ad4057f67e911c301dca062ce33b59b8118e87"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-8.ppm.gz",
+      "bytes": 1890,
+      "sha256": "ada3e1401dfd410f10a3b52df9ad4057f67e911c301dca062ce33b59b8118e87"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.rejected-9.ppm.gz",
+      "bytes": 1994,
+      "sha256": "358c31f7a7e39c22af8aa523ce4a248c5d8e61795b657d1474fab6097e8b4ec5"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.result.json",
+      "bytes": 31867,
+      "sha256": "af83d5bf0c310cfd0fbb78a1b19e36b0ae552d581e6584a01750c75041b3f8e6"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.runner.json",
+      "bytes": 4023,
+      "sha256": "4f627991fca5ccce3f7b33af1d3e648ce61acff3582af8a6b15dfa483c01b49d"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.transport-metrics.jsonl",
+      "bytes": 470336,
+      "sha256": "0618236fe05e5511b9e6750740657dee612a1940ce092d5c3e5d7eed69007b0b"
+    },
+    {
+      "path": "raw/study-v4-starship-delay-h264-r1.waypipe.log",
+      "bytes": 846,
+      "sha256": "8cbc3eef4a3ead831276ece669ff57e82f46f44d5e5bd876283b617366603785"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.image-metrics.json",
+      "bytes": 165102,
+      "sha256": "087704b6a0f9f8d28484039cbfa6ead0ea4f1527f5551c4697c9c863f03b67bf"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-1.ppm.gz",
+      "bytes": 2018,
+      "sha256": "bd2a957a1abbd2789932f5decfeb9a2678f95bde686ab4a826babb2fb0d7668b"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-10.ppm.gz",
+      "bytes": 2197,
+      "sha256": "1cf682850b84f7e5485db4694376853217eeba8b8f88e20719b6c5bf4585849e"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-2.ppm.gz",
+      "bytes": 2018,
+      "sha256": "bd2a957a1abbd2789932f5decfeb9a2678f95bde686ab4a826babb2fb0d7668b"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-3.ppm.gz",
+      "bytes": 1935,
+      "sha256": "87373d01727bc1a795204395a6a6d5b90eae0106694035e29234108313f598fc"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-4.ppm.gz",
+      "bytes": 1933,
+      "sha256": "00fdd1bde3ebcaefd443dd027c667850738b20d8a8988ff198d6752ac49d4caa"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-5.ppm.gz",
+      "bytes": 2044,
+      "sha256": "261de3690df2a65ff72fd27dfb9d2ec1775510cfff662192a00d8cf0ae2afeab"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-6.ppm.gz",
+      "bytes": 2044,
+      "sha256": "261de3690df2a65ff72fd27dfb9d2ec1775510cfff662192a00d8cf0ae2afeab"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-7.ppm.gz",
+      "bytes": 2044,
+      "sha256": "261de3690df2a65ff72fd27dfb9d2ec1775510cfff662192a00d8cf0ae2afeab"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-8.ppm.gz",
+      "bytes": 2044,
+      "sha256": "261de3690df2a65ff72fd27dfb9d2ec1775510cfff662192a00d8cf0ae2afeab"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.rejected-9.ppm.gz",
+      "bytes": 2197,
+      "sha256": "1cf682850b84f7e5485db4694376853217eeba8b8f88e20719b6c5bf4585849e"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.result.json",
+      "bytes": 71668,
+      "sha256": "7e3cf854a29e33289c14beac89f2d5b485ab964748a0d7f24d2fe6951428c933"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.runner.json",
+      "bytes": 3884,
+      "sha256": "62e5f619c2f8e8aba5d4a3cea5be0fdd54be0edab76a55b4f1d3a84b7075c08e"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.transport-metrics.jsonl",
+      "bytes": 490668,
+      "sha256": "9d8df489126c36db9cd9ada376a5ce7593aef2cc9c37bedeaa9a47f35de24234"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r1.waypipe.log",
+      "bytes": 846,
+      "sha256": "190dc144c97f9f88ff2c9f17a9fd42e18c9a76bc3bc15407d614440f23da974d"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.image-metrics.json",
+      "bytes": 169662,
+      "sha256": "88486da09f69d1d494a1300cc071a5ee8c7630aedf55cd52d0cbe365372461de"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-1.ppm.gz",
+      "bytes": 1969,
+      "sha256": "2d07cc2f85249a8dedbaabf44f296efe1deb13b3c6ae3d143797d8a3afe2bc0a"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-10.ppm.gz",
+      "bytes": 2248,
+      "sha256": "1d7222b6e196ca19c665a99ab72e1f92b5c28314d2946e94017e03506e436216"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-2.ppm.gz",
+      "bytes": 1969,
+      "sha256": "2d07cc2f85249a8dedbaabf44f296efe1deb13b3c6ae3d143797d8a3afe2bc0a"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-3.ppm.gz",
+      "bytes": 2458,
+      "sha256": "dae446c53a5f5c14f22e473c603cc67087cbac3873a7c4f355c6486f3fc375ef"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-4.ppm.gz",
+      "bytes": 1979,
+      "sha256": "42de11ddcb2f4744ed1ab407efcc1c68c9b71cc9f360ad28e9e802c0e48643a1"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-5.ppm.gz",
+      "bytes": 1979,
+      "sha256": "42de11ddcb2f4744ed1ab407efcc1c68c9b71cc9f360ad28e9e802c0e48643a1"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-6.ppm.gz",
+      "bytes": 1979,
+      "sha256": "42de11ddcb2f4744ed1ab407efcc1c68c9b71cc9f360ad28e9e802c0e48643a1"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-7.ppm.gz",
+      "bytes": 1854,
+      "sha256": "fdb68e7ba7ae690b103eb302c4fe22bcdd16b2407a29754feedfc4fdad0566fe"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-8.ppm.gz",
+      "bytes": 2395,
+      "sha256": "643258e80ab2c6d4daf47da98f5dbbd0f88eebba7c3a66b327389e0de47e1004"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.rejected-9.ppm.gz",
+      "bytes": 2395,
+      "sha256": "643258e80ab2c6d4daf47da98f5dbbd0f88eebba7c3a66b327389e0de47e1004"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.result.json",
+      "bytes": 71440,
+      "sha256": "93bbb72f8548e127c995b7532a313754244e9c0ec92d8c9af622c663000c7de0"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.runner.json",
+      "bytes": 3897,
+      "sha256": "4d81fcbedf9d79e706ad4f480d4d498fed1cda4d6016ca2b3bd6a9efaa7a0a94"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.transport-metrics.jsonl",
+      "bytes": 484979,
+      "sha256": "dcd022e3b314bfca3e167d8013bffe8cf56e7d9669c5983e17e7a75afcf1c9f7"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r2.waypipe.log",
+      "bytes": 846,
+      "sha256": "57ddd22e19406953890fb8d20efb5e76b05389d6b42cf1f48d77264b3146402d"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.image-metrics.json",
+      "bytes": 167410,
+      "sha256": "7139fee0d9762453ec5553ab8e9fccecfa9dcd57ac7cbebdfc634f709f609840"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-1.ppm.gz",
+      "bytes": 3128,
+      "sha256": "28bd81b24c63839f4178d4b62cf205a16c7577dff6e28bc44e427e3115b6d2f8"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-10.ppm.gz",
+      "bytes": 2344,
+      "sha256": "4a854fd5bbabf0da6b17265ad232ecfc56ae86615b8fdd75571f9a1106909b88"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-2.ppm.gz",
+      "bytes": 3128,
+      "sha256": "28bd81b24c63839f4178d4b62cf205a16c7577dff6e28bc44e427e3115b6d2f8"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-3.ppm.gz",
+      "bytes": 3128,
+      "sha256": "28bd81b24c63839f4178d4b62cf205a16c7577dff6e28bc44e427e3115b6d2f8"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-4.ppm.gz",
+      "bytes": 3410,
+      "sha256": "7a25d6f521fe78561c7611428c763618a99b1df0fe2236e53df0fd6363af7256"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-5.ppm.gz",
+      "bytes": 3195,
+      "sha256": "abae79aadb698353e9037d43e7ffc26f16a381bf89623d9363f67a06c79f4586"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-6.ppm.gz",
+      "bytes": 3234,
+      "sha256": "d4843d1c9278b6e13b375cece4f48d833c817accf9fc3f81bb8a7b1c617c6fca"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-7.ppm.gz",
+      "bytes": 2559,
+      "sha256": "75192bf5788d87e07373006d1bb876bcf18594284b430b9e97941efb5da1bbc6"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-8.ppm.gz",
+      "bytes": 2778,
+      "sha256": "8dfe1eba5d64a4a6408ac7046ac7c3e78e30f54c8ea2d2920a4327374742a869"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.rejected-9.ppm.gz",
+      "bytes": 2778,
+      "sha256": "8dfe1eba5d64a4a6408ac7046ac7c3e78e30f54c8ea2d2920a4327374742a869"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.result.json",
+      "bytes": 72584,
+      "sha256": "9fe92a75ae979ad3e993385c8554830bbb3179057d975175de3a18fc0339466d"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.runner.json",
+      "bytes": 3901,
+      "sha256": "3ff5ec867f726991d16ab617b97d47dc5f221a368916c5104c249697df0e252d"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.transport-metrics.jsonl",
+      "bytes": 491016,
+      "sha256": "5d785fe62e2fe12c7347cb2ac001e86ef307cca14c49684fe22aacd16efe165e"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-h264-r3.waypipe.log",
+      "bytes": 669,
+      "sha256": "25e74a7bb7d28a20eff7d0ba944088417f3b7f003ff44ccfa328e0eb2a104943"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r1.image-metrics.json",
+      "bytes": 154399,
+      "sha256": "0361dcbfce2a88bc12773f33a9fdcea9c4cee2b1bd74462e1ac5619f16196802"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r1.result.json",
+      "bytes": 57825,
+      "sha256": "e28fe516a68ea79caf8db33cf1d1a68a6218710bd2cc26772824b0ebf4ff69fd"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r1.runner.json",
+      "bytes": 3895,
+      "sha256": "7446b6f8f604db2e274a8ff8102909560dde37a05701f117a5eb2b0b6801b815"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r1.transport-metrics.jsonl",
+      "bytes": 483389,
+      "sha256": "e61c06558ec4d6b7262a964aa5a8cd4663bea75c0362378e47ccb1d7dd22bb68"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r1.waypipe.log",
+      "bytes": 383,
+      "sha256": "2fa22b188d8b9b79da5e8622d304302a1c3df58830b9712f254e95728e370cfe"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r2.image-metrics.json",
+      "bytes": 153426,
+      "sha256": "ea8fec2e7cbb67bd5086971a9d3fe5850ea7b2a13ddb693e119450b731782e98"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r2.result.json",
+      "bytes": 57482,
+      "sha256": "b39fb9f839b18d3afd5ed4a16f0d25a74c6de00adf8d7cf693405d1bc1586733"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r2.runner.json",
+      "bytes": 3905,
+      "sha256": "26e03945bbf081131d86f6715f80187e7b7db936a11024a27f4a85d2c0d68b3a"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r2.transport-metrics.jsonl",
+      "bytes": 485253,
+      "sha256": "edb565598abd7100fb3693bbb1d194cd1f110439f4ec5a842d2ee06669c619ba"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r2.waypipe.log",
+      "bytes": 383,
+      "sha256": "962df382e33b4bd11ee1e1ecaf6e4514de1631e7d04cb8df161952bcabf3cda2"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r3.image-metrics.json",
+      "bytes": 138989,
+      "sha256": "ea0fdf6a74328b24fb551adacfd11627b95d1882d3345e907922bf14cc649666"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r3.result.json",
+      "bytes": 45766,
+      "sha256": "f222a0b7507adb3542cb8f05da797cc24f91a240d0ddd21ca77f101900cc09a7"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r3.runner.json",
+      "bytes": 3907,
+      "sha256": "c1a13b7e53cc1df280ca4918202e0c82effd9506df324d507dee594d48a18b93"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r3.transport-metrics.jsonl",
+      "bytes": 472394,
+      "sha256": "2c2af11e4f88f744defb9e05e9aa011077828774ce6ed2d01b2f38c333d7bad7"
+    },
+    {
+      "path": "raw/study-v5-starship-cap-lossless-r3.waypipe.log",
+      "bytes": 383,
+      "sha256": "c483e3926864985bf1e343f8f0f6ce14d189aab3eb72df06dd4ae8fbf5cf382a"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.image-metrics.json",
+      "bytes": 159518,
+      "sha256": "222acf76afb3cde85479a8847ff73722fb54981587fbea227b948084198aae10"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-1.ppm.gz",
+      "bytes": 1927,
+      "sha256": "6664cbace2da5073cb536181fcbf48df6c217cec96b2504158d5e6ff9637d52a"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-10.ppm.gz",
+      "bytes": 2137,
+      "sha256": "6eb86a11cb063c7c5ca368451294a72da9bcef8543ee450e20d3cb4085f192b4"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-2.ppm.gz",
+      "bytes": 1927,
+      "sha256": "6664cbace2da5073cb536181fcbf48df6c217cec96b2504158d5e6ff9637d52a"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-3.ppm.gz",
+      "bytes": 1889,
+      "sha256": "1e6b924f0b9149b2dca81368cc68150fcba4f6703cbfe356bca12b449f69a0b0"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-4.ppm.gz",
+      "bytes": 1889,
+      "sha256": "1e6b924f0b9149b2dca81368cc68150fcba4f6703cbfe356bca12b449f69a0b0"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-5.ppm.gz",
+      "bytes": 1897,
+      "sha256": "3032919b799ae999c795fd7417e636628828eac782dc5fc0c1fe4cc476bdf3c0"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-6.ppm.gz",
+      "bytes": 1897,
+      "sha256": "3032919b799ae999c795fd7417e636628828eac782dc5fc0c1fe4cc476bdf3c0"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-7.ppm.gz",
+      "bytes": 1886,
+      "sha256": "39c90325dd585794cdd372b627ece7356a2bbf5efd7edfc48b39c01a8ed58f63"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-8.ppm.gz",
+      "bytes": 1886,
+      "sha256": "39c90325dd585794cdd372b627ece7356a2bbf5efd7edfc48b39c01a8ed58f63"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.rejected-9.ppm.gz",
+      "bytes": 2137,
+      "sha256": "6eb86a11cb063c7c5ca368451294a72da9bcef8543ee450e20d3cb4085f192b4"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.result.json",
+      "bytes": 70662,
+      "sha256": "3f3b138608cdaea06a6e1e0feb3b6b52f6fe67eb62c0d0a035d5003174f5c410"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.runner.json",
+      "bytes": 3756,
+      "sha256": "70306c399deed271f1cc13130efdac14db4cc3c377ed731d4bac3ff40fbe295d"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.transport-metrics.jsonl",
+      "bytes": 480902,
+      "sha256": "eb4a7e9778df5ba6658bfe1ee0f48098598148540d0d8e197ed169e5749cd16e"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r1.waypipe.log",
+      "bytes": 846,
+      "sha256": "5fdccaecef2905078dd97327958c4d5a1863c76bf1399987962669437a206656"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r2.image-metrics.json",
+      "bytes": 160427,
+      "sha256": "d28b84c4113379c5d56d170fd5496e22b10fa3b05dbcf81b1724d44441902266"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r2.result.json",
+      "bytes": 67094,
+      "sha256": "65bd6165b72235603fdacda7daf5e647fb52acef621fe41352d48ca4dc9f7930"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r2.runner.json",
+      "bytes": 4328,
+      "sha256": "4744f8d48315857238e8b0ff164976c1307e00358da55c3cd5e2404d064c5af4"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r2.transport-metrics.jsonl",
+      "bytes": 488814,
+      "sha256": "d29e2c2b3ff4565148621e59788152131a14bde38598d9f98083afef2917606f"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r2.waypipe.log",
+      "bytes": 905,
+      "sha256": "601ed9c77677febc159b20dab8f4286a466586d074e6fa22e762bd24e9e25e94"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r3.image-metrics.json",
+      "bytes": 152207,
+      "sha256": "7065d791e2f56d4be9e7a39f3ffbaee147a77e341b554388ab0f2eded1bc6f2e"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r3.result.json",
+      "bytes": 66894,
+      "sha256": "b3e7cc2406900736371eac11fc37e528fc12c4452e7535bb1b5c9c8e406fc06f"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r3.runner.json",
+      "bytes": 4328,
+      "sha256": "e55624120fc86f52b441feee6ece29fc69027d538ab4ccdb52bd5b8db74022a3"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r3.transport-metrics.jsonl",
+      "bytes": 487683,
+      "sha256": "95273e84c266f17cef717f362e4d4fb701591406955b7e1acb24d2219efe44e7"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-h264-r3.waypipe.log",
+      "bytes": 1082,
+      "sha256": "a8919f5f6feedd796f819126b45e9e35bede8ca020732afb47bff76dc9c886b2"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r1.image-metrics.json",
+      "bytes": 157097,
+      "sha256": "7d9f13d26a213a9aa38f4f3bb157bfeb269cbdee3f31cd028b3fc9d74219b1a2"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r1.result.json",
+      "bytes": 60817,
+      "sha256": "6f5a495414b954d4f21ef59bd7c46377483612036e0af0e4276857ca02b03967"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r1.runner.json",
+      "bytes": 3806,
+      "sha256": "04a6b7ecd515498a02a22ca072d500ea842901e798fc43279b0e067f26ae0cf0"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r1.transport-metrics.jsonl",
+      "bytes": 471683,
+      "sha256": "31c0f193d66ec5f8c7059b8e6f8d7aaf24f05227c4171935148d03f02d8fb1e6"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r1.waypipe.log",
+      "bytes": 442,
+      "sha256": "3c8dd5c4c1658c1a20a71af62a3090341cf597c464b72c4c7516b73a5f510487"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r2.image-metrics.json",
+      "bytes": 148792,
+      "sha256": "5c1ba23cd614ee1ee6ef9da77a80d073e585b7cb658215c15d51c866a9e3130a"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r2.result.json",
+      "bytes": 53535,
+      "sha256": "3f0938f1ea53758ff5cce092e1e986dcedd393dd26b2270e0deeacdcf6379893"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r2.runner.json",
+      "bytes": 4341,
+      "sha256": "d4c2c25bbaccba33d2f4711a197afaaa1c649ebe78d01cf5ca00418d40fd2860"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r2.transport-metrics.jsonl",
+      "bytes": 481301,
+      "sha256": "c823ab6d5267fdba923c0a5b0f8b1edeb41c5cfc483e3baaed0415545e937dba"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r2.waypipe.log",
+      "bytes": 442,
+      "sha256": "3225e91f01ac75f498a4a27501b7589a88521a6eef48ebd413cb80f10d5f4995"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r3.image-metrics.json",
+      "bytes": 149200,
+      "sha256": "ae309e05be2e7f76113e5130bedd9bcc6b395e664c2793b11439b14d50502f3a"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r3.result.json",
+      "bytes": 53832,
+      "sha256": "c7321472b906cbcda35676c7f997412cde1baeb71048fdd0e32d8e0e37d3d2c2"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r3.runner.json",
+      "bytes": 4339,
+      "sha256": "fc19b3b8d58719d175079c656929d4a03042aed2d7e74f9d7b2ded7076ee1fa5"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r3.transport-metrics.jsonl",
+      "bytes": 479738,
+      "sha256": "65a87ed24edd2f28a0f278328f79d2c15cbe0f3266a55353de687725d8923375"
+    },
+    {
+      "path": "raw/study-v5-starship-delay-lossless-r3.waypipe.log",
+      "bytes": 442,
+      "sha256": "2b353fae89515a9f2aaf0a183231dea84901fb37d8b594e5c39bc5853c664043"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r1.image-metrics.json",
+      "bytes": 151335,
+      "sha256": "ce949ec243b6cae8c8a4c3851581393a8e8e8329d09ee08cdf496752d7c6a8b4"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r1.result.json",
+      "bytes": 66207,
+      "sha256": "49681b056d49aae803550266454dcd1d76f1aba2ed7198a293598d8454f6405a"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r1.runner.json",
+      "bytes": 4330,
+      "sha256": "9c11a2dd57e91ef330e14da88d633e9fb41db4ae90e7202a23a23b64ba3da0cd"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r1.transport-metrics.jsonl",
+      "bytes": 492092,
+      "sha256": "44a494115f7cc32164f1bffad2b35a9ca6cb8c590eb4fadca06dc7ca337cae77"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r1.waypipe.log",
+      "bytes": 1141,
+      "sha256": "94a3bcb46e8a4f67ed2dd4e3dd569069f36d8855a4b9c477dccac1c5a1b3fe41"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.image-metrics.json",
+      "bytes": 151416,
+      "sha256": "4a1b15389c02fad9bc2a3922b58fdaa9e0df5ef308d73d243b87b07f5f44119c"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-1.ppm.gz",
+      "bytes": 2271,
+      "sha256": "6150309deed342928c9416e4135879b45352222ef5533d724dbac0c64bdf1192"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-10.ppm.gz",
+      "bytes": 2724,
+      "sha256": "dc46b1b67b9dc431fe7dbb3066a866e9c1ab9830a2834bdf1f41fce37a6d0a5a"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-2.ppm.gz",
+      "bytes": 2271,
+      "sha256": "6150309deed342928c9416e4135879b45352222ef5533d724dbac0c64bdf1192"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-3.ppm.gz",
+      "bytes": 2271,
+      "sha256": "6150309deed342928c9416e4135879b45352222ef5533d724dbac0c64bdf1192"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-4.ppm.gz",
+      "bytes": 2207,
+      "sha256": "f547e24c8fd70d39b4101b35636877bd207d39dc7f873c539e4143e00da546f4"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-5.ppm.gz",
+      "bytes": 2207,
+      "sha256": "f547e24c8fd70d39b4101b35636877bd207d39dc7f873c539e4143e00da546f4"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-6.ppm.gz",
+      "bytes": 2207,
+      "sha256": "f547e24c8fd70d39b4101b35636877bd207d39dc7f873c539e4143e00da546f4"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-7.ppm.gz",
+      "bytes": 2711,
+      "sha256": "63e3c084b920484459f1b4981588153c293383097081ddd77265dd66760076f2"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-8.ppm.gz",
+      "bytes": 2711,
+      "sha256": "63e3c084b920484459f1b4981588153c293383097081ddd77265dd66760076f2"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.rejected-9.ppm.gz",
+      "bytes": 2711,
+      "sha256": "63e3c084b920484459f1b4981588153c293383097081ddd77265dd66760076f2"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.result.json",
+      "bytes": 66634,
+      "sha256": "27008d48d229556ec3229570426de24617d0c1ba239fcdacfc65b31757edee01"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.runner.json",
+      "bytes": 4340,
+      "sha256": "8a9fc3d0b2b6942d6b08d4e9604414ca5b2a0bf7a9b470d848f84487a17a8960"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.transport-metrics.jsonl",
+      "bytes": 488283,
+      "sha256": "6247de9b5a37d92d404bfd063a62f7655f8bb190ce8285ed5311133239553397"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r2.waypipe.log",
+      "bytes": 964,
+      "sha256": "dfce4008b7a98cac7be14ea9befabe3c64ca9982fac8d900dd416f099f27a933"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r3.image-metrics.json",
+      "bytes": 158317,
+      "sha256": "3acec7aca5d5652c613342b28f5f558e79ea93591f2f7e737f4523bdcd1473ca"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r3.result.json",
+      "bytes": 66308,
+      "sha256": "1b1643154091bc9ec4ef2597a82c64598ae3f412425ec1b89dce480fafcdec44"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r3.runner.json",
+      "bytes": 4344,
+      "sha256": "2572efcddb700eaf177b46b14fe6c332a69a4a39e80a01166e8ebfb7fbcb5997"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r3.transport-metrics.jsonl",
+      "bytes": 489374,
+      "sha256": "833c4f407b1d3ec1aa64f871ec4466b656f980301c71538f1c97276344afc169"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-h264-r3.waypipe.log",
+      "bytes": 1200,
+      "sha256": "82510f6e239c826454352ad5af414a584e109a308c6552b327226c9a321b24ff"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r1.image-metrics.json",
+      "bytes": 148448,
+      "sha256": "be378ff8c3a58fd47d12af8cf96e6c6cb281b9798cf0ffdf0e4224bba57f1066"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r1.result.json",
+      "bytes": 53319,
+      "sha256": "d34fd037fb021dfb177e4f67d5ba0a338d97c20752c5f12793002ed4d24298f1"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r1.runner.json",
+      "bytes": 4340,
+      "sha256": "d82b0d9d7a6fb88680b5dd485bc68c12b4482bbbb7a1e31b47222a935c5ea698"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r1.transport-metrics.jsonl",
+      "bytes": 482103,
+      "sha256": "c1d127fa7703f9f37078ae94e1f05d5575e566fb5ca0bb5de62a2112a488d06c"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r1.waypipe.log",
+      "bytes": 442,
+      "sha256": "ba1abc149c5a14a53d9ae7182575a237b912574e8608d47d8765c578e2035103"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r2.image-metrics.json",
+      "bytes": 148363,
+      "sha256": "d10e791fe80d8308d35e5cf534a7d382e70af33d55a07891f82f37d9bc16fd76"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r2.result.json",
+      "bytes": 53150,
+      "sha256": "8f84f1000bda1c0c2162e301fe77b273f4961ce649923c8238147ddcc53d678f"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r2.runner.json",
+      "bytes": 4346,
+      "sha256": "d46c3794df18ec2f78cf4701bfc575d56e63fa17592c2c92d38fbb34db48112e"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r2.transport-metrics.jsonl",
+      "bytes": 480144,
+      "sha256": "075424f2323af7690e9e085ba5afe055a8a1b5ad4906c2b1f53951a9aa6e420b"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r2.waypipe.log",
+      "bytes": 501,
+      "sha256": "4795cb96df3cea753b4d2200c6bbffa8a25129d36a96e33853e6115cd7f1f998"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r3.image-metrics.json",
+      "bytes": 148360,
+      "sha256": "67456b363570e9fa009778ddc6ff1e58f8269f38b296116540943359cfa5b840"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r3.result.json",
+      "bytes": 53311,
+      "sha256": "e8c6408eb56629f6edb25773ba391f91f2abf28ea6a87a8bcf0b04d33e9ae054"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r3.runner.json",
+      "bytes": 4356,
+      "sha256": "73f30af8e0e2514361b0f2f6db778c58e17d91323dc9e14600408c310c287693"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r3.transport-metrics.jsonl",
+      "bytes": 480753,
+      "sha256": "aea94af542a1b7a0a0e9e9925e6b4242ac3d2ec3d767a78f348e83c238811797"
+    },
+    {
+      "path": "raw/study-v5-starship-jitter-lossless-r3.waypipe.log",
+      "bytes": 501,
+      "sha256": "92f87d5252ab453b7896168583acd9a641263da1a272b449b0fa4bf6beaad86c"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r1.image-metrics.json",
+      "bytes": 149488,
+      "sha256": "fb903563819937c26ddce63188b271c94d45635f6fc36de5d25ae1ba27cf9614"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r1.result.json",
+      "bytes": 66052,
+      "sha256": "c4c9e9749a7b18ea0130fa1e2469bf7d08cb79bcbee7ea1bd31586c3eb937576"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r1.runner.json",
+      "bytes": 4097,
+      "sha256": "e24916b5faa5afbccdff607d3273fb101e2084a951828eb49043a644c9571fca"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r1.transport-metrics.jsonl",
+      "bytes": 500037,
+      "sha256": "3865c6f33336a5fc62c9dcf3096f28cda246749e43f2c8fceb0e141cdd4e6677"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r1.waypipe.log",
+      "bytes": 846,
+      "sha256": "9e70dd463dd614c23c06a6ca7ae0c3579ccac4691d9383883413e55364de7f10"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r2.image-metrics.json",
+      "bytes": 158186,
+      "sha256": "36a11be8c37f37cd86e64ab216ed05ce44753ea7f54b529a6337d1e6489f50aa"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r2.result.json",
+      "bytes": 65249,
+      "sha256": "0ba37fe35723750c4c3e72a02a935133658c48b08cac430648ff8a2f393952a7"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r2.runner.json",
+      "bytes": 4676,
+      "sha256": "d8b327cf0dba0c6bca2ab0f6f841b213e430d055ee39cdbe6d3ed282259c0954"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r2.transport-metrics.jsonl",
+      "bytes": 510985,
+      "sha256": "76bd5386f14ef1c7f2f265330a1e51f9a929b937bf93babbb86e5ec33a21f778"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r2.waypipe.log",
+      "bytes": 905,
+      "sha256": "cefb03a537cdca3c5f95912c7d8e046b7bec82d30f63b5170d42ae7fb83ff59b"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r3.image-metrics.json",
+      "bytes": 153656,
+      "sha256": "cc5da368bf0cad8aa293bb4ae15b6a56ba68d6aab2a23ef4624b7d9ebae4ac19"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r3.result.json",
+      "bytes": 64447,
+      "sha256": "7c4e85fe85f4e5f37dbc9cae948173c73f8faf7d96a9fc7d6f16991aa1c6e486"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r3.runner.json",
+      "bytes": 4680,
+      "sha256": "27c0b3a11c96e3aa16bc7e617c59eeb86f40355837f7a85aa3e0ce7fb7404978"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r3.transport-metrics.jsonl",
+      "bytes": 509504,
+      "sha256": "389b4008430c6246f9a558bd70acea467034b19acf4d88c1f8ea6b040131a238"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-h264-r3.waypipe.log",
+      "bytes": 905,
+      "sha256": "a1f4696eaaf128315fc26a3fca6cf91824395744f6c2dea1a481b79d745ec33e"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r1.image-metrics.json",
+      "bytes": 147302,
+      "sha256": "ecce1ad3bc69f5932817ecb131bb78661a26dbb97ca8cdab57fcde94abb81cf3"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r1.result.json",
+      "bytes": 52067,
+      "sha256": "07f3dab7d01db5ce8ee915ff67765f00f5b4683a653320bba3e80c0b79d1d73d"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r1.runner.json",
+      "bytes": 4101,
+      "sha256": "a3fdd651dd281beb481866212a475be00549a6ebacbafff9d616f6a46e6c755c"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r1.transport-metrics.jsonl",
+      "bytes": 492703,
+      "sha256": "b50f47852b2d565de4bae9a07dcb37358ef851b2d1af6cd882ed793a77fe1218"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r1.waypipe.log",
+      "bytes": 442,
+      "sha256": "2237a01bd41f883d4bb792f7433a6adc80b57b70f630030ec6672883e0715241"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r2.image-metrics.json",
+      "bytes": 146292,
+      "sha256": "9bef24e255a5eb9d0ffaccadb95936df74850c6ae08c8629a470749913e0bfbe"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r2.result.json",
+      "bytes": 51230,
+      "sha256": "663b84e1091bacbd5539bf5ea9b47c45111d7546db3667e0903a7d13071cbbda"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r2.runner.json",
+      "bytes": 4686,
+      "sha256": "0d7b897bfcf0054dd493562b9c3ef5a72ef7ffd451385df6c689887f4ab8d4f8"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r2.transport-metrics.jsonl",
+      "bytes": 500714,
+      "sha256": "7e3ccb8f23d4c902f8ce5e8234cde2f0b79d739a67278dd394676b563af765c6"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r2.waypipe.log",
+      "bytes": 442,
+      "sha256": "1abeb7ebe062ef04d0ea726c6b0c40e7177e655fb190cd8a41fb26343dc81e6a"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r3.image-metrics.json",
+      "bytes": 145878,
+      "sha256": "e4ee3231a56da52b30b2bbfb6ff0c55e1951ad421eb03927c20af5c4f3592d90"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r3.result.json",
+      "bytes": 51107,
+      "sha256": "ffc9a8cda1809cae03c8d73e9f24264f95a35b771feb2639a2e5d860e285c9e8"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r3.runner.json",
+      "bytes": 4690,
+      "sha256": "1e413f8c312ccd849f397eb0ce3cfd65d10de223e89010fc0679b8ae3181c302"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r3.transport-metrics.jsonl",
+      "bytes": 502299,
+      "sha256": "c666bf0914e9a1108f51985990eecf935535af5dbe650b51306eb57a7a27841d"
+    },
+    {
+      "path": "raw/study-v5-starship-loss-lossless-r3.waypipe.log",
+      "bytes": 442,
+      "sha256": "5e6300e76c102b9ae6c195d7c3441fce9daea94a640867574d107e7cd97ab166"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r1.image-metrics.json",
+      "bytes": 171561,
+      "sha256": "16af9b4ede58581e0899ac224a9a37f8dd0ebf6fef3d42912506baea8d82f112"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r1.result.json",
+      "bytes": 90504,
+      "sha256": "4a69a97eb691e2282f1ef02d05e935720e70558d521fadf8f6f0c3b94a34b686"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r1.runner.json",
+      "bytes": 3894,
+      "sha256": "69bf5c980311d5185b8a1401a0cac47fe397ee20b4e331dd04bdb3f9b24e99bc"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r1.transport-metrics.jsonl",
+      "bytes": 379175,
+      "sha256": "89c5f08e9516f5da5ba7e5f1e7c54519330159ab6c67f345ba6f9e6d83f430d1"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r1.waypipe.log",
+      "bytes": 905,
+      "sha256": "41cbe396e41c783372312034c8e3c3be30b6761fc6676fed27dce9d9c4d63789"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r2.image-metrics.json",
+      "bytes": 170370,
+      "sha256": "5647416ea010b7ec1b12545d018b3ebe328b76da7e977cda3905b51ca04b019e"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r2.result.json",
+      "bytes": 82699,
+      "sha256": "d9a9770ae076a0c4e46617278390a6e633705b5868f21ef1a4a6af9d476aab9a"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r2.runner.json",
+      "bytes": 3897,
+      "sha256": "bdb79d75920605c7d54206d6c285716d571769f279cc4cf726c85e1e4d6c2643"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r2.transport-metrics.jsonl",
+      "bytes": 388909,
+      "sha256": "e76a1b34b3af1ddf84c91af946c60e21c75724b9671b0bad7e0500224f4c6df6"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r2.waypipe.log",
+      "bytes": 846,
+      "sha256": "4ffe885c494e753764a467b183319abeb88e1924da5c95d66710ae0e571cd10c"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r3.image-metrics.json",
+      "bytes": 167881,
+      "sha256": "cb8e7c23379edf606424d0250d1c40890a04838947b1978096355a939360920f"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r3.result.json",
+      "bytes": 84436,
+      "sha256": "2126485be459b8aee281f16ccd3a515f7deb48698755666e806d39e333502c81"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r3.runner.json",
+      "bytes": 3907,
+      "sha256": "3d4e704257378e3fab36a90715f0919e85e6c077ad3a9814943681f385d6cc4d"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r3.transport-metrics.jsonl",
+      "bytes": 388528,
+      "sha256": "9adfac02129b63468059838648347400a3df85253d047ad4e609d69ada160172"
+    },
+    {
+      "path": "raw/study-v5-starship-native-h264-r3.waypipe.log",
+      "bytes": 1023,
+      "sha256": "59197dbb6aaf19f17bef61f7885d89a49382ed14f3e514cef8cce7cc58241ad1"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r1.image-metrics.json",
+      "bytes": 167293,
+      "sha256": "df074eaa29eb2a3e8f94f710780cc011ab37465cb7245cebb13862b6e44a0f2d"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r1.result.json",
+      "bytes": 76975,
+      "sha256": "4796116cf799252c4d860d14c821acaa62af472c0d92cca9d3e135d3a479e7fb"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r1.runner.json",
+      "bytes": 3904,
+      "sha256": "b28652fcb02a95e7012ac57557142c44d73c23546a747d42a68f79795902654a"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r1.transport-metrics.jsonl",
+      "bytes": 383142,
+      "sha256": "d31012764a8af57a9ddb408094e339795103d4d035b1ff80d26391fc37cd38f2"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r1.waypipe.log",
+      "bytes": 383,
+      "sha256": "949fbf77c5f88dfebfb249f8a4da1480a7eb155183b7f5138274d5a809aa9957"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r2.image-metrics.json",
+      "bytes": 169716,
+      "sha256": "5e450202b2a3353524619829e1a7a482da153008390c809bf31b2dc72ca85363"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r2.result.json",
+      "bytes": 82582,
+      "sha256": "4dd728da189c9ad342e2fadb68a8fcc641a861b031ef3b16a1f2a679b0be53fc"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r2.runner.json",
+      "bytes": 3908,
+      "sha256": "d10cb700985b850cab7e5a46990d188ea333bd0e64360a19310133bed7c8dd03"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r2.transport-metrics.jsonl",
+      "bytes": 383935,
+      "sha256": "0f36bc93b66d147bec1c6ec6b77eeabb53c6b2a001954eed6f2c79bdf86c24a4"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r2.waypipe.log",
+      "bytes": 383,
+      "sha256": "f3d303486bdd935ca58a6040928d332e123e0e51b3f59e80bbe9eb28031a57ba"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r3.image-metrics.json",
+      "bytes": 168824,
+      "sha256": "7932c0b0adf9af6acd7035cf059561ba9c83e4e263923508d3c46bfbaf477a5c"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r3.result.json",
+      "bytes": 76242,
+      "sha256": "d8532869950fac9ae8116c13ea8cf8f0f3dba51e2df2f48c065a2544bb21b763"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r3.runner.json",
+      "bytes": 3918,
+      "sha256": "ea79489e3624a96d337403d73e7ea826b2b5e6f99be81fdc1cdd1dcd1fabff9c"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r3.transport-metrics.jsonl",
+      "bytes": 383041,
+      "sha256": "53958e63442257390e95b482cd91b996f217ab81b4eee4d319423ac156ae7fd5"
+    },
+    {
+      "path": "raw/study-v5-starship-native-lossless-r3.waypipe.log",
+      "bytes": 324,
+      "sha256": "9d724dda2d166dccd12be2928d7d8838898506eb219acbc93defe0869176861d"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.image-metrics.json",
+      "bytes": 179830,
+      "sha256": "241b79bbb0c8521efd7842842c49874bb159055e6980310de4fe8f38f5ecce77"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-1.ppm.gz",
+      "bytes": 2263,
+      "sha256": "da29e8c837edae736c7e2aa90b6d3d4ea988d5f73db7c061ea1af1ae0126bfd3"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-10.ppm.gz",
+      "bytes": 3028,
+      "sha256": "a059bfb475b5f680cb0c207796c0dd22858989702232db678caf0ce6599f2736"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-2.ppm.gz",
+      "bytes": 2263,
+      "sha256": "da29e8c837edae736c7e2aa90b6d3d4ea988d5f73db7c061ea1af1ae0126bfd3"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-3.ppm.gz",
+      "bytes": 2991,
+      "sha256": "72f25e2c84ee579e74403796ec135a89c50d192f10b7eadf5b8260fc899b0dc8"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-4.ppm.gz",
+      "bytes": 2991,
+      "sha256": "72f25e2c84ee579e74403796ec135a89c50d192f10b7eadf5b8260fc899b0dc8"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-5.ppm.gz",
+      "bytes": 3085,
+      "sha256": "7a7f06fabe8b531f9e3f848f3511d49d67bb7549454b8c954aa3fdae47eb7df7"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-6.ppm.gz",
+      "bytes": 3085,
+      "sha256": "7a7f06fabe8b531f9e3f848f3511d49d67bb7549454b8c954aa3fdae47eb7df7"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-7.ppm.gz",
+      "bytes": 3265,
+      "sha256": "619493f022868dad22463f2da2a91bea76807c9c17474bec2e3fecd1b9959daf"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-8.ppm.gz",
+      "bytes": 3265,
+      "sha256": "619493f022868dad22463f2da2a91bea76807c9c17474bec2e3fecd1b9959daf"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.rejected-9.ppm.gz",
+      "bytes": 3028,
+      "sha256": "a059bfb475b5f680cb0c207796c0dd22858989702232db678caf0ce6599f2736"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.result.json",
+      "bytes": 72131,
+      "sha256": "5e1c9a97a878e9fbd9f7ed5398366c18881634b03f5308107650cb3a8ea1e426"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.runner.json",
+      "bytes": 3895,
+      "sha256": "e9d244fc480c6deae5538d3ab361451bc41de1da4ad2e5888402ea70d9a17441"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.transport-metrics.jsonl",
+      "bytes": 491581,
+      "sha256": "c1513751d06d9992327a433d9bdb76ebcb4841c133d0990dadbdfc267569eaaa"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r1.waypipe.log",
+      "bytes": 905,
+      "sha256": "79e90813192bad11c56c06c9b3f1f399744a83b2787843c61354bb80d1aa5a24"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.image-metrics.json",
+      "bytes": 167092,
+      "sha256": "0c682a57805a6a0c57416373ca6f1896b844591a0fdbdd28de4261933275acd5"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-1.ppm.gz",
+      "bytes": 1895,
+      "sha256": "31ce89c8bec830e966c70d159e5a298b2b3772c4d80995ca7afdae5d4b588e83"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-10.ppm.gz",
+      "bytes": 2009,
+      "sha256": "2fafe7aeac26ea8d52a290ed3790c83473cee81dbaa11c5468f8c9d03577a62a"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-2.ppm.gz",
+      "bytes": 1895,
+      "sha256": "31ce89c8bec830e966c70d159e5a298b2b3772c4d80995ca7afdae5d4b588e83"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-3.ppm.gz",
+      "bytes": 1895,
+      "sha256": "31ce89c8bec830e966c70d159e5a298b2b3772c4d80995ca7afdae5d4b588e83"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-4.ppm.gz",
+      "bytes": 1895,
+      "sha256": "31ce89c8bec830e966c70d159e5a298b2b3772c4d80995ca7afdae5d4b588e83"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-5.ppm.gz",
+      "bytes": 2254,
+      "sha256": "951d86edd4e635c5c0a1ba2b698b6e0b51d62f45bba9305f0c638e5eccb5ab14"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-6.ppm.gz",
+      "bytes": 1909,
+      "sha256": "d3b448c6645b767c7f7f6cecf236dc6ccb716bb5277cf29b40f129767a4b1720"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-7.ppm.gz",
+      "bytes": 1909,
+      "sha256": "d3b448c6645b767c7f7f6cecf236dc6ccb716bb5277cf29b40f129767a4b1720"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-8.ppm.gz",
+      "bytes": 2317,
+      "sha256": "8501b64eaca864a29f8d9443132766b43f7a79f6141d799f9837d68095d0a51e"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.rejected-9.ppm.gz",
+      "bytes": 2009,
+      "sha256": "2fafe7aeac26ea8d52a290ed3790c83473cee81dbaa11c5468f8c9d03577a62a"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.result.json",
+      "bytes": 71975,
+      "sha256": "593c580e0a10027623fd63f64062f43440d5075522ad680a5a1efd7ed6593cef"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.runner.json",
+      "bytes": 3895,
+      "sha256": "22c722ccac2876252c2e7e58af5c05cb12c0eb2ef71c01b95f1c852b063c7485"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.transport-metrics.jsonl",
+      "bytes": 493295,
+      "sha256": "93236f00b65593a4cb905f04232dcb0279bd4d1d29ddb05d3c032bc19e021c8c"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r2.waypipe.log",
+      "bytes": 846,
+      "sha256": "30ddbbda5cc96500a9128195dac5874bf314c4eb00306689bc3ef840576fe43d"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.image-metrics.json",
+      "bytes": 164150,
+      "sha256": "77845111d29208cdd2ee43908f1f624c237087db54b3532bf657de2664d25d13"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-1.ppm.gz",
+      "bytes": 3931,
+      "sha256": "98dc3997787f98eb01be420956f8279fc1f85cce6f1f694f867fd7b6cbebaa1b"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-10.ppm.gz",
+      "bytes": 2496,
+      "sha256": "a7cf7e6bd7cef0fed50305352c20074d0aa0972120bedf997905ba742c84f94b"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-2.ppm.gz",
+      "bytes": 2555,
+      "sha256": "505dd22cda04ede4fa2caeba819400d68b82292d93a8eb9c06d6491ec7ad5277"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-3.ppm.gz",
+      "bytes": 3156,
+      "sha256": "d0e45ee5f9bd86a689d47d93c41cb358096718e78c0926dd05aa00738b40736f"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-4.ppm.gz",
+      "bytes": 2718,
+      "sha256": "66f7b7ff5d050d4b5e2eab86f585618039cc8197c6e8ec2a6eee2b8099385ef7"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-5.ppm.gz",
+      "bytes": 2678,
+      "sha256": "bf168bbb404007f77facece7a5d09e25dc9952ec0784c73d99a0a452994d6794"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-6.ppm.gz",
+      "bytes": 2678,
+      "sha256": "bf168bbb404007f77facece7a5d09e25dc9952ec0784c73d99a0a452994d6794"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-7.ppm.gz",
+      "bytes": 2678,
+      "sha256": "bf168bbb404007f77facece7a5d09e25dc9952ec0784c73d99a0a452994d6794"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-8.ppm.gz",
+      "bytes": 2648,
+      "sha256": "284304af6f090a7815f90447f728a776a45c025ba721ab6f19412afc4a4144e0"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.rejected-9.ppm.gz",
+      "bytes": 2496,
+      "sha256": "a7cf7e6bd7cef0fed50305352c20074d0aa0972120bedf997905ba742c84f94b"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.result.json",
+      "bytes": 71925,
+      "sha256": "6208078237a9f8ac061a6a912ab3257f402389e6f664380035ed4797692d76e0"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.runner.json",
+      "bytes": 3906,
+      "sha256": "f9557980d1400f05959e589f73ed576cb0de8ec16631eabee6d32d950b877e24"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.transport-metrics.jsonl",
+      "bytes": 483418,
+      "sha256": "b37ff5d394805c8585941a5e23900351e4d10ce04840aed6f500192850d392dd"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-h264-r3.waypipe.log",
+      "bytes": 964,
+      "sha256": "6a6e6ddfd8ebf4ca99fa8747c32e80c1099f9b3f2c970cc9bfc4536928fa30c1"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r1.image-metrics.json",
+      "bytes": 154023,
+      "sha256": "e4b7d44f5d8bc5d596c99d11cc1ff9b2170152df8e5778d6bef501e21c71ca6c"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r1.result.json",
+      "bytes": 57925,
+      "sha256": "3a4b70c3e9fed4e3ad6a1178de04d8ef5490127f34508939632f9e4023db9622"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r1.runner.json",
+      "bytes": 3901,
+      "sha256": "fbc79a31ddedfdf1d231481e49616dcd11851e7ed3b8d161e955add82e27554a"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r1.transport-metrics.jsonl",
+      "bytes": 483370,
+      "sha256": "d51fb52c57629c9a11744d85c143cab318717fa92cd9bab6e65205d2249cfcd1"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r1.waypipe.log",
+      "bytes": 383,
+      "sha256": "20f0a0b69214bfba8a3ec80dc69f68bf5d06737439c4ce6975dd4f181a8dfeae"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r2.image-metrics.json",
+      "bytes": 154170,
+      "sha256": "d9dd37644aa511a42bb377c8ea7e86825a9ff4a277059b547a4673eadf76eafa"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r2.result.json",
+      "bytes": 58025,
+      "sha256": "e3c6a4d3f41326db012a23c3cdd0645df4a5760112544d100e4f48179879a189"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r2.runner.json",
+      "bytes": 3903,
+      "sha256": "2d072b22aa72af0f3d88cd6ebc3b1c3f0dc08c39dd373fe145690b9dc8034410"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r2.transport-metrics.jsonl",
+      "bytes": 483967,
+      "sha256": "7eca945127fbad79f2472f07fcb99f6c9777a6f2428daab94067764c47d90883"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r2.waypipe.log",
+      "bytes": 383,
+      "sha256": "ab470c0f3c91ee03c321d52388e92e8a83fbabf0ad27b36f49dbfa752d800e6d"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r3.image-metrics.json",
+      "bytes": 154181,
+      "sha256": "f76972474b534a0a4113979be9c2dd9d2aca5a059db1406acc44cb5dc5723ae4"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r3.result.json",
+      "bytes": 58377,
+      "sha256": "d3982f89ca98dc9a12eb60996008a3bcc204583be9b59b20e64fe12558837c27"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r3.runner.json",
+      "bytes": 3915,
+      "sha256": "38f393563b30fe160eaba644efa1844aa3222ed98fffc6f66287c7b117e3f58c"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r3.transport-metrics.jsonl",
+      "bytes": 484712,
+      "sha256": "14e915d673900718ce4bacc447e5da4287dd1d2d86db9c8061ad780a63635b60"
+    },
+    {
+      "path": "raw/study-v5-starship-proxy-lossless-r3.waypipe.log",
+      "bytes": 442,
+      "sha256": "f9b668ebc1722c2ac4d253c35ca69a5b493842eb09d56cdcda78dfc519940bd4"
+    }
+  ]
+}
