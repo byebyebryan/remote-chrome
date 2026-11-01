@@ -54,8 +54,13 @@ every five seconds for at most one hour. It does not repeatedly SSH, send probes
 or control Chrome. It cannot be combined with `--at`, `--export` or `--probe`.
 
 For an interactive dashboard, use `remote-chrome monitor [HOST]` on the display
-host. It shows latest interval values, five-minute summaries and small history
-graphs. Local observations refresh about once a second. Only the selected
+host. It shows latest interval values, five-minute summaries and history charts
+that grow with terminal height. Each chart uses one unit throughout its axis.
+A fixed attention line preserves warning visibility while scrolling. `?` opens
+scrollable help with measurement limits, current warnings and the exact full
+status command; `?` or Escape closes help without stopping observation.
+`LIVE` means an updating display, not full session health. Forwarding and
+notifications remain in `status`. Local observations refresh about once a second. Only the selected
 dashboard checks observed codec use every 30 seconds, with a separate check age;
 the session overview adds no SSH checks. No extra collector or active network
 probe is started. Space freezes display while recording continues, Tab opens

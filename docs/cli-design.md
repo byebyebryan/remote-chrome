@@ -156,16 +156,26 @@ The dashboard keeps identity and recorded transport at the top. Observed codec
 use has its own check age. Traffic and TCP Delay appear together, followed by
 Delivery and Recording; full-width history charts follow. Each chart has at
 least three plot rows and shares the remaining terminal height equally with
-the other charts. Below 76 columns the
-groups stack. Arrows, `j`/`k`, Page Up/Down and Home scroll a short terminal;
+the other charts. Below 76 columns the groups stack. The session overview wraps
+each entry at the terminal width and keeps the selected entry in view.
+Arrows, `j`/`k`, Page Up/Down and Home scroll a short terminal;
 the title and controls remain visible. Resize recomputes the layout.
+
+A fixed attention line below the title stays visible while scrolling. Partial
+reads, recording failures, stale samples, unavailable codec checks, inventory
+warnings and session changes are surfaced there. Multiple warnings show their
+count; their full text is retained at the top of the dashboard and in help.
+The healthy view labels its scope as `Network and recording`. `LIVE` means the
+display is updating, not that every session component passed a health check.
+Forwarding and notification checks remain in `status`.
 
 Illustrative layout (values are observations, not health thresholds):
 
 ```text
 remote-chrome / snap / LIVE
 remote-chrome-snap / attempt 5575e9d2
-Recorded transport: h264,hw,bpf=250000 / Display carbon
+Network and recording / ? help
+Transport: H.264 / hardware preferred / 250k bits/frame / Display carbon
 Codecs checked 8s ago: Decode hardware / Encode hardware
 
 TRAFFIC / latest interval + 5m      TCP DELAY / ACK progress
@@ -184,11 +194,11 @@ Unsent now       0 B               Gaps / 5m        1
 
 HISTORY / 5m / oldest -> now / blanks = no eligible observation
 RX+TX / 5s average
-2 MiB/s |              ##
+ 2 Mbps |              ##
         |              ##          ####
-1 MiB/s |       ####  ##          ####
+ 1 Mbps |       ####  ##          ####
         |   #########  ######   ########
-  0 B/s |.###########  ######...########
+ 0 Mbps |.###########  ######...########
          5m ago                      now
 
 RTT / ACK max per 5s
@@ -225,6 +235,13 @@ without interpolating or implying finer time resolution. Sub-bucket
 gaps remain represented by the coverage and gap fields; graphs do not assert
 continuous coverage.
 
+Each traffic chart chooses one rate unit from its maximum and uses it throughout
+the axis, including the midpoint and zero. The unit can change as the automatic
+scale changes. Independent metric rows retain their normal compact units.
+Recorded video policy uses readable labels, such as `H.264 / hardware preferred /
+250k bits/frame`; this target is bits per frame, not a constant bitrate. Observed
+hardware/software use stays separate. Exact parameters remain in verbose status.
+
 Local recording reads refresh about once a second; local tmux inventory every
 five seconds. Both run in bounded subprocesses so disk or tmux stalls cannot
 block input. Only the selected dashboard checks codec state, through the same
@@ -238,6 +255,12 @@ recording continues. Space resumes live display. Overview selection is disabled
 while frozen; Tab returns to the live session list. `q`, Escape, Ctrl-C, TERM
 and HUP restore the terminal and cancel only the monitor's observer process
 groups. Cursor state, echo and terminal attributes are restored after an error.
+`?` opens scrollable help with controls, measurement definitions and limits,
+current attention details, and a shell-quoted status command for the exact
+selected session. Help leaves observation running and preserves the dashboard's
+scroll and freeze state. `?` or Escape closes help; `q` still quits the monitor.
+While help is open, arrows, `j`/`k`, Page Up/Down and Home scroll help; other
+dashboard controls are inactive.
 Redirected streams and `TERM=dumb` receive a clear error and `status` alternative.
 Python's standard-library curses module is required; no third-party Python
 dependency is added. `--plain` uses ASCII graphs and no colors; `--color` and

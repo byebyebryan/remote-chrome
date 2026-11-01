@@ -96,7 +96,12 @@ select a local session with arrows or `j`/`k` and Enter. The dashboard shows
 latest interval traffic and queues, separately aged ACK-qualified RTT,
 five-minute summaries and history graphs. Space freezes display while recording
 continues, Tab opens the session list, and `q` quits. Resize and scrolling work
-in smaller terminals. Local readings refresh about once a second; observed
+in smaller terminals. Charts grow with terminal height and use one unit per
+axis. An attention line keeps recording and observation warnings visible while
+scrolling. `?` opens scrollable help with controls, measurement limits and an
+exact status command; `?` or Escape returns to the dashboard. Help leaves reads
+running. `LIVE` describes the updating display; use `status` for full checks,
+including forwarding and notifications. Local readings refresh about once a second; observed
 codec checks run separately every 30 seconds for the selected dashboard.
 No new collector or active network probe is started. `--session NAME` selects
 an exact custom session. Use `status` for redirected output.

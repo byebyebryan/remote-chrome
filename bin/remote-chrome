@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.10.1"
+VERSION="1.10.2"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -364,7 +364,7 @@ usage() {
     chrome_ui_section Everyday
     chrome_ui_row HOST 'Open a tunnel; repeat to restart its session'
     chrome_ui_row 'status [HOST]' 'Inspect sessions and five-minute network history'
-    chrome_ui_row 'monitor [HOST]' 'Live dashboard (q quit, Space freeze, Tab sessions)'
+    chrome_ui_row 'monitor [HOST]' 'Live dashboard (? help, q quit, Space freeze)'
     chrome_ui_row 'reset [HOST]' 'Restart the selected session (may lose in-page state)'
     chrome_ui_row 'stop [HOST]' 'Clean up one session, or all managed sessions'
     chrome_ui_section 'More commands'
@@ -11056,12 +11056,109 @@ def monitor_graph_columns(values, width):
     return bins
 
 
+def monitor_transport(value):
+    """Readable recorded policy; observed codec use is shown separately."""
+    if value == 'lossless':
+        return 'Lossless'
+    match = re.fullmatch(r'h264,(hw|sw),bpf=([1-9][0-9]{0,8})', value)
+    if not match:
+        return 'Unknown recorded transport: ' + monitor_clean(value)
+    mode, bits = match[1], int(match[2])
+    target = str(bits // 1000) + 'k' if bits % 1000 == 0 else f'{bits:,}'
+    policy = 'hardware preferred' if mode == 'hw' else 'software codecs'
+    return 'H.264 / ' + policy + ' / ' + target + ' bits/frame'
+
+
+def monitor_attention(session, data, remote, now_mono=None):
+    """Attention is observation state, never an inferred network health score."""
+    mono = time.monotonic() if now_mono is None else now_mono
+    if session is None:
+        return ['Session absent / waiting for the requested tunnel']
+    alerts = []
+    if not data:
+        alerts.append('Local observations pending')
+    else:
+        if data.get('partial'):
+            alerts.append('PARTIAL: ' + '; '.join(data['partial']))
+        if data.get('reason'):
+            alerts.append(data['reason'])
+        elif data.get('state') != 'active':
+            alerts.append('Recorder ' + data.get('state', 'unknown'))
+        age = data.get('age')
+        age = age + max(0, mono - data['mono']) if age is not None else None
+        if age is not None and age >= 8:
+            alerts.append(f'STALE sample / {age:.1f}s old')
+        elif not data.get('reason') and (age is None or age < 0):
+            alerts.append('Sample age unavailable')
+        elif data.get('latest') and not data['latest'].get('tcp', {}).get('available'):
+            alerts.append('TCP observations unavailable')
+    if remote and not remote['ok']:
+        alerts.append('Codec check unavailable: ' + remote['text'])
+    elif remote and remote.get('warning'):
+        alerts.append('Codec warning: ' + remote['warning'])
+    return [monitor_clean(text) for text in alerts]
+
+
+def monitor_banner(alerts, columns):
+    text = alerts[0] if alerts else 'Network and recording / ? help'
+    if len(alerts) > 1:
+        text = 'Attention (' + str(len(alerts)) + ') / ' + text
+    return text if len(text) <= columns else text[:max(0, columns - 3)] + '...'
+
+
+def monitor_help(session, columns, alerts=()):
+    """Scrollable help is a view only; it starts no checks or actions."""
+    lines = []
+    def add(text='', role='normal'):
+        for part in textwrap.wrap(monitor_clean(text), max(12, columns), break_long_words=True, break_on_hyphens=False) or ['']:
+            lines.append((part, role))
+    add('MONITOR HELP', 'title')
+    add('Network and recording dashboard. LIVE means the display is updating; it is not a full session health check.')
+    if alerts:
+        add()
+        add('CURRENT ATTENTION', 'title')
+        for alert in alerts:
+            add(alert, 'warn')
+    add()
+    add('KEYS', 'title')
+    for text in ('? / Escape    Close help (Escape quits when help is closed)',
+                 'q             Quit the monitor',
+                 'Space         Freeze/resume displayed values and ages; recording continues',
+                 'Tab           Switch dashboard and session overview',
+                 'Enter         Open the highlighted session',
+                 'arrows / j,k  Select a session or scroll',
+                 'Page Up/Down  Scroll one screen',
+                 'Home          Scroll back to the top'):
+        add(text)
+    add()
+    add('READINGS', 'title')
+    add('Traffic: selected local SSH socket, including forwarded channels. This measures data volume, not available capacity.')
+    add('Charts: five-minute history in 5s bins. Traffic uses an interval-weighted average; RTT and deviation use eligible maxima. Each chart has an independent automatic scale and one unit throughout its axis.')
+    add('RTT: TCP estimate with recent ACK progress, with a separate ACK age. TCP deviation is a variation proxy, not one-way jitter or frame/input latency.')
+    add('Blank bins have no eligible observations. A baseline bar can be a measured zero. Coverage and gaps disclose incomplete recording.')
+    add('Local readings refresh about once a second; codec checks every 30s for the selected dashboard. Help leaves observation running. No active network probes are added.')
+    add()
+    add('FULL SESSION CHECKS', 'title')
+    add('Status also checks forwarding and notifications. The monitor does not continuously check those components.')
+    command = ['remote-chrome', 'status']
+    if session and session['target'] != '-':
+        command += [session['target'], '--session', session['session']]
+    add(shlex.join(command), 'title')
+    add('Use --verbose for exact recorded transport parameters and detailed checks.', 'dim')
+    return lines
+
+
 def monitor_chart(values, columns, height, unicode=True, traffic=False):
     """Filled area chart with independent linear scale and explicit empty bins."""
     height = max(3, height)
     known = [v for v in (values or []) if type(v) in (int, float) and math.isfinite(v) and v >= 0]
     peak = max(known) if known else None
-    formatter = display_rate if traffic else display_metric
+    if traffic:
+        unit, scale = ('Mbps', 125000) if peak is not None and peak >= 12500 else \
+                      ('KiB/s', 1024) if peak is not None and peak >= 1024 else ('B/s', 1)
+        formatter = lambda value: display_metric(value, unit, scale)
+    else:
+        formatter = display_metric
     ticks = {0: formatter(peak), height // 2: formatter(peak / 2) if peak is not None else '',
              height - 1: formatter(0) if peak is not None else ''}
     axis = max(len(label) for label in ticks.values())
@@ -11099,8 +11196,10 @@ def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None, r
         add('Session absent / waiting for the requested tunnel', 'warn')
         add('Tab opens the session overview. No tunnel is launched by the monitor.')
         return lines
+    for alert in monitor_attention(session, data, remote, mono):
+        add(alert, 'warn')
     add(session['session'] + ' / attempt ' + session['attempt'][:8], 'dim')
-    add('Recorded transport: ' + session['transport'] + ' / Display ' + socket.gethostname(), 'dim')
+    add('Transport: ' + monitor_transport(session['transport']) + ' / Display ' + socket.gethostname(), 'dim')
     if session['transport'] == 'lossless':
         add('Codecs: not applicable / recorded lossless transport', 'dim')
     elif session['attempt'] == '-':
@@ -11112,7 +11211,6 @@ def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None, r
     else:
         add('Codecs: check pending (selected session only; refresh 30s)', 'dim')
     if not data:
-        add('Local observations pending', 'warn')
         return lines
     elapsed = max(0, mono - data['mono'])
     age = data.get('age')
@@ -11178,10 +11276,6 @@ def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None, r
     graph_start = len(lines)
     add('* TCP deviation is a variation proxy; RTT uses ACK progress.', 'dim')
     add('SSH socket traffic includes forwarding; these are not frame/input latency.', 'dim')
-    if data.get('reason'):
-        add(data['reason'], 'warn')
-    if data.get('partial'):
-        add('PARTIAL: ' + '; '.join(data['partial']), 'warn')
     versions = summary.get('recording', {}).get('launchers', [])
     if versions:
         add('Recorder ' + ', '.join(versions) + ' / updates on deliberate launch/reset', 'dim')
@@ -11252,6 +11346,7 @@ def monitor_cli(args):
                 curses.init_pair(2, curses.COLOR_YELLOW, -1)
             unicode = args.monitor_plain == '0' and 'UTF' in (sys.stdout.encoding or '').upper()
             next_draw, force_draw, last_state = 0, True, None
+            help_open, help_scroll = False, 0
             while True:
                 mono = time.monotonic()
                 # Poll all owned workers without waiting. Slow SSH cannot block keys.
@@ -11285,7 +11380,9 @@ def monitor_cli(args):
                             fields = dict(line.split('\t', 1) for line in raw.splitlines() if '\t' in line)
                             valid = fields.get('Attempt') == identity[2]
                             text = ' / '.join(k + ' ' + monitor_clean(fields[k]) for k in ('Decode', 'Encode', 'Warning') if k in fields)
-                            remote[identity] = dict(mono=mono, ok=ok and valid, text=text if ok and valid and text else error or 'Codec identity unavailable or changed')
+                            remote[identity] = dict(mono=mono, ok=ok and valid,
+                                                    text=text if ok and valid and text else error or 'Codec identity unavailable or changed',
+                                                    warning=fields.get('Warning', '') if ok and valid else '')
                     except (ValueError, TypeError, KeyError) as error:
                         if kind == 'inventory':
                             inventory_error = monitor_clean(error)[:180]
@@ -11337,15 +11434,31 @@ def monitor_cli(args):
                     height, width = screen.getmaxyx()
                     cols = max(12, width - 4)
                     title = 'remote-chrome / sessions' if overview else 'remote-chrome / ' + (view['session']['target'] if view['session'] else requested or selected or 'session')
+                    if help_open:
+                        title = 'remote-chrome / help'
                     title += ' / FROZEN' if frozen else ' / LIVE'
-                    content = []
-                    if overview:
+                    alerts = [] if overview else monitor_attention(view['session'], view['data'], view['remote'], view['mono'])
+                    inv_age = view['mono'] - view['inventory_mono'] if view['inventory_mono'] is not None else None
+                    inventory_warning = ''
+                    if view['error'] or inv_age is None or inv_age >= 10:
+                        inventory_warning = 'Inventory unavailable: ' + view['error'] if view['error'] else 'Inventory pending' if inv_age is None else f'Inventory STALE / {inv_age:.0f}s old'
+                        alerts.insert(0, inventory_warning)
+                    if view['notice'] and not overview:
+                        alerts.append(view['notice'])
+                    content, selection_end = [], 0
+                    if help_open:
+                        content = monitor_help(None if overview else view['session'], cols, alerts)
+                    elif overview:
                         content.append(('LOCAL SESSIONS / Enter opens a tunnel dashboard', 'title'))
                         if not view['sessions']:
                             content.append(('No managed sessions / waiting for a launch', 'warn'))
                         for i, item in enumerate(view['sessions']):
-                            content.append((('> ' if i == index else '  ') + item['session'] + ' / browser ' + item['target'], 'title' if i == index else 'normal'))
-                            content.append(('    ' + item['transport'] + ' / recording ' + item['policy'] + ' / ' + item['attempt'][:8], 'dim'))
+                            label = ('> ' if i == index else '  ') + item['session'] + ' / browser ' + item['target']
+                            detail = '    ' + monitor_transport(item['transport']) + ' / recording ' + item['policy'] + ' / ' + item['attempt'][:8]
+                            for text, role in ((label, 'title' if i == index else 'normal'), (detail, 'dim')):
+                                content.extend((part, role) for part in textwrap.wrap(text, cols, subsequent_indent='    ', break_on_hyphens=False))
+                            if i == index:
+                                selection_end = len(content)
                         content.append(('', 'normal'))
                         content.append(('Display ' + socket.gethostname() + ' / overview reads local metadata only', 'dim'))
                     else:
@@ -11353,10 +11466,9 @@ def monitor_cli(args):
                                                 rows=max(0, height - 4 - bool(view['notice'])))
                         if view['notice']:
                             content.insert(0, (view['notice'], 'warn'))
-                    inv_age = mono - inventory_mono if inventory_mono is not None else None
-                    if inventory_error or inv_age is None or inv_age >= 10:
-                        warning = 'Inventory unavailable: ' + inventory_error if inventory_error else 'Inventory pending' if inv_age is None else f'Inventory STALE / {inv_age:.0f}s old'
-                        content.insert(0, (warning, 'warn'))
+                    if inventory_warning and not help_open:
+                        content.insert(0, (inventory_warning, 'warn'))
+                        selection_end += 1
                     screen.erase()
                     def put(row, text, role='normal'):
                         if 0 <= row < height:
@@ -11368,21 +11480,39 @@ def monitor_cli(args):
                             except curses.error:
                                 pass  # Resize or the bottom-right terminal cell.
                     put(0, title, 'title')
+                    put(1, monitor_banner(alerts, cols), 'warn' if alerts else 'dim')
                     visible = max(0, height - 4)
-                    offset = max(0, index * 2 - visible + 4) if overview else min(scroll, max(0, len(content) - visible))
+                    offset = min(help_scroll, max(0, len(content) - visible)) if help_open else \
+                             max(0, selection_end - visible) if overview else min(scroll, max(0, len(content) - visible))
                     for row, (text, role) in enumerate(content[offset:offset + visible], 2):
                         put(row, text, role)
-                    footer = 'q quit / Space freeze / Enter open / arrows select' if overview else 'q quit / Space freeze / Tab sessions / arrows scroll'
-                    if frozen:
-                        footer = 'FROZEN / recording continues / Space resume / q quit'
-                    if not overview and len(content) > visible:
+                    footer = '? help / q quit / Space freeze / Enter open / arrows select' if overview else '? help / q quit / Space freeze / Tab sessions / arrows scroll'
+                    if help_open:
+                        footer = '? / Esc back / q quit / arrows scroll'
+                    elif frozen:
+                        footer = '? help / q quit / Space resume / recording continues'
+                    if (help_open or not overview) and len(content) > visible:
                         footer += f' / {offset + 1}-{min(offset + visible, len(content))}/{len(content)}'
                     put(height - 1, footer, 'dim')
                     screen.refresh()
                 key = screen.getch()
                 if key != -1:
                     force_draw = True
-                if key in (ord('q'), ord('Q'), 27):
+                if key in (ord('q'), ord('Q')):
+                    return 0
+                if key == ord('?'):
+                    help_open, help_scroll = not help_open, 0
+                    continue
+                if help_open:
+                    if key == 27:
+                        help_open = False
+                    elif key in (curses.KEY_UP, ord('k'), curses.KEY_DOWN, ord('j'), curses.KEY_NPAGE, curses.KEY_PPAGE):
+                        change = -1 if key in (curses.KEY_UP, ord('k'), curses.KEY_PPAGE) else 1
+                        help_scroll = max(0, min(help_scroll + change * (visible if key in (curses.KEY_NPAGE, curses.KEY_PPAGE) else 1), max(0, len(content) - visible)))
+                    elif key == curses.KEY_HOME:
+                        help_scroll = 0
+                    continue
+                if key == 27:
                     return 0
                 if key == ord(' '):
                     frozen = None if frozen else copy.deepcopy(last_state or state)

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import signal
 import socket
 import struct
@@ -115,6 +116,24 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(all(not row.split('│')[1].strip() for row in graph[:-1]))
         self.assertNotIn('0 ms', '\n'.join(graph))
 
+    def test_traffic_chart_uses_one_unit_for_peak_midpoint_and_zero(self):
+        for peak, unit in ((0, 'B/s'), (1000, 'B/s'), (12000, 'KiB/s'), (15900, 'Mbps'), (125000, 'Mbps')):
+            for unicode, separator in ((True, '│'), (False, '|')):
+                graph = d.monitor_chart([0, peak / 2, None, peak], 76, 8, unicode, traffic=True)
+                labels = [row.split(separator)[0].strip() for row in graph[:-1] if row.split(separator)[0].strip()]
+                self.assertEqual(len(labels), 3)
+                self.assertTrue(all(label.endswith(' ' + unit) for label in labels), labels)
+                self.assertEqual(labels[-1], '0 ' + unit)
+                self.assertTrue(any(c in graph[-2] for c in '▁.#'))
+
+    def test_transport_wording_distinguishes_recorded_policy_from_observed_use(self):
+        self.assertEqual(d.monitor_transport('h264,hw,bpf=250000'), 'H.264 / hardware preferred / 250k bits/frame')
+        self.assertEqual(d.monitor_transport('h264,sw,bpf=500000'), 'H.264 / software codecs / 500k bits/frame')
+        self.assertIn('250,001 bits/frame', d.monitor_transport('h264,hw,bpf=250001'))
+        self.assertEqual(d.monitor_transport('lossless'), 'Lossless')
+        self.assertIn('Unknown recorded transport', d.monitor_transport('future\x1bcodec'))
+        self.assertNotIn('\x1b', d.monitor_transport('future\x1bcodec'))
+
     def test_chart_fills_wide_terminals_without_interpolating_gaps(self):
         bins = d.monitor_graph_columns([0, None, 10], 12)
         self.assertEqual(bins, [0] * 4 + [None] * 4 + [10] * 4)
@@ -185,6 +204,53 @@ class MonitorTests(unittest.TestCase):
                 value = d.monitor_snapshot(self.args())
         self.assertIn('PARTIAL: query read limit reached', self.text(value))
 
+    def test_attention_precedes_metrics_and_can_stay_pinned_in_short_viewports(self):
+        value = self.snapshot([sample()])
+        value['partial'] = ['query read limit reached']
+        for rows in (20, 36, 56):
+            lines = d.monitor_lines(self.session(), value, None, 76, rows=rows)
+            self.assertEqual(lines[0], ('PARTIAL: query read limit reached', 'warn'))
+            alerts = d.monitor_attention(self.session(), value, None)
+            self.assertEqual(alerts, ['PARTIAL: query read limit reached'])
+            self.assertIn('PARTIAL:', d.monitor_banner(alerts, 36))
+            self.assertGreater(len(lines), 36 if rows == 20 else 0)
+
+    def test_attention_keeps_stale_failure_counts_and_escaped_details(self):
+        value = self.snapshot([sample()])
+        value.update(age=20, state='degraded', partial=['query\x1b limit'])
+        remote = dict(mono=time.monotonic(), ok=False, text='SSH\n unavailable')
+        alerts = d.monitor_attention(self.session(), value, remote)
+        self.assertTrue(any('STALE sample' in text for text in alerts), alerts)
+        self.assertTrue(any('Recorder degraded' in text for text in alerts), alerts)
+        self.assertTrue(any('Codec check unavailable' in text for text in alerts), alerts)
+        for width in (12, 36, 96):
+            banner = d.monitor_banner(alerts, width)
+            self.assertLessEqual(len(banner), width)
+            self.assertIn('Attention', banner)
+        self.assertNotRegex(' '.join(alerts), r'[\x00-\x1f\x7f]')
+        remote.update(ok=True, warning='software fallback observed')
+        self.assertIn('Codec warning: software fallback observed', d.monitor_attention(self.session(), value, remote))
+        idle = sample(delta=dict(seconds=1, bytes_sent=0, bytes_received=0, bytes_acked=0, retrans_total=0))
+        self.assertEqual(d.monitor_attention(self.session(), self.snapshot([idle]), None), [])
+
+    def test_help_explains_scope_and_keeps_exact_custom_status_command(self):
+        session = self.session(session="remote-chrome work browser's $(literal)")
+        lines = d.monitor_help(session, 200, ['PARTIAL: read limit'])
+        text = '\n'.join(part for part, _ in lines)
+        self.assertIn('not a full session health check', text)
+        self.assertIn('CURRENT ATTENTION', text)
+        self.assertIn('PARTIAL: read limit', text)
+        self.assertIn('not one-way jitter or frame/input latency', text)
+        self.assertIn('Page Up/Down', text)
+        command = next(part for part, _ in lines if part.startswith('remote-chrome status'))
+        self.assertEqual(shlex.split(command), ['remote-chrome', 'status', 'snap', '--session', session['session']])
+        for width in (20, 40, 76):
+            self.assertTrue(all(len(part) <= width for part, _ in d.monitor_help(session, width)))
+        generic = '\n'.join(part for part, _ in d.monitor_help(None, 76))
+        unknown = '\n'.join(part for part, _ in d.monitor_help(self.session(target='-'), 76))
+        self.assertIn('\nremote-chrome status\n', generic)
+        self.assertIn('\nremote-chrome status\n', unknown)
+
     def test_presentation_escapes_controls_and_narrow_wraps(self):
         value = self.snapshot([sample()])
         for width in (20, 40, 76, 116):
@@ -242,10 +308,10 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('Invalid monitor host', run('monitor', 'x\nspoof').stderr)
         self.assertIn('Invalid monitor session', run('monitor', 'snap', '--session', 'a:b').stderr)
 
-    def fixture(self, slow=False, restart=False):
+    def fixture(self, slow=False, restart=False, data=None):
         fixture = self.base / 'observer'
         config = dict(slow=slow, restart=restart, trace=str(self.base / 'trace'),
-                      counter=str(self.base / 'counter'), data=d.monitor_snapshot(self.args(recording_policy='off')))
+                      counter=str(self.base / 'counter'), data=data if data is not None else d.monitor_snapshot(self.args(recording_policy='off')))
         fixture.write_text('#!/usr/bin/env python3\n' + '''import json, os, sys, time
 from pathlib import Path
 config = CONFIG
@@ -320,6 +386,28 @@ else: raise SystemExit('unexpected operation')
         self.assertEqual(trace.count('_monitor-transport'), 1)
         self.assertGreaterEqual(trace.count('_monitor-data'), 2)
         self.assertNotIn('collect', trace)
+
+    def test_real_pty_help_scroll_resize_escape_and_live_observation(self):
+        value = self.snapshot([sample()]); value['partial'] = ['query read limit reached']
+        fixture = self.fixture(slow=True, data=value)
+        output = self.terminal(self.command(fixture), [(.6, b'j' * 60), (.9, b'?'),
+                               (1.2, b' '), (1.4, b'\x1b[6~\x1b[6~'), (1.7, 'resize'),
+                               (2, b'\x1b[6~' * 6), (2.2, b'\x1b'), (3.4, b' '), (3.8, b'q')], size=(24, 80))
+        self.assertIn('MONITOR HELP', output)
+        self.assertIn('FULL SESSION CHECKS', output)
+        self.assertIn('PARTIAL:', output)
+        self.assertIn('FROZEN', output)  # Escape returned to the dashboard; Space now freezes it.
+        trace = (self.base / 'trace').read_text().splitlines()
+        self.assertGreaterEqual(trace.count('_monitor-data'), 3)
+        self.assertEqual(trace.count('_monitor-transport'), 1)
+        self.assertTrue(set(trace) <= {'_monitor-inventory', '_monitor-data', '_monitor-transport'})
+
+    def test_real_pty_help_from_overview_stays_local_and_escape_still_quits(self):
+        fixture = self.fixture()
+        output = self.terminal(self.command(fixture, overview=True), [(.5, b'?'), (.9, b'?'), (1.2, b'\x1b')], size=(24, 80))
+        self.assertIn('MONITOR HELP', output)
+        self.assertNotIn('_monitor-data', (self.base / 'trace').read_text())
+        self.assertNotIn('_monitor-transport', (self.base / 'trace').read_text())
 
     def test_real_pty_overview_is_local_and_selects_exact_session(self):
         fixture = self.fixture()
