@@ -3392,6 +3392,11 @@ chrome_stop() {
     session="$(chrome_default_session "$host")"
   }
 
+  # Keep a fresh launch out of the gap between legacy pane teardown and its
+  # shared bootstrap/listener/USB cleanup.
+  if [ "$chrome_detached_backend" = systemd ]; then
+    chrome_session_manager lease "$session" "${BASHPID:-$$}" || return $?
+  fi
   if chrome_service_known "$session"; then
     chrome_service_read "$session" || return $?
     [ -z "$host" ] || [ "$host" = "$chrome_reset_host" ] || die "Selected session targets $chrome_reset_host, not $host."
@@ -12208,7 +12213,7 @@ def check_lease(session, owner):
     except FileNotFoundError:
         return
     if lease.get('boot') == BOOT and exact(lease.get('owner')) and lease['owner'] != owner:
-        raise ValueError('another reset owns this session; retry after it finishes')
+        raise ValueError('another session command owns this session; retry after it finishes')
 
 
 def claim_lease(session, owner):

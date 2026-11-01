@@ -2,7 +2,7 @@
 
 Launcher 1.11.0 replaces tmux for new background sessions. The deterministic
 suite exercises private records, process and generation ownership, duplicate
-launch, reset leases, provisional USB setup, cleanup failures, local device
+launch, stop/reset leases, provisional USB setup, cleanup failures, local device
 removal, public commands and status/monitor presentation.
 
 Disposable user-service acceptance on Snap used the candidate launcher with

@@ -26,7 +26,7 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
 - A private per-session record replaces tmux options as the source of launch
   settings, generation, service identity, supervisor identity and USB state.
   Records are data, never sourced shell code. Updates are atomic and locked.
-  A reset lease prevents a competing launch from entering between teardown and
+  A stop/reset lease prevents a competing launch from entering between teardown and
   replacement; dead leases carry no authority.
 - The launcher completes USB setup before background handoff. This keeps the
   shared root-owned usbipd outside the browser service's process group, so

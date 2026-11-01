@@ -220,7 +220,7 @@ tmux() {{ echo 'UNEXPECTED TMUX' >&2; return 97; }}
         s.claim_lease(self.name, self.pid)
         other = dict(identity, pid=identity['pid'] + 1)
         with patch.object(s, 'process', return_value=other), patch.object(s, 'exact', return_value=True), \
-                self.assertRaisesRegex(ValueError, 'another reset owns'):
+                self.assertRaisesRegex(ValueError, 'another session command owns'):
             self.reserve()
         self.assertFalse(s.path_for(self.name).exists())
 
@@ -355,6 +355,33 @@ tmux() {{ echo 'UNEXPECTED TMUX' >&2; return 97; }}
         self.assertIn('--property=Restart=no', argv)
         self.assertTrue(any(a.startswith('--property=ExecStopPost=') and generation in a for a in argv))
         self.assertIn('--setenv=XDG_RUNTIME_DIR=' + str(self.runtime), argv)
+
+    def test_legacy_stop_holds_lease_through_shared_resource_cleanup(self):
+        body = """
+chrome_remove_bootstrap_script() { :; }
+notify_set_runtime_paths() { :; }
+notify_stop_listener() { :; }
+yk_prepare_for_launch() { :; }
+yk_stop() { :; }
+tmux() {
+  case "$1" in
+    has-session) return 0 ;;
+    kill-session)
+      if chrome_session_manager lease remote-chrome-test "$OTHER_OWNER"; then
+        echo 'competing launch was admitted' >&2
+        return 97
+      fi
+      return 0 ;;
+  esac
+}
+chrome_stop test-host --session remote-chrome-test
+"""
+        with patch.dict(os.environ, OTHER_OWNER=self.pid):
+            self.env['OTHER_OWNER'] = self.pid
+            p = self.shell(body)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('another session command owns this session', p.stderr)
+        self.assertNotIn('competing launch was admitted', p.stderr)
 
     def test_requested_supervisor_stop_is_successful(self):
         generation = self.reserve()
