@@ -154,7 +154,9 @@ resets, attaches to, or stops a tunnel.
 
 The dashboard keeps identity and recorded transport at the top. Observed codec
 use has its own check age. Traffic and TCP Delay appear together, followed by
-Delivery and Recording; small history graphs follow. Below 76 columns the
+Delivery and Recording; full-width history charts follow. Each chart has at
+least three plot rows and shares the remaining terminal height equally with
+the other charts. Below 76 columns the
 groups stack. Arrows, `j`/`k`, Page Up/Down and Home scroll a short terminal;
 the title and controls remain visible. Resize recomputes the layout.
 
@@ -181,9 +183,29 @@ Unsent now       0 B               Gaps / 5m        1
 5m max queue     12 KiB            Activity latest  active
 
 HISTORY / 5m / oldest -> now / blanks = no eligible observation
-RX+TX |...small bars...| 3 Mbps max
-RTT   |...small bars...| 54 ms max
-Dev*  |...small bars...| 41 ms max
+RX+TX / 5s average
+2 MiB/s |              ##
+        |              ##          ####
+1 MiB/s |       ####  ##          ####
+        |   #########  ######   ########
+  0 B/s |.###########  ######...########
+         5m ago                      now
+
+RTT / ACK max per 5s
+  54 ms |                 ##
+        |    ###         ##          ##
+  27 ms |    #######     #####       ###
+        |############  ########  ######
+   0 ms |############  ########  ######
+         5m ago                      now
+
+Dev* / ACK max per 5s
+  41 ms |                 ##
+        |                 ##
+20.5 ms |    ##          ####
+        |    ####        ####        ##
+   0 ms |############  ########  ######
+         5m ago                      now
 * TCP deviation is a variation proxy; RTT uses ACK progress.
 ```
 
@@ -193,9 +215,13 @@ increments become unavailable. The last ACK-qualified RTT and deviation retain
 their separate age and an explicit `not fresh` label; five-minute percentiles
 remain historical observations. History uses five-second buckets: combined
 traffic is an interval-weighted average; RTT/deviation use the maximum eligible
-estimate. Each graph scales independently to its displayed maximum. Blank bins
+estimate. Each chart has an independent linear scale from zero to its displayed
+maximum, with a five-minute time axis. Taller terminals gain more plot rows;
+short terminals retain the minimum chart height and allow scrolling. Blank bins
 mean no eligible observations; recorded idle zeros have a visible baseline bar.
-Graph compression takes the maximum observed bin in each column. Sub-bucket
+An entirely missing series has an unavailable scale. Narrow charts take the
+maximum observed bin in each column; wide charts repeat bins to fill the width
+without interpolating or implying finer time resolution. Sub-bucket
 gaps remain represented by the coverage and gap fields; graphs do not assert
 continuous coverage.
 

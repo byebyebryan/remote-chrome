@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.10.0"
+VERSION="1.10.1"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -11041,22 +11041,54 @@ class MonitorJob:
         return code == 0 and not error, raw, error
 
 
-def monitor_spark(values, width, unicode=True):
+def monitor_graph_columns(values, width):
     width = max(1, width)
     values = values or [None] * 60
-    # Combine adjacent bins, preserving visible entirely missing intervals.
+    # Compress with maxima or repeat bins to fill a wide plot. Neither operation
+    # interpolates across missing observations or invents extra time resolution.
     bins = []
-    for i in range(min(width, len(values))):
-        group = values[i * len(values) // min(width, len(values)):(i + 1) * len(values) // min(width, len(values))]
+    for i in range(width):
+        start = i * len(values) // width
+        end = max(start + 1, (i + 1) * len(values) // width)
+        group = values[start:end]
         known = [v for v in group if type(v) in (int, float) and math.isfinite(v) and v >= 0]
         bins.append(max(known) if known else None)
-    peak = max((v for v in bins if v is not None), default=0)
-    chars = '▁▂▃▄▅▆▇█' if unicode else '._:-=+*#'
-    graph = ''.join(' ' if v is None else chars[min(len(chars) - 1, int(v / peak * (len(chars) - 1))) if peak else 0] for v in bins)
-    return graph, peak
+    return bins
 
 
-def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None):
+def monitor_chart(values, columns, height, unicode=True, traffic=False):
+    """Filled area chart with independent linear scale and explicit empty bins."""
+    height = max(3, height)
+    known = [v for v in (values or []) if type(v) in (int, float) and math.isfinite(v) and v >= 0]
+    peak = max(known) if known else None
+    formatter = display_rate if traffic else display_metric
+    ticks = {0: formatter(peak), height // 2: formatter(peak / 2) if peak is not None else '',
+             height - 1: formatter(0) if peak is not None else ''}
+    axis = max(len(label) for label in ticks.values())
+    axis = min(axis, max(1, columns - 4))
+    plot_width = max(1, columns - axis - 2)
+    bins = monitor_graph_columns(values, plot_width)
+    blocks = '▁▂▃▄▅▆▇█'
+    result = []
+    for row in range(height):
+        cells = []
+        for value in bins:
+            if value is None:
+                cells.append(' ')
+                continue
+            # A real zero has a visible baseline; missing data stays empty.
+            level = max(1, math.ceil(value / peak * height * 8)) if peak else 1
+            fill = max(0, min(8, level - (height - row - 1) * 8))
+            cells.append(blocks[fill - 1] if unicode and fill else '#' if fill == 8 else '.' if fill else ' ')
+        label = ticks.get(row, '')[:axis].rjust(axis)
+        result.append(label + (' │' if unicode else ' |') + ''.join(cells))
+    left = '5m ago' if plot_width >= 12 else '5m'
+    time_axis = left.ljust(plot_width - 3) + 'now' if plot_width >= len(left) + 3 else ''
+    result.append(' ' * (axis + 2) + time_axis)
+    return result
+
+
+def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None, rows=None):
     """Pure semantic view model, shared by terminal rendering and fixtures."""
     mono = time.monotonic() if now_mono is None else now_mono
     lines = []
@@ -11143,14 +11175,7 @@ def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None):
     panels(('DELIVERY', delivery), ('RECORDING', recording))
     add()
     add('HISTORY / 5m / oldest -> now / blanks = no eligible observation', 'title')
-    for key, label in [('traffic', 'RX+TX'), ('rtt', 'RTT'), ('deviation', 'Dev*')]:
-        graph, peak = monitor_spark(data.get('graphs', {}).get(key), max(1, columns - 28) if columns >= 40 else columns - 2, unicode)
-        scale = display_rate(peak) if key == 'traffic' else display_metric(peak)
-        if columns < 40:
-            add(label + ' / ' + scale + ' max')
-            lines.append(('|' + graph + '|', 'normal'))
-        else:
-            lines.append((f'{label:5} |{graph}| {scale} max', 'normal'))
+    graph_start = len(lines)
     add('* TCP deviation is a variation proxy; RTT uses ACK progress.', 'dim')
     add('SSH socket traffic includes forwarding; these are not frame/input latency.', 'dim')
     if data.get('reason'):
@@ -11160,6 +11185,18 @@ def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None):
     versions = summary.get('recording', {}).get('launchers', [])
     if versions:
         add('Recorder ' + ', '.join(versions) + ' / updates on deliberate launch/reset', 'dim')
+    charts = [('traffic', 'RX+TX / 5s average'), ('rtt', 'RTT / ACK max per 5s'),
+              ('deviation', 'Dev* / ACK max per 5s')]
+    headings = [textwrap.wrap(label, max(12, columns)) for _, label in charts]
+    overhead = sum(len(title) + 2 for title in headings)  # Time axis and spacing.
+    graph_height = max(3, ((rows or 0) - len(lines) - overhead) // len(charts))
+    graphs = []
+    for (key, _label), title in zip(charts, headings):
+        graphs.extend((part, 'title') for part in title)
+        graphs.extend((part, 'normal') for part in monitor_chart(
+            data.get('graphs', {}).get(key), columns, graph_height, unicode, traffic=key == 'traffic'))
+        graphs.append(('', 'normal'))
+    lines[graph_start:graph_start] = graphs
     return lines
 
 
@@ -11312,7 +11349,8 @@ def monitor_cli(args):
                         content.append(('', 'normal'))
                         content.append(('Display ' + socket.gethostname() + ' / overview reads local metadata only', 'dim'))
                     else:
-                        content = monitor_lines(view['session'], view['data'], view['remote'], cols, unicode, view['mono'])
+                        content = monitor_lines(view['session'], view['data'], view['remote'], cols, unicode, view['mono'],
+                                                rows=max(0, height - 4 - bool(view['notice'])))
                         if view['notice']:
                             content.insert(0, (view['notice'], 'warn'))
                     inv_age = mono - inventory_mono if inventory_mono is not None else None

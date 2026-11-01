@@ -94,10 +94,50 @@ class MonitorTests(unittest.TestCase):
         buckets = d.monitor_buckets([idle], idle['wall'])
         self.assertIn(0, buckets['traffic'])
         self.assertTrue(all(v is None for v in buckets['rtt']))
-        graph, peak = d.monitor_spark(buckets['traffic'], 60, False)
-        self.assertEqual(peak, 0)
-        self.assertEqual(graph.count('.'), 1)
-        self.assertEqual(graph.count(' '), 59)
+        graph = d.monitor_chart(buckets['traffic'], 67, 3, False, traffic=True)
+        self.assertEqual(graph[-2].split('|')[1].count('.'), 1)
+        self.assertEqual(graph[-2].split('|')[1].count(' '), 59)
+        self.assertTrue(all(not row.split('|')[1].strip() for row in graph[:-2]))
+
+    def test_area_chart_fills_multiple_rows_and_keeps_gaps_empty(self):
+        graph = d.monitor_chart([0, None, 100, 50], 12, 4, False)
+        columns = [row.split('|')[1] for row in graph[:-1]]
+        self.assertEqual(len(columns), 4)
+        self.assertTrue(all(row[2] == '#' for row in columns))
+        self.assertTrue(all(row[1] == ' ' for row in columns))
+        self.assertEqual(columns[-1][0], '.')
+        self.assertTrue(all(row[0] == ' ' for row in columns[:-1]))
+        self.assertEqual(sum(row[3] == '#' for row in columns), 2)
+
+    def test_chart_missing_values_do_not_acquire_a_zero_scale(self):
+        graph = d.monitor_chart([None, float('nan'), -1], 40, 5)
+        self.assertIn('unavailable', graph[0])
+        self.assertTrue(all(not row.split('│')[1].strip() for row in graph[:-1]))
+        self.assertNotIn('0 ms', '\n'.join(graph))
+
+    def test_chart_fills_wide_terminals_without_interpolating_gaps(self):
+        bins = d.monitor_graph_columns([0, None, 10], 12)
+        self.assertEqual(bins, [0] * 4 + [None] * 4 + [10] * 4)
+        self.assertEqual(d.monitor_graph_columns([0, 10, None, None], 2), [10, None])
+        for width in (12, 20, 40, 116, 180):
+            graph = d.monitor_chart([0, None, 10], width, 6)
+            self.assertTrue(all(len(row) <= width for row in graph))
+            self.assertTrue(all(len(row) == width for row in graph[:-1]))
+
+    def test_graphs_grow_with_terminal_height_and_short_terminals_scroll(self):
+        value = self.snapshot([sample()])
+        sizes = []
+        for available in (20, 40, 60, 90):
+            lines = d.monitor_lines(self.session(), value, None, 96, rows=available)
+            plots = [text for text, _ in lines if '│' in text]
+            self.assertGreaterEqual(len(plots), 9)
+            self.assertEqual(len(plots) % 3, 0)
+            sizes.append(len(plots))
+            if available >= 60:
+                self.assertLessEqual(len(lines), available)
+                self.assertGreaterEqual(len(lines), available - 2)
+        self.assertGreater(sizes[-1], sizes[-2])
+        self.assertGreater(sizes[-2], sizes[0])
 
     def test_buckets_weight_traffic_and_use_eligible_max(self):
         now = time.time() // 5 * 5 + 3
