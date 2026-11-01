@@ -2,9 +2,250 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.8.4"
+VERSION="1.9.0"
+
+# Presentation receives facts from the existing checks; it never parses their
+# human output to decide whether an operation succeeded.
+chrome_ui_verbose=0
+chrome_ui_plain=0
+chrome_ui_color=auto
+chrome_ui_args=()
+chrome_ui_columns=80
+
+chrome_ui_initialize() {
+  local terminal_fd size rows columns
+  chrome_ui_columns=80
+  if [[ "${COLUMNS:-}" =~ ^[0-9]{1,4}$ ]] && [ "$COLUMNS" -gt 0 ]; then
+    chrome_ui_columns="$COLUMNS"
+  elif [ -t 1 ] && command -v stty >/dev/null; then
+    # Preserve the actual output terminal across command substitution. stdin
+    # can be redirected, and a shell need not export COLUMNS to this program.
+    exec {terminal_fd}>&1
+    if size="$(stty size <&"$terminal_fd" 2>/dev/null)"; then
+      read -r rows columns <<<"$size"
+      if [[ "$columns" =~ ^[0-9]{1,4}$ ]] && [ "$columns" -gt 0 ]; then
+        chrome_ui_columns="$columns"
+      fi
+    fi
+    exec {terminal_fd}>&-
+  fi
+  return 0
+}
+
+chrome_ui_options() {
+  chrome_ui_args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --) chrome_ui_args+=("$@"); break ;;
+      --verbose|-v) chrome_ui_verbose=1; shift ;;
+      --plain) chrome_ui_plain=1; shift ;;
+      --color)
+        [ "$#" -ge 2 ] || die '--color requires auto, always, or never.'
+        chrome_ui_color="$2"; shift 2
+        ;;
+      --color=*) chrome_ui_color="${1#*=}"; shift ;;
+      # Preserve option values literally, including values which happen to
+      # resemble presentation flags. Browser arguments after -- are untouched.
+      --session|--chrome-command|--compression|--transport|--video-codecs|\
+        --yubikey-usb-id|--yubikey-port|--from|--since|--at|--window|\
+        --resolution|--export)
+        chrome_ui_args+=("$1"); shift
+        if [ "$#" -gt 0 ]; then chrome_ui_args+=("$1"); shift; fi
+        ;;
+      *) chrome_ui_args+=("$1"); shift ;;
+    esac
+  done
+  case "$chrome_ui_color" in
+    auto|always|never) ;;
+    *) die '--color expects auto, always, or never.' ;;
+  esac
+  chrome_ui_initialize
+}
+
+chrome_ui_text() {
+  local value="$*"
+  # A hostname, socket path, or remote error must not inject terminal controls.
+  value="${value//[$'\001'-$'\037'$'\177']/?}"
+  printf '%s' "$value"
+}
+
+chrome_ui_style() {
+  local role="$1" code=""
+  shift
+  if [ "$chrome_ui_plain" = 0 ] && {
+    [ "$chrome_ui_color" = always ] || {
+      [ "$chrome_ui_color" = auto ] && [ -t 1 ] &&
+        [ "${TERM:-dumb}" != dumb ] && [ -z "${NO_COLOR+x}" ];
+    };
+  }; then
+    case "$role" in
+      title) code='1;36' ;;
+      ok) code=32 ;;
+      warn) code=33 ;;
+      error) code=31 ;;
+      dim) code=2 ;;
+    esac
+  fi
+  [ -z "$code" ] || printf '\033[%sm' "$code"
+  chrome_ui_text "$*"
+  [ -z "$code" ] || printf '\033[0m'
+}
+
+chrome_ui_glyph() {
+  local locale_name="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+  if [ "$chrome_ui_plain" = 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] &&
+    [[ "${locale_name^^}" = *UTF-8* || "${locale_name^^}" = *UTF8* ]]; then
+    case "$1" in ok) chrome_ui_symbol='✓' ;; error) chrome_ui_symbol='×' ;; dot) chrome_ui_symbol='·' ;; *) chrome_ui_symbol='!' ;; esac
+  else
+    case "$1" in ok) chrome_ui_symbol=OK ;; error) chrome_ui_symbol=ERROR ;; dot) chrome_ui_symbol=: ;; *) chrome_ui_symbol='!' ;; esac
+  fi
+}
+
+chrome_ui_title() {
+  printf '\n'
+  chrome_ui_glyph dot
+  chrome_ui_style title "$PROGRAM $chrome_ui_symbol $1"
+  printf '\n'
+}
+
+chrome_ui_section() {
+  printf '\n  '
+  chrome_ui_style title "$1"
+  printf '\n'
+}
+
+chrome_ui_row() {
+  local label="$1" value="$2" role="${3:-normal}" columns="$chrome_ui_columns"
+  [[ ! "${COLUMNS:-}" =~ ^[0-9]{1,4}$ ]] || columns="$COLUMNS"
+  [[ "$columns" =~ ^[0-9]{1,4}$ ]] || columns=80
+  printf '  '
+  if [ "$columns" -lt 60 ]; then
+    chrome_ui_style dim "$label"
+    printf '\n    '
+  else
+    chrome_ui_style dim "$(printf '%-*s ' "${chrome_ui_label_width:-13}" "$label")"
+  fi
+  chrome_ui_style "$role" "$value"
+  printf '\n'
+}
+
+chrome_ui_result() {
+  local role="$1"
+  shift
+  printf '  '
+  chrome_ui_glyph "$role"
+  chrome_ui_style "$role" "$chrome_ui_symbol $*"
+  printf '\n'
+}
+
+chrome_ui_detail() {
+  [ "$chrome_ui_verbose" = 0 ] || printf '%s\n' "$*"
+  return 0
+}
+
+chrome_ui_check() {
+  local label="$1" value="$2" legacy="$3" role="${4:-normal}"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    printf '%s\n' "$legacy"
+  else
+    chrome_ui_row "$label" "$value" "$role"
+  fi
+}
+
+chrome_ui_issue() {
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    printf '%s\n' "$*"
+  else
+    local message="$*"
+    # Remove only our own old display prefix; severity is supplied by the
+    # caller and is never inferred from message text.
+    message="${message#status: degraded: }"
+    message="${message#status: }"
+    chrome_ui_result warn "$message"
+  fi
+}
+
+chrome_ui_rows() {
+  local label value role
+  while IFS=$'\t' read -r label value role; do
+    [ -n "$label" ] || continue
+    if [ "$label" = section ]; then
+      chrome_ui_section "$value"
+    elif [ "$label" = Warning ] || [ "$label" = Partial ]; then
+      chrome_ui_row "$label" "$value" warn
+    else
+      chrome_ui_row "$label" "$value" "${role:-normal}"
+    fi
+  done
+}
+
+chrome_ui_command() {
+  local label="$1" verb="$2" host="$3" session="$4" command_text
+  local -a args=("$PROGRAM" "$verb" "$host")
+  shift 4
+  if [ "$session" != "$(chrome_default_session "$host")" ]; then
+    args+=(--session "$session")
+  fi
+  args+=("$@")
+  printf -v command_text '%q ' "${args[@]}"
+  chrome_ui_row "$label" "${command_text% }"
+}
+
+chrome_ui_receipt() {
+  local action="$1" host="$2" session="$3" transport="$4" codecs="$5" forwarding="$6"
+  local video='Lossless' cap="$chrome_diag_cap bytes" display_host
+  display_host="$(hostname -s 2>/dev/null || printf 'this machine')"
+  if [ "$transport" = video ]; then
+    video='H.264 / hardware preferred'
+    [ "$codecs" != software ] || video='H.264 / software selected'
+  fi
+  [ "$chrome_diag_cap" != 1073741824 ] || cap='1 GiB'
+  chrome_ui_title "$host"
+  printf '\n'
+  chrome_ui_result ok "Background session $action"
+  [ "$action" != restarted ] || chrome_ui_result warn 'In-page state may have been lost.' >&2
+  printf '\n'
+  chrome_ui_row Browser "$host"
+  chrome_ui_row Display "$display_host"
+  [ "$session" = "$(chrome_default_session "$host")" ] || chrome_ui_row Session "$session"
+  chrome_ui_row Video "$video"
+  if [ "$chrome_diagnostics" = on ]; then
+    chrome_ui_row Diagnostics "enabled / $chrome_diag_days days / $cap cap"
+  else
+    chrome_ui_row Diagnostics 'off for this session'
+  fi
+  [ "$forwarding" != 1 ] || chrome_ui_row YubiKey 'Forwarding readiness checks passed'
+  printf '\n'
+  chrome_ui_command Inspect status "$host" "$session"
+  chrome_ui_command Restart reset "$host" "$session"
+  chrome_ui_command Stop stop "$host" "$session"
+  printf '\n'
+}
 
 usage() {
+  if [ "$chrome_ui_verbose" = 0 ]; then
+    local chrome_ui_label_width=20
+    chrome_ui_title 'remote browser sessions'
+    printf '\nUsage: %s [OPTIONS] COMMAND [HOST]\n' "$PROGRAM"
+    chrome_ui_section Everyday
+    chrome_ui_row HOST 'Open a tunnel; repeat to restart its session'
+    chrome_ui_row 'status [HOST]' 'Inspect sessions and five-minute network history'
+    chrome_ui_row 'reset [HOST]' 'Restart the selected session (may lose in-page state)'
+    chrome_ui_row 'stop [HOST]' 'Clean up one session, or all managed sessions'
+    chrome_ui_section 'More commands'
+    chrome_ui_row 'launch HOST' 'Create a fresh session with selected launch options'
+    chrome_ui_row 'attach HOST' 'Attach to the session terminal'
+    chrome_ui_row 'doctor HOST' 'Check launch prerequisites'
+    chrome_ui_row 'mark HOST' 'Mark a moment for later investigation'
+    chrome_ui_row 'diagnostics HOST' 'Review history (--since, --timeline, --export)'
+    chrome_ui_section Options
+    chrome_ui_row '--verbose, -v' 'Detailed checks; full help with --verbose --help'
+    chrome_ui_row --plain 'Disable colors and glyphs'
+    chrome_ui_row '--color MODE' 'auto, always, or never'
+    chrome_ui_row '--help / --version' 'Show help or the installed launcher version'
+    printf '\nPass Chrome arguments after --. Use --session NAME for a custom session.\n\n'
+    return
+  fi
   cat <<USAGE
 Usage:
   $PROGRAM HOST [-- CHROME_ARGS...]
@@ -43,6 +284,9 @@ Stop options:
                            omit HOST to stop all its managed sessions
 
 General options:
+      --verbose, -v        show internal details and individual checks
+      --plain              disable colors and glyphs
+      --color MODE         auto (default), always, or never
       -h, --help           print help and exit
       -V, --version        print version and exit
 
@@ -70,7 +314,11 @@ USAGE
 }
 
 die() {
-  echo "$*" >&2
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo "$*" >&2
+  else
+    chrome_ui_result error "$*" >&2
+  fi
   exit 1
 }
 
@@ -1931,7 +2179,7 @@ chrome_ensure() {
 
   need tmux
   if tmux has-session -t "=$chrome_launch_target_session" 2>/dev/null; then
-    echo "Managed tmux session $chrome_launch_target_session already exists; resetting the remote Chrome/Waypipe stream." >&2
+    chrome_ui_issue "Managed tmux session $chrome_launch_target_session already exists; resetting the remote Chrome/Waypipe stream." >&2
     chrome_reset "$chrome_launch_target_host" --session "$chrome_launch_target_session" --yes
     return
   fi
@@ -2092,19 +2340,19 @@ chrome_launch() {
     case "$yubikey_mode" in
       force)
         forwarding_expected=1
-        echo "YubiKey forwarding was requested for $host."
+        chrome_ui_detail "YubiKey forwarding was requested for $host."
         ;;
       auto)
         if yk_local_candidate_exists; then
           forwarding_expected=1
-          echo "Detected local YubiKey $yk_usb_id; forwarding is expected."
+          chrome_ui_detail "Detected local YubiKey $yk_usb_id; forwarding is expected."
         else
-          echo "No local YubiKey with USB id $yk_usb_id detected; continuing without forwarding."
+          chrome_ui_detail "No local YubiKey with USB id $yk_usb_id detected; continuing without forwarding."
         fi
         ;;
     esac
   else
-    echo "YubiKey forwarding disabled by --no-yubikey."
+    chrome_ui_detail "YubiKey forwarding disabled by --no-yubikey."
   fi
 
   # Validate every runtime destination before any USB setup or any action that
@@ -2230,20 +2478,29 @@ chrome_launch() {
   fi
   trap - EXIT
 
-  echo "Started remote Chrome on $host in tmux session $session."
-  if [ "$forwarding_expected" = "1" ]; then
-    echo "YubiKey forwarding is ready in tmux window ${session}:yubikey."
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo "Started remote Chrome on $host in tmux session $session."
+    if [ "$forwarding_expected" = "1" ]; then
+      echo "YubiKey forwarding is ready in tmux window ${session}:yubikey."
+    fi
+    print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
+    print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
+    print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
+  else
+    chrome_ui_receipt started "$host" "$session" "$transport" "$video_codecs" "$forwarding_expected"
   fi
-  print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
-  print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
-  print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
 }
 
 confirm() {
   local prompt="$1"
   local reply
 
-  printf '%s [y/N] ' "$prompt" >&2
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    printf '%s [y/N] ' "$prompt" >&2
+  else
+    chrome_ui_style warn "$prompt" >&2
+    printf ' [y/N] ' >&2
+  fi
   read -r reply
   case "$reply" in
     y|Y|yes|YES) return 0 ;;
@@ -2722,8 +2979,12 @@ chrome_incoming_live() {
 }
 
 chrome_status_incoming() {
-  local state found=0 phase name session
-  echo "Incoming remote-chrome sessions:"
+  local state found=0 phase name session details backend
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo 'Incoming remote-chrome sessions:'
+  else
+    chrome_ui_section 'Incoming sessions'
+  fi
   for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
     [[ -f "$state" && -O "$state" && ! -L "$state" ]] || continue
     found=1
@@ -2731,9 +2992,23 @@ chrome_status_incoming() {
     chrome_incoming_live "$state" && phase=live
     name="$(notify_state_field "$state" name)"
     session="$(notify_state_field "$state" session)"
-    printf '  %s: %s (%s)\n' "${name:-$(notify_state_field "$state" peer)}" \
-      "${session:-foreground}" "$phase"
-    notify_source_state_status "$state" || true
+    if [ "$chrome_ui_verbose" = 1 ]; then
+      printf '  %s: %s (%s)\n' "${name:-$(notify_state_field "$state" peer)}" \
+        "${session:-foreground}" "$phase"
+      notify_source_state_status "$state" || true
+    else
+      chrome_ui_row "${name:-$(notify_state_field "$state" peer)}" "${session:-foreground} / $phase"
+      if details="$(notify_source_state_status "$state")"; then
+        backend="$(notify_state_field "$state" notify_backend)"
+        case "$backend" in
+          '') chrome_ui_row Notifications 'Unreported / older bootstrap' ;;
+          disabled) chrome_ui_row Notifications Disabled ;;
+          *) chrome_ui_row Notifications "$backend / source checks passed" ;;
+        esac
+      else
+        chrome_ui_issue "$details"
+      fi
+    fi
   done
   [ "$found" = "1" ] || echo "  none"
 }
@@ -2818,7 +3093,7 @@ notify_status_current() {
   notify_set_runtime_paths "$session"
   state="$notify_state_file"
   if [ ! -e "$state" ]; then
-    echo "status: notifications: no managed relay (disabled or untracked)"
+    chrome_ui_check Notifications 'Disabled or untracked' 'status: notifications: no managed relay (disabled or untracked)'
     return 0
   fi
   [[ -f "$state" && -O "$state" && ! -L "$state" ]] || {
@@ -2833,18 +3108,22 @@ notify_status_current() {
     echo "status: degraded: notification listener identity/socket is no longer live." >&2
     return 1
   fi
-  echo "status: notifications: listener live pid=$pid"
+  chrome_ui_detail "status: notifications: listener live pid=$pid"
   if output="$(timeout --kill-after=1 2 ssh -o BatchMode=yes -o ConnectTimeout=2 \
     -o ConnectionAttempts=1 "$host" \
     "remote-chrome _notify-status $(printf '%q' "$session")" </dev/null 2>&1)"; then
-    printf '%s\n' "$output"
+    if [ "$chrome_ui_verbose" = 1 ]; then
+      printf '%s\n' "$output"
+    else
+      chrome_ui_row Notifications 'Relay checks passed'
+    fi
   else
     printf '%s\n' "$output" >&2
     echo "status: degraded: source notification path is unavailable; reset the exact session." >&2
     return 1
   fi
   failure="$(awk -F '\t' '$2 ~ /^(delivery-failed|interactive-disconnected|interactive-client-failed)$/ {last=$0} END {print last}' "${state}.log" 2>/dev/null || true)"
-  [ -z "$failure" ] || printf 'status: notifications: recent failure: %s\n' "$failure"
+  [ -z "$failure" ] || chrome_ui_issue "status: notifications: recent failure: $failure"
 }
 
 chrome_stop_incoming() {
@@ -2959,7 +3238,7 @@ chrome_stop() {
   need tmux
   if tmux has-session -t "=$session" 2>/dev/null; then
     if tmux kill-session -t "=$session"; then
-      echo "Stopped tmux session $session."
+      chrome_ui_detail "Stopped tmux session $session."
       chrome_remove_bootstrap_script "$session" || code=1
     else
       echo "Could not stop tmux session $session." >&2
@@ -2979,6 +3258,9 @@ chrome_stop() {
       echo "YubiKey cleanup reported an error; inspect $yk_state_file." >&2
       code=1
     fi
+  fi
+  if [ "$chrome_ui_verbose" = 0 ] && [ "$code" = 0 ]; then
+    chrome_ui_result ok "Session cleanup completed: $session"
   fi
   return "$code"
 }
@@ -3003,7 +3285,7 @@ chrome_stop_all() {
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     if tmux kill-session -t "=$session"; then
-      echo "Stopped tmux session $session."
+      chrome_ui_detail "Stopped tmux session $session."
       chrome_remove_bootstrap_script "$session" || code=1
       stopped_sessions=$((stopped_sessions + 1))
     else
@@ -3021,6 +3303,9 @@ chrome_stop_all() {
   fi
   notify_stop_all || code=1
   chrome_stop_incoming || code=1
+  if [ "$chrome_ui_verbose" = 0 ] && [ "$code" = 0 ]; then
+    chrome_ui_result ok 'Managed session cleanup completed.'
+  fi
   return "$code"
 }
 
@@ -3843,7 +4128,8 @@ chrome_reset() {
   chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" "$session" || remote_identity_code=$?
   case "$remote_identity_code" in
     0)
-      echo "Remote waypipe server matched socket $chrome_reset_remote_socket (pid=$chrome_reset_remote_pid pgid=$chrome_reset_remote_pgid)." >&2
+      chrome_ui_detail "Remote waypipe server matched socket $chrome_reset_remote_socket (pid=$chrome_reset_remote_pid pgid=$chrome_reset_remote_pgid)." >&2
+      [ "$chrome_ui_verbose" = 1 ] || chrome_ui_row Restart "$host / $session" >&2
       if [ "$assume_yes" != "1" ] &&
         ! confirm "Reset will restart remote Chrome/Waypipe and may lose unsaved in-page state. Continue?"; then
         echo "Reset canceled; the existing tmux session is unchanged." >&2
@@ -3881,7 +4167,7 @@ chrome_reset() {
   case "$session_probe_code" in
     0)
       if tmux kill-session -t "=$session" 2>/dev/null; then
-        echo "Removed managed tmux session $session after remote Waypipe teardown." >&2
+        chrome_ui_detail "Removed managed tmux session $session after remote Waypipe teardown." >&2
       else
         echo "Remote Waypipe teardown succeeded, but could not remove tmux session $session." >&2
         return 1
@@ -3898,7 +4184,7 @@ chrome_reset() {
           return 1
           ;;
       esac
-      echo "Managed tmux session $session already exited after remote Waypipe teardown; continuing with recreation." >&2
+      chrome_ui_detail "Managed tmux session $session already exited after remote Waypipe teardown; continuing with recreation." >&2
       ;;
     *)
       echo "Remote Waypipe teardown succeeded, but could not verify tmux session $session absence." >&2
@@ -3965,41 +4251,73 @@ chrome_reset() {
     [ -z "$notify_reset_previous_traps" ] || eval "$notify_reset_previous_traps"
   fi
   [ "$recreate_failed" = "0" ] || return 1
-  echo "Reset $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
-  print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
-  print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
-  print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo "Reset $host by restarting the managed remote Chrome/Waypipe stream; in-page state may have been lost." >&2
+    print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
+    print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
+    print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
+  else
+    local receipt_transport=lossless receipt_codecs=auto
+    if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
+      receipt_transport=video
+      [ "${BASH_REMATCH[2]}" != sw ] || receipt_codecs=software
+    fi
+    chrome_ui_receipt restarted "$host" "$session" "$receipt_transport" "$receipt_codecs" "$yk_needed"
+  fi
 }
 
 chrome_status_all() {
-  local session state_file lock_file state_output
+  local session state_file lock_file state_output windows
   local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
   local found_sessions=0
   local found_forwarding=0
   local code=0
 
   need tmux
-  echo "Managed tmux sessions:"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo 'Managed tmux sessions:'
+  else
+    chrome_ui_title 'sessions'
+  fi
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     found_sessions=1
-    printf '  %s\n' "$session"
-    if ! tmux list-windows -t "=$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null; then
-      echo "    windows unavailable (session may have exited)" >&2
+    if [ "$chrome_ui_verbose" = 1 ]; then
+      printf '  %s\n' "$session"
+    else
+      chrome_ui_section "$session"
+    fi
+    if windows="$(tmux list-windows -t "=$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null)"; then
+      chrome_ui_detail "$windows"
+    else
+      chrome_ui_issue 'Windows unavailable (session may have exited)' >&2
       code=1
     fi
     if chrome_reset_read_pane "$session" 2>/dev/null &&
       chrome_reset_parse_pane_host "$chrome_reset_pane_command" 2>/dev/null; then
-      chrome_status_diagnostics "$chrome_reset_host" "$session" --network-only |
-        sed 's/^status: /    /' ||
-        echo '    network last 5m: unavailable (local diagnostic store could not be read)'
+      if [ "$chrome_ui_verbose" = 1 ]; then
+        chrome_status_diagnostics "$chrome_reset_host" "$session" --network-only |
+          sed 's/^status: /    /' ||
+          echo '    network last 5m: unavailable (local diagnostic store could not be read)'
+      else
+        chrome_ui_row Browser "$chrome_reset_host"
+        chrome_status_diagnostics "$chrome_reset_host" "$session" --network-only ||
+          chrome_ui_issue 'Network unavailable / local diagnostic store could not be read'
+        chrome_ui_command Inspect status "$chrome_reset_host" "$session"
+      fi
     else
-      echo '    network last 5m: unavailable (launch metadata could not be read)'
+      chrome_ui_check Network 'Unavailable / launch metadata could not be read' '    network last 5m: unavailable (launch metadata could not be read)' warn
     fi
   done < <(chrome_managed_sessions)
-  [ "$found_sessions" = "1" ] || echo "  none"
+  if [ "$found_sessions" = 0 ]; then
+    chrome_ui_check Sessions None '  none'
+  fi
 
-  echo "Managed YubiKey forwarding:"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo 'Managed YubiKey forwarding:'
+  else
+    chrome_ui_section 'Managed YubiKey forwarding'
+  fi
   while IFS= read -r state_file; do
     [ -n "$state_file" ] || continue
     found_forwarding=1
@@ -4018,7 +4336,11 @@ chrome_status_all() {
   done
   [ "$found_forwarding" = "1" ] || echo "  none"
 
-  echo "Tool-owned orphan usbipd daemons:"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo 'Tool-owned orphan usbipd daemons:'
+  else
+    chrome_ui_section 'Tool-owned orphan USB/IP daemons'
+  fi
   yk_status_orphan_usbipd
   chrome_status_incoming
 
@@ -4066,10 +4388,12 @@ chrome_status() {
 }
 
 chrome_transport_summary() {
-  local label="$1" preference="$2"
-  python3 -c '
+  local label="$1" preference="$2" rows code=0
+  rows="$(python3 -c '
 import json, sys
-label, preference = sys.argv[1:]
+label, preference, verbose = sys.argv[1:]
+def row(key, value):
+    print(key + "\t" + str(value).replace("\t", "?").replace("\n", "?"))
 try:
     d = json.load(sys.stdin)
     if not isinstance(d, dict) or d.get("schema") != 1 or d.get("error"):
@@ -4077,31 +4401,46 @@ try:
     root, counts = d["root"], d["counts"]
     if type(root["pid"]) is not int or not str(root["start"]).isdigit():
         raise ValueError("invalid process identity")
-    print("status: " + label + " Waypipe live: pid=" + str(root["pid"]) + " start=" + root["start"])
+    if verbose == "1":
+        print("status: " + label + " Waypipe live: pid=" + str(root["pid"]) + " start=" + root["start"])
     if root.get("binary_current") is False:
-        print("status: " + label + " is running a previous package binary; new installation applies on relaunch")
+        note = label + " is running a previous package binary; new installation applies on relaunch"
+        print("status: " + note) if verbose == "1" else row("Note", note)
+    nodes = d.get("render_nodes", [])
+    if not isinstance(nodes, list) or len(nodes) > 32 or any(
+            not isinstance(n, list) or len(n) != 2 or not all(isinstance(v, str) for v in n) for n in nodes):
+        raise ValueError("invalid render nodes")
     for direction in ("encoder", "decoder"):
         hw, sw = counts[direction + "_hw"], counts[direction + "_sw"]
         if any(type(x) is not int or not 0 <= x <= 1048576 for x in (hw, sw)):
             raise ValueError("invalid codec counters")
         backend = "mixed" if hw and sw else "hardware" if hw else "software" if sw else "unknown (no observed active video buffers)"
-        print("status: " + label + " " + direction + ": " + backend)
+        if verbose == "1":
+            print("status: " + label + " " + direction + ": " + backend)
+        elif direction == ("decoder" if label == "local" else "encoder") or hw or sw:
+            row("Decode" if direction == "decoder" else "Encode", backend)
         if sw and preference == "hw":
-            print("status: warning: " + label + " " + direction + " used software despite hardware preference")
-    nodes = d.get("render_nodes", [])
-    if nodes:
+            warning = label + " " + direction + " used software despite hardware preference"
+            print("status: warning: " + warning) if verbose == "1" else row("Warning", warning)
+    if nodes and verbose == "1":
         print("status: " + label + " open render nodes: " + ", ".join(n[0] + " vendor=" + n[1] for n in nodes))
 except (ValueError, KeyError, TypeError):
     print("status: degraded: " + label + " transport could not be verified", file=sys.stderr)
     sys.exit(1)
-' "$label" "$preference"
+' "$label" "$preference" "$chrome_ui_verbose")" || code=$?
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    printf '%s\n' "$rows"
+  else
+    chrome_ui_rows <<<"$rows"
+  fi
+  return "$code"
 }
 
 chrome_transport_status() {
   local host="$1" session="$2" compression preference bpf output birth socket_q
   if ! chrome_reset_read_pane "$session" 2>/dev/null ||
     ! chrome_reset_parse_pane_host "$chrome_reset_pane_command" 2>/dev/null; then
-    echo "status: transport: unknown (legacy or unreadable launch metadata)"
+    chrome_ui_check Video 'Unknown / launch metadata unavailable' 'status: transport: unknown (legacy or unreadable launch metadata)' warn
     return 0
   fi
   if [ "$chrome_reset_host" != "$host" ]; then
@@ -4110,15 +4449,17 @@ chrome_transport_status() {
   fi
   if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
     compression="${BASH_REMATCH[1]}" preference="${BASH_REMATCH[2]}" bpf="${BASH_REMATCH[3]}"
-    echo "status: recorded transport: video h264 bpf=$bpf compression=$compression codec-preference=$preference"
-    echo "status: Chrome transport defaults: GPU rendering enabled; Chrome Vulkan disabled"
+    local video_policy='H.264 / hardware preferred'
+    [ "$preference" != sw ] || video_policy='H.264 / software selected'
+    chrome_ui_check Video "$video_policy" "status: recorded transport: video h264 bpf=$bpf compression=$compression codec-preference=$preference"
+    chrome_ui_detail 'status: Chrome transport defaults: GPU rendering enabled; Chrome Vulkan disabled'
   else
-    echo "status: recorded transport: stock lossless; Chrome GPU policy: disabled"
+    chrome_ui_check Video 'Lossless / Chrome GPU disabled' 'status: recorded transport: stock lossless; Chrome GPU policy: disabled'
     chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" 2>/dev/null || {
       echo "status: degraded: managed Waypipe SSH child is absent or ambiguous." >&2
       return 1
     }
-    echo "status: managed Waypipe SSH child is live"
+    chrome_ui_detail 'status: managed Waypipe SSH child is live'
     return 0
   fi
   if ! chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" 2>/dev/null; then
@@ -4131,7 +4472,7 @@ chrome_transport_status() {
       chrome_transport_summary local "$preference" <<<"$output"
       return 1
     fi
-    echo "status: local codec telemetry: unknown (older package or unavailable process)"
+    chrome_ui_check Decode 'Unverified / codec telemetry unavailable' 'status: local codec telemetry: unknown (older package or unavailable process)' warn
   else
     chrome_transport_summary local "$preference" <<<"$output" || return 1
   fi
@@ -4142,7 +4483,7 @@ chrome_transport_status() {
       chrome_transport_summary remote "$preference" <<<"$output"
       return 1
     fi
-    echo "status: remote codec telemetry: unknown (older package or unreachable host)"
+    chrome_ui_check Encode 'Unverified / codec telemetry unavailable' 'status: remote codec telemetry: unknown (older package or unreachable host)' warn
   else
     chrome_transport_summary remote "$preference" <<<"$output" || return 1
   fi
@@ -4159,8 +4500,16 @@ chrome_status_diagnostics() {
   elif [[ "$diagnostics_saved" =~ ^off:[0-9]+:[0-9]+:-$ ]]; then
     diagnostics_policy=off
   fi
-  chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" \
-    --recording-policy "$diagnostics_policy" "$@"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" \
+      --recording-policy "$diagnostics_policy" "$@"
+  else
+    local rows code=0
+    rows="$(chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" \
+      --recording-policy "$diagnostics_policy" --ui-rows "$@")" || code=$?
+    chrome_ui_rows <<<"$rows"
+    return "$code"
+  fi
 }
 
 chrome_status_current() {
@@ -4172,41 +4521,52 @@ chrome_status_current() {
 
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
   need tmux
+  if [ "$chrome_ui_verbose" = 0 ]; then
+    chrome_ui_title "$host"
+    printf '\n'
+    chrome_ui_row Browser "$host"
+    chrome_ui_row Display "$(hostname -s 2>/dev/null || printf 'this machine')"
+  fi
 
   if tmux has-session -t "=$session" 2>/dev/null; then
-    echo "status: tmux session running: $session"
+    local session_label='Background session running'
+    [ "$session" = "$(chrome_default_session "$host")" ] || session_label+=" / $session"
+    chrome_ui_check Session "$session_label" "status: tmux session running: $session"
     windows="$(tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null || true)"
     if [ -n "$windows" ]; then
-      printf '%s\n' "$windows" | sed 's/^/status: window: /'
+      if [ "$chrome_ui_verbose" = 1 ]; then
+        printf '%s\n' "$windows" | sed 's/^/status: window: /'
+      fi
     else
-      echo "status: degraded: tmux session has no readable windows." >&2
+      chrome_ui_issue 'status: degraded: tmux session has no readable windows.' >&2
       code=1
     fi
     if ! printf '%s\n' "$windows" | grep -qx 'chrome'; then
-      echo "status: degraded: tmux session has no chrome window." >&2
+      chrome_ui_issue 'status: degraded: tmux session has no chrome window.' >&2
       code=1
     fi
   else
-    echo "status: degraded: tmux session is not running: $session" >&2
+    chrome_ui_issue "status: degraded: tmux session is not running: $session" >&2
     code=1
   fi
 
   chrome_transport_status "$host" "$session" || code=1
   chrome_status_diagnostics "$host" "$session" ||
-    echo "status: diagnostics: degraded (local diagnostic store unavailable)"
+    chrome_ui_issue 'status: diagnostics: degraded (local diagnostic store unavailable)'
+  [ "$chrome_ui_verbose" = 1 ] || chrome_ui_section 'Forwarding and notifications'
   yk_prepare_for_launch "$host"
   if yk_load_state; then
-    echo "status: yubikey phase=$yk_phase readiness=$yk_readiness"
+    chrome_ui_detail "status: yubikey phase=$yk_phase readiness=$yk_readiness"
     if [ "$yk_phase" = "cleanup-failed" ]; then
-      echo "status: degraded: YubiKey cleanup previously failed; retry stop before trusting this state." >&2
+      chrome_ui_issue 'status: degraded: YubiKey cleanup previously failed; retry stop before trusting this state.' >&2
       code=1
     fi
 
     if [ -n "$yk_active_busid" ] && [ "$yk_bind_state" != "none" ]; then
       if yk_local_busid_bound "$yk_active_busid"; then
-        echo "status: local USB/IP bind present: $yk_active_busid"
+        chrome_ui_detail "status: local USB/IP bind present: $yk_active_busid"
       else
-        echo "status: degraded: recorded local USB/IP bind is absent: $yk_active_busid" >&2
+        chrome_ui_issue "status: degraded: recorded local USB/IP bind is absent: $yk_active_busid" >&2
         code=1
       fi
     fi
@@ -4214,9 +4574,9 @@ chrome_status_current() {
     if [ "$yk_started_usbipd" = "1" ]; then
       if yk_owned_usbipd_running "$yk_usbipd_pid" &&
         ss -ltn 2>/dev/null | grep -q ":${yk_usbip_port}\b"; then
-        echo "status: owned usbipd running and listening: pid=$yk_usbipd_pid port=$yk_usbip_port"
+        chrome_ui_detail "status: owned usbipd running and listening: pid=$yk_usbipd_pid port=$yk_usbip_port"
       else
-        echo "status: degraded: owned usbipd is not alive, exact-owned, or listening on port $yk_usbip_port: pid=${yk_usbipd_pid:-unknown}" >&2
+        chrome_ui_issue "status: degraded: owned usbipd is not alive, exact-owned, or listening on port $yk_usbip_port: pid=${yk_usbipd_pid:-unknown}" >&2
         code=1
       fi
     fi
@@ -4226,12 +4586,12 @@ chrome_status_current() {
       yk_control_socket_status || socket_status=$?
       if [ "$socket_status" -eq 0 ] &&
         yk_ssh_request -S "$yk_control_socket" -O check "$yk_remote" >/dev/null 2>&1; then
-        echo "status: SSH USB/IP control socket is alive: $yk_control_socket"
+        chrome_ui_detail "status: SSH USB/IP control socket is alive: $yk_control_socket"
       else
         if [ "$socket_status" -eq 2 ]; then
-          echo "status: degraded: unsafe SSH USB/IP control socket path is preserved: $yk_control_socket" >&2
+          chrome_ui_issue "status: degraded: unsafe SSH USB/IP control socket path is preserved: $yk_control_socket" >&2
         else
-          echo "status: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
+          chrome_ui_issue "status: degraded: SSH USB/IP control socket is unavailable: $yk_control_socket" >&2
         fi
         code=1
       fi
@@ -4239,18 +4599,20 @@ chrome_status_current() {
 
     if [ "$yk_attach_state" != "none" ] || [ "$yk_phase" = "ready" ]; then
       if yk_remote_probe_readiness; then
-        echo "status: remote YubiKey readiness probe passed."
+        chrome_ui_check YubiKey "Readiness checks passed / $yk_readiness" 'status: remote YubiKey readiness probe passed.'
       else
-        echo "status: degraded: remote YubiKey readiness probe failed (${yk_readiness:-not-ready})." >&2
+        chrome_ui_issue "status: degraded: remote YubiKey readiness probe failed (${yk_readiness:-not-ready})." >&2
         code=1
       fi
+    elif [ "$chrome_ui_verbose" = 0 ]; then
+      chrome_ui_row YubiKey "Recorded phase $yk_phase / no readiness probe requested"
     fi
   else
     state_code=$?
     if [ "$state_code" = "1" ]; then
-      echo "status: no managed YubiKey state for $host."
+      chrome_ui_check YubiKey 'No managed forwarding' "status: no managed YubiKey state for $host."
     else
-      echo "status: degraded: managed YubiKey state is invalid for $host." >&2
+      chrome_ui_issue "status: degraded: managed YubiKey state is invalid for $host." >&2
       code=1
     fi
   fi
@@ -4258,9 +4620,19 @@ chrome_status_current() {
   notify_status_current "$host" "$session" || code=1
 
   if [ "$code" = "0" ]; then
-    echo "status: healthy"
+    if [ "$chrome_ui_verbose" = 1 ]; then
+      echo 'status: healthy'
+    else
+      printf '\n'
+      chrome_ui_result ok 'Available session checks passed'
+    fi
   else
-    echo "status: degraded; inspect the failing checks above and retry after repair." >&2
+    chrome_ui_issue 'status: degraded; inspect the failing checks above and retry after repair.' >&2
+  fi
+  if [ "$chrome_ui_verbose" = 0 ]; then
+    printf '\n'
+    chrome_ui_command Details status "$host" "$session" --verbose
+    printf '\n'
   fi
   return "$code"
 }
@@ -5543,10 +5915,18 @@ doctor_check() {
   local label="$1"
   shift
   if "$@"; then
-    echo "doctor: ok: $label"
+    if [ "$chrome_ui_verbose" = 1 ]; then
+      echo "doctor: ok: $label"
+    else
+      chrome_ui_result ok "$label"
+    fi
     return 0
   fi
-  echo "doctor: FAIL: $label" >&2
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    echo "doctor: FAIL: $label" >&2
+  else
+    chrome_ui_result error "$label" >&2
+  fi
   return 1
 }
 
@@ -10051,24 +10431,69 @@ def network_lines(summary, age, state):
            f'gaps {summary.get("gaps", "unknown")}; recorder {state}')
 
 
+def network_rows(summary, age, state):
+    """Explicit presentation fields from observations, never human-text parsing."""
+    def fmt(value, unit='ms', scale=1):
+        return 'unavailable' if value is None else f'{value / scale:.2f} {unit}'
+    def rate(value):
+        if value is None:
+            return 'unavailable'
+        unit, scale = ('Mbps', 125000) if value >= 12500 else ('KiB/s', 1024) if value >= 1024 else ('B/s', 1)
+        return fmt(value, unit, scale)
+    yield 'section', 'Network / last 5 minutes / local SSH'
+    samples = summary.get('samples', 0)
+    if not samples:
+        yield 'Network', 'Unavailable / no current-boot samples for this attempt'
+        return
+    seconds = summary.get('traffic_seconds', 0)
+    rx, tx = summary.get('rx_bytes', 0), summary.get('tx_bytes', 0)
+    yield 'Traffic', ('RX ' + rate(rx / seconds if seconds else None) + ' / TX ' + rate(tx / seconds if seconds else None) + ' observed avg')
+    yield 'Peak RX+TX', rate(summary.get('traffic_peak_bytes_sec'))
+    if summary.get('rtt_eligible', 0):
+        yield 'TCP RTT', fmt(summary.get('rtt_p50_ms')) + ' p50 / ' + fmt(summary.get('rtt_p95_ms')) + ' p95 (ACK progress)'
+        yield 'Variation', fmt(summary.get('rttvar_p95_ms')) + ' TCP deviation p95 / variation proxy'
+    else:
+        tracked = (summary.get('recording') or {}).get('ack_tracking_samples', 0)
+        reason = 'no recent ACK progress' if tracked else 'ACK freshness fields unavailable'
+        yield 'RTT/variation', 'Unavailable / ' + reason
+    yield 'Retransmits', str(summary['retrans']) if summary.get('retrans') is not None else 'unavailable'
+    yield 'Queues (max)', ('send ' + fmt(summary.get('queue'), 'KiB', 1024) + ' / unsent ' + fmt(summary.get('unsent'), 'KiB', 1024))
+    latest = 'fresh' if age is not None and 0 <= age < 8 else 'STALE' if age is not None and age >= 0 else 'unverified'
+    yield 'Coverage', f'{seconds:.1f}s recorded / TCP {samples - summary.get("unavailable", 0)}/{samples} / gaps {summary.get("gaps", "unknown")}'
+    yield 'Latest sample', latest + (f' / {age:.1f}s old' if age is not None and age >= 0 else '') + ' / recorder ' + state
+
+
 def status_cli(args):
+    compact = getattr(args, 'ui_rows', False)
+    def ui_row(label, value, role='normal'):
+        print(label + '\t' + str(value).replace('\t', '?').replace('\n', '?') + '\t' + role)
     def emit(message):
-        if not args.network_only:
+        if not args.network_only and not compact:
             print(message)
+    def recording(value, role='normal'):
+        if compact and not args.network_only:
+            ui_row('Diagnostics', value, role)
     def unavailable(reason):
-        print('status: network last 5m: unavailable (' + reason + ')')
+        if compact:
+            ui_row('section', 'Network / last 5 minutes / local SSH')
+            ui_row('Network', 'Unavailable / ' + reason)
+        else:
+            print('status: network last 5m: unavailable (' + reason + ')')
     emit('status: diagnostics launcher: ' + (args.version or 'unknown'))
     if args.recording_policy == 'off':
+        recording('Off for this attempt (recorded policy)')
         emit('status: diagnostics: off for this attempt (recorded policy)')
         unavailable('diagnostics off for this attempt')
         return 0
     if not args.attempt:
+        recording('Unknown / no recorded attempt identity', 'warn')
         emit('status: diagnostics: unknown (no recorded attempt identity; checked on next deliberate launch/reset)')
         unavailable('no recorded attempt identity')
         return 0
     try:
         store = Store(args.days, args.cap, create=False)
     except FileNotFoundError:
+        recording('Degraded / recorded attempt has no store', 'warn')
         emit('status: diagnostics: degraded (recorded attempt has no store)')
         unavailable('recorded attempt has no diagnostic store')
         return 0
@@ -10110,6 +10535,8 @@ def status_cli(args):
         fresh = age is not None and 0 <= age < 8
         state = 'active' if running and owner_live and fresh else \
             'degraded' if running or owner_live or not identity else 'off' if identified else 'unknown'
+        recording(state + (f' / sample {age:.1f}s old' if age is not None and age >= 0 else ' / sample unavailable'),
+                  'ok' if state == 'active' else 'warn')
         latest = sample['utc'] if sample else 'unavailable in last 5m'
         age_text = f'; age={age:.1f}s' if age is not None and age >= 0 else ''
         emit(f'status: diagnostics: {state}; attempt={args.attempt}; last sample={latest}{age_text}; {store.path}')
@@ -10123,17 +10550,26 @@ def status_cli(args):
             emit('status: diagnostics last 5m: ' + line)
         current_rows = [row for row in rows if row.get('boot') == BOOT]
         network_summary = summarize(current_rows)[0] if current_rows else {}
-        for line in network_lines(network_summary, age, state):
-            print('status: network last 5m: ' + line)
+        if compact:
+            for label, value in network_rows(network_summary, age, state):
+                ui_row(label, value, 'warn' if label == 'Latest sample' and not fresh else 'normal')
+        else:
+            for line in network_lines(network_summary, age, state):
+                print('status: network last 5m: ' + line)
         versions = summary['recording']['launchers']
         def version(value):
             return tuple(map(int, value.split('.'))) if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value) else None
         installed = version(args.version)
         if installed and any(version(item) and version(item) < installed for item in versions):
             emit('status: diagnostics note: collector predates this launcher; next deliberate launch/reset adopts the installed recorder')
+            if compact and not args.network_only:
+                ui_row('Note', 'Older collector / next deliberate launch or reset adopts the installed recorder')
         if partial:
             emit('status: diagnostics coverage: PARTIAL: ' + '; '.join(partial))
-            print('status: network last 5m: coverage PARTIAL: ' + '; '.join(partial))
+            if compact:
+                ui_row('Partial', '; '.join(partial))
+            else:
+                print('status: network last 5m: coverage PARTIAL: ' + '; '.join(partial))
     finally:
         store.close()
     return 0
@@ -10168,6 +10604,7 @@ def main(argv=None):
     parser.add_argument("--policy", default="")
     parser.add_argument('--recording-policy', choices=('on', 'off', 'unknown'), default='unknown')
     parser.add_argument('--network-only', action='store_true')
+    parser.add_argument('--ui-rows', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not 1 <= args.days <= 30 or not 2 * CHUNK <= args.cap <= 1073741824:
         raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")
@@ -10199,6 +10636,12 @@ REMOTE_CHROME_DIAGNOSTICS
 }
 
 main() {
+  # Internal subprocesses carry machine arguments and must retain their exact
+  # protocol. Presentation options are for human entry points only.
+  case "${1:-}" in
+    _diagnostics-query|_yubikey-run|_notify-listener|_notify-status) ;;
+    *) chrome_ui_options "$@"; set -- "${chrome_ui_args[@]}" ;;
+  esac
   local subcommand="${1:-}"
 
   case "$subcommand" in

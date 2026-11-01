@@ -26,7 +26,11 @@ change them. Runtime timeout/path settings still govern each invocation. See
 
 `doctor` accepts the browser command and YubiKey selection options.
 `stop --from SOURCE` requests cleanup on a display host from the browser host.
-Use `remote-chrome --help` for the command synopsis. Ownership checks still
+Use `remote-chrome --help` for the command synopsis and
+`remote-chrome --verbose --help` for the complete options/environment reference.
+`--verbose`, `--plain`, and `--color auto|always|never` control presentation;
+they do not change launch configuration or a recorded session's settings.
+Ownership checks still
 apply with `--yes`, and `--password-store` browser overrides are rejected.
 
 ## Browser and session

@@ -5,6 +5,9 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../bin/remote-chrome
 source "$repo_root/bin/remote-chrome"
+# Existing behavioral fixtures assert the detailed check messages. The compact
+# UI and actual terminal behavior have their own end-to-end CLI fixtures.
+chrome_ui_verbose=1
 test_yk_ssh_request_definition="$(declare -f yk_ssh_request)"
 
 # Keep any accidentally unmocked tmux or runtime-state access away from the
@@ -3825,9 +3828,16 @@ test_launch_mode_auto_and_opt_out() (
   output="$(command cat "$test_dir/launch-output")"
   [[ "$events" == *preflight* ]] || fail "auto mode did not expect forwarding"
   [[ "$events" == *"preflight existing"* ]] || fail "existing Chrome handling ran before YubiKey preflight"
-  assert_contains "$output" "Attach: $PROGRAM attach test-host --session remote-chrome-test-host"
-  assert_contains "$output" "Status: $PROGRAM status test-host --session remote-chrome-test-host"
-  assert_contains "$output" "Stop: $PROGRAM stop test-host --session remote-chrome-test-host"
+  if [ "$chrome_ui_verbose" = 1 ]; then
+    assert_contains "$output" "Attach: $PROGRAM attach test-host --session remote-chrome-test-host"
+    assert_contains "$output" "Status: $PROGRAM status test-host --session remote-chrome-test-host"
+    assert_contains "$output" "Stop: $PROGRAM stop test-host --session remote-chrome-test-host"
+  else
+    assert_contains "$output" 'Background session started'
+    assert_contains "$output" "$PROGRAM status test-host"
+    assert_contains "$output" "$PROGRAM reset test-host"
+    [[ "$output" != *'--session remote-chrome-test-host'* ]] || fail 'compact receipt exposed redundant session option'
+  fi
 
   events=""
   chrome_launch test-host --no-yubikey >/dev/null
@@ -6644,7 +6654,14 @@ test_diagnostics_uses_invoked_launcher_version() (
   assert_contains "$output" $'--version\n'"$VERSION"$'\n--days'
 )
 
+test_compact_launch_and_reset_preserve_behavior() (
+  chrome_ui_verbose=0
+  test_launch_mode_auto_and_opt_out
+  test_diagnostics_reset_rotates_attempt_and_preserves_policy
+)
+
 tests=(
+  test_compact_launch_and_reset_preserve_behavior
   test_diagnostics_status_preserves_exact_attempt_and_recorded_off_policy
   test_diagnostics_uses_invoked_launcher_version
   test_diagnostics_reset_rotates_attempt_and_preserves_policy

@@ -20,8 +20,12 @@ remote-chrome doctor remote-host
 remote-chrome stop remote-host
 ```
 
-Detached tmux mode is the default. Successful launches print commands with the
-exact host and session name. The default name is `remote-chrome-HOST`, with
+Detached tmux mode is the default. Successful launches print a compact receipt
+with the browser/display hosts, selected video and diagnostics policies, and
+copyable inspect/restart/stop commands. `Background session started` confirms
+creation of the managed session, not that Chrome rendered a window. Hardware
+preference and enabled recording are policies; status checks their running state.
+The default name is `remote-chrome-HOST`, with
 awkward characters replaced by underscores: `remote.example` becomes
 `remote-chrome-remote_example`. `attach` switches the current client inside
 tmux and attaches normally outside it.
@@ -80,9 +84,27 @@ for the whole session.
 Both `remote-chrome status` and `remote-chrome status remote-host` show the last
 five minutes of locally recorded SSH traffic, ACK-progress TCP RTT, delay
 variation and retransmissions. The overview shows each managed session;
-the host-specific command adds detailed transport and recording checks. Missing
+the host-specific command adds observed transport and recording health. Missing
 or stale measurements remain explicit. See [network status](diagnostics.md#network-status)
 for units, coverage and measurement limits.
+
+Use `--verbose` to see individual checks, PIDs, paths, exact recorded parameters,
+and collector versions. Available liveness checks passing does not establish
+smooth delivery or browser-window readiness:
+
+```bash
+remote-chrome status snap --verbose
+remote-chrome --verbose --help
+remote-chrome --plain status snap
+```
+
+Output uses automatic terminal colors and simple UTF-8 glyphs. Redirected output
+is plain text. `NO_COLOR` disables automatic color, `TERM=dumb` disables automatic
+decoration, `--color auto|always|never` overrides color detection, and `--plain`
+disables both color and glyphs. These options work before or after commands;
+arguments after `--` belong to Chrome and are untouched. Narrow terminals place
+values beneath their labels. See the [CLI design](cli-design.md) for state
+semantics and the presentation contract.
 
 ## Reset
 
