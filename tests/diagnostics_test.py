@@ -326,8 +326,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("argv", marks[0])
 
     def test_status_is_read_only_without_or_with_old_history(self):
+        attempt = '11111111-1111-4111-8111-111111111111'
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(d.main(["status", "snap"]), 0)
+            self.assertEqual(d.main(["status", "snap", '--attempt', attempt]), 0)
         self.assertFalse((self.base / "remote-chrome").exists())
         s = self.store()
         s.append(record())
@@ -335,8 +336,176 @@ class DiagnosticsTests(unittest.TestCase):
         name = s.chunks()[0][1]
         os.utime(s.path / name, (time.time() - 31 * 86400,) * 2)
         with contextlib.redirect_stdout(io.StringIO()):
-            d.main(["status", "snap"])
+            d.main(["status", "snap", '--attempt', attempt])
         self.assertTrue((s.path / name).exists())
+
+    def health_sample(self, seconds_ago=0, **changes):
+        identity = dict(pid=os.getpid(), start=d.process(os.getpid())['start'])
+        row = self.measured(time.time() - seconds_ago, mono=time.monotonic() - seconds_ago,
+                            launcher='1.8.2', owner=identity, collector=identity)
+        row.update(changes)
+        return row
+
+    def health_status(self, rows=(), **options):
+        store = self.store()
+        for row in rows:
+            store.append(row)
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in store.path.iterdir()}
+        argv = ['status', 'snap', '--version', '1.8.2', '--attempt',
+                options.pop('attempt', '11111111-1111-4111-8111-111111111111')]
+        for key, value in options.items():
+            argv += ['--' + key.replace('_', '-'), value]
+        with patch.object(d, 'bounded', side_effect=AssertionError('status must not run tools')), \
+                patch.object(d.Store, 'prune', side_effect=AssertionError('status must not prune')), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(d.main(argv), 0)
+        after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in store.path.iterdir()}
+        self.assertEqual(after, before)
+        return output.getvalue()
+
+    def test_health_legacy_active_collector_is_advisory_not_degraded(self):
+        rows = [self.health_sample(age, schema=1, launcher='1.7.0') for age in (4, 2, 0)]
+        for row in rows:
+            row['tcp'].pop('bytes_acked')
+            row['tcp'].pop('last_ack_ms')
+            row['delta'].pop('bytes_acked')
+        output = self.health_status(rows)
+        self.assertIn('diagnostics: active;', output)
+        self.assertIn('diagnostics launcher: 1.8.2', output)
+        self.assertIn('collector 1.7.0; record schema 1', output)
+        self.assertIn('declared unknown; observed 2.00s median (2 same-boot intervals)', output)
+        self.assertIn('ACK tracking 0/3 TCP samples', output)
+        self.assertIn('RTT freshness unavailable: ACK tracking fields absent', output)
+        self.assertIn('next deliberate launch/reset adopts the installed recorder', output)
+        self.assertNotIn('degraded', output)
+
+    def test_health_known_idle_is_distinct_from_missing_ack_fields(self):
+        row = self.health_sample()
+        row['delta'].update(bytes_sent=0, bytes_received=0, bytes_acked=0)
+        output = self.health_status([row])
+        self.assertIn('diagnostics: active;', output)
+        self.assertIn('ACK tracking 1/1 TCP samples; RTT-eligible 0', output)
+        self.assertIn('no fresh RTT observations during this window', output)
+        self.assertNotIn('fields absent', output)
+        self.assertNotIn('predates', output)
+        # Field support depends on the kernel/tool path, not just collector age.
+        row = self.health_sample(attempt=str(uuid.uuid4()))
+        row['tcp'].pop('bytes_acked')
+        row['delta'].pop('bytes_acked')
+        output = self.health_status([row], attempt=row['attempt'])
+        self.assertIn('collector 1.8.2; record schema 2', output)
+        self.assertIn('RTT freshness unavailable: ACK tracking fields absent', output)
+        self.assertNotIn('predates', output)
+
+    def test_health_tcp_unavailable_keeps_its_reason(self):
+        row = self.health_sample(tcp={'available': False, 'reason': 'SSH process absent or ambiguous'}, delta=None)
+        output = self.health_status([row])
+        self.assertIn('diagnostics: active;', output)
+        self.assertIn('TCP 0/1 observed samples', output)
+        self.assertIn('SSH process absent or ambiguous=1', output)
+
+    def test_health_off_and_unknown_policy_do_not_select_older_attempt(self):
+        row = self.health_sample(launcher='1.7.0')
+        output = self.health_status([row], attempt='', recording_policy='off')
+        self.assertIn('off for this attempt (recorded policy)', output)
+        self.assertNotIn('collector 1.7.0', output)
+        output = self.health_status(attempt='')
+        self.assertIn('unknown (no recorded attempt identity', output)
+        output = self.health_status(attempt=str(uuid.uuid4()))
+        self.assertIn('diagnostics: degraded;', output)
+        self.assertIn('collector unknown; record schema unknown', output)
+        self.assertNotIn('collector 1.7.0', output)
+
+    def test_health_stale_attempt_uses_header_identity_without_full_history(self):
+        row = self.health_sample(600, schema=1, launcher='1.7.0')
+        output = self.health_status([row])
+        self.assertIn('diagnostics: degraded;', output)
+        self.assertIn('collector=live; owner=live; recent sample=stale or unavailable', output)
+        self.assertIn('collector 1.7.0; record schema 1', output)
+        self.assertIn('TCP 0/0 observed samples', output)
+
+    def test_health_dead_reused_and_other_boot_identities_cannot_be_active(self):
+        for change, expected in [({'collector': {'pid': os.getpid(), 'start': 'reused'}}, 'degraded'),
+                                 ({'owner': {'pid': os.getpid(), 'start': 'reused'}}, 'degraded'),
+                                 ({'boot': 'another-boot'}, 'off'),
+                                 ({'collector': {}, 'owner': {}}, 'unknown'),
+                                 ({'collector': {'pid': os.getpid(), 'start': 'reused'},
+                                   'owner': {'pid': os.getpid(), 'start': 'reused'}}, 'off')]:
+            with self.subTest(change=change):
+                # Distinct attempts ensure prior fixtures cannot provide identity.
+                attempt = str(uuid.uuid4())
+                row = self.health_sample(attempt=attempt, **change)
+                output = self.health_status([row], attempt=attempt)
+                self.assertIn('diagnostics: ' + expected + ';', output)
+                self.assertNotIn('diagnostics: active;', output)
+
+    def test_health_carried_context_does_not_supply_fresh_samples(self):
+        store = self.store()
+        row = self.health_sample(600)
+        start = dict(row, event='start', sample_seconds=1)
+        identity = {key: row[key] for key in ('schema', 'boot', 'attempt', 'role', 'origin', 'target',
+                                             'session', 'host', 'launcher', 'collector', 'owner')}
+        store.context = dict(identity=identity, state={'start': start})
+        store.append(dict(row, **d.now(), event='mark'))
+        output = self.health_status()
+        self.assertIn('diagnostics: degraded;', output)
+        self.assertIn('TCP 0/0 observed samples', output)
+        self.assertIn('declared sample=1s; observed unknown', output)
+
+    def test_health_read_limit_reports_partial_without_mutation(self):
+        row = self.health_sample()
+        with patch.object(d, 'READ_LIMIT', 256):
+            output = self.health_status([row])
+        self.assertIn('coverage: PARTIAL:', output)
+        self.assertIn('read limit reached', output)
+
+    def test_recording_cadence_excludes_carried_cross_boot_and_gap_intervals(self):
+        row = self.measured(100, launcher='1.8.2')
+        rows = [row, dict(row, wall=102, mono=102),
+                dict(row, wall=104, mono=104, boot='other'),
+                dict(row, wall=105, mono=105, event='clock_or_sampling_gap'),
+                dict(row, wall=106, mono=106), dict(row, wall=108, mono=108, carried=True)]
+        summary = d.summarize(rows)[0]
+        self.assertEqual(summary['samples'], 4)
+        self.assertEqual(summary['recording']['interval_ms_hist'], {'2000': 1})
+
+    def test_recording_metadata_survives_new_and_old_minute_summaries(self):
+        row = self.measured(100, launcher='1.8.1')
+        start = dict(row, event='start', sample_seconds=1, process_seconds=2)
+        analysis = d.Analysis()
+        for item in (start, row, dict(row, wall=101, mono=101)):
+            analysis.feed(item)
+        aggregate = analysis.drain()[0]
+        minute = dict(row, event='minute', aggregate=aggregate, state={'start': start})
+        current = d.summarize([minute])[0]
+        self.assertEqual(current['recording']['launchers'], ['1.8.1'])
+        self.assertEqual(current['recording']['ack_tracking_samples'], 2)
+        self.assertEqual(current['recording']['interval_ms_hist'], {'1000': 1})
+        aggregate = dict(aggregate)
+        aggregate.pop('recording')
+        old = d.summarize([dict(minute, aggregate=aggregate)])[0]
+        text = '\n'.join(d.recording_lines(old))
+        self.assertIn('collector 1.8.1; record schema 2', text)
+        self.assertIn('declared process=2s, sample=1s; observed unknown', text)
+        self.assertIn('ACK tracking 0 known; 2 samples unknown', text)
+        self.assertNotIn('ACK tracking 0/2', text)
+
+    def test_recording_metadata_carries_across_minute_drain(self):
+        row = self.measured(100, launcher='1.8.2')
+        analysis = d.Analysis()
+        analysis.feed(dict(row, event='start', sample_seconds=1))
+        analysis.feed(row)
+        analysis.drain()
+        analysis.feed(dict(row, wall=101, mono=101))
+        second = analysis.drain()[0]
+        self.assertEqual(second['recording']['declared_seconds'], {'sample_seconds': [1]})
+        self.assertEqual(second['recording']['coverage_samples'], 1)
+
+    def test_query_reports_invoked_helper_version_without_relabeling_history(self):
+        self.store().append(self.health_sample(launcher='1.7.0', schema=1))
+        result = d.query(self.query_args(version='1.8.2'))
+        self.assertEqual(result['helper_version'], '1.8.2')
+        self.assertEqual(result['summaries'][0]['recording']['launchers'], ['1.7.0'])
 
     def test_helper_observation_keeps_error_text_out_and_checks_owner(self):
         runtime = self.base / "runtime"
@@ -517,6 +686,8 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertIn('legacy sampled RTT p95 ' + value, report)
                 self.assertIn('TCP deviation p95 2.0 ms', report)
                 self.assertIn('freshness unavailable; older diagnostics helper', report)
+                self.assertIn('query helper: unknown (older or unavailable helper)', report)
+                self.assertIn('collector unknown; record schema unknown', report)
                 self.assertNotIn('ACK-progress', report)
                 self.assertNotIn('eligible samples', report)
 

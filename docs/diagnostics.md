@@ -78,6 +78,53 @@ Normal analysis streams within the capped store instead of loading raw history
 into memory. Export is a request to copy those technical observations, including
 hostnames, addresses and process identities. Review it before sharing.
 
+## Recording health
+
+`status HOST` describes the current local viewer attempt recorded in tmux.
+It prints the invoked launcher version separately from the collector version
+and record schema found in that attempt's evidence. Installing a launcher does
+not replace a running collector. A collector that predates the command gets an
+advisory about the next deliberate launch/reset; the version difference alone
+does not degrade its recording state.
+
+The recording state is `active` only with a fresh sample (under eight seconds)
+and exact live collector and owner identities on the current boot. A live owner
+or collector without fresh samples is `degraded`; known ended identities are
+`off`. An explicit recorded off policy stays off even if older history exists.
+A session without a recorded attempt identity or usable process metadata is
+`unknown`; status does not select a recent unrelated attempt. These diagnostic
+states are advisory and do
+not change the existing transport checks' exit status.
+
+The recent health view covers at most the last five minutes. It shows declared
+TCP/process/host/path sampling intervals where recorded, the observed median
+sample interval, sample and TCP availability counts, ACK-tracking coverage,
+RTT-eligible samples, gaps and recorded TCP-unavailability reasons. Observed
+intervals use consecutive non-carried samples from the same attempt and boot,
+with monotonic timestamps; reported gaps and socket discontinuities break the
+sequence. Intervals over 60 seconds are excluded. These are retained
+observations, not a promise of continuous coverage or an expected-sample score.
+
+Zero eligible RTT samples during idle activity differs from absent ACK fields.
+The latter makes freshness unavailable, even with a newer collector on a
+kernel/tool path that lacks those fields. Older minute summaries without field
+coverage remain unknown rather than contributing measured zeros. Context
+carried from an earlier chunk supplies metadata, never a fresh sample.
+
+Status opens the store read-only, without creating files or pruning history.
+Record reads and fallback chunk-header identity reads share a 32 MiB input
+budget; status reports partial coverage if it exhausts that budget. It adds no
+SSH request, probe, service or collector. Header lookup can identify a stale
+attempt without scanning its old record bodies.
+
+Historical `diagnostics` reports show the query helper version separately from
+the collector versions, schemas, cadence and field coverage for each endpoint
+and attempt in the requested window. Minute summaries preserve this context
+and coverage for long queries. Older helpers and summaries remain readable;
+missing metadata stays unknown. Historical context does not claim that the
+collector is currently running. Local and browser-host reports use the existing
+single bounded SSH request.
+
 ## Recorded data
 
 | Observation | Frequency |

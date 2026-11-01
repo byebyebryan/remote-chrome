@@ -6465,7 +6465,47 @@ test_diagnostics_record_hook_covers_both_detached_paths() (
   [ "$count" = 2 ] || fail "YubiKey tmux launch missed diagnostics hook"
 )
 
+test_diagnostics_status_preserves_exact_attempt_and_recorded_off_policy() (
+  local test_dir saved output
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  need() { :; }
+  tmux() {
+    case "$1" in
+      has-session) return 0 ;;
+      list-windows) echo chrome ;;
+      show-options) echo "$saved" ;;
+      *) return 1 ;;
+    esac
+  }
+  chrome_transport_status() { return 0; }
+  chrome_diagnostics_command() { printf '%s\n' "$@" >"$test_dir/args"; return 1; }
+  yk_prepare_for_launch() { :; }
+  yk_load_state() { return 1; }
+  notify_status_current() { return 0; }
+  saved=on:30:1073741824:11111111-1111-4111-8111-111111111111
+  output="$(chrome_status_current snap remote-chrome-snap)"
+  assert_contains "$(cat "$test_dir/args")" $'--attempt\n11111111-1111-4111-8111-111111111111\n--recording-policy\non'
+  assert_contains "$output" 'status: healthy'
+  saved=off:30:1073741824:-
+  chrome_status_current snap remote-chrome-snap >/dev/null
+  assert_contains "$(cat "$test_dir/args")" $'--attempt\n\n--recording-policy\noff'
+  saved=''
+  chrome_status_current snap remote-chrome-snap >/dev/null
+  assert_contains "$(cat "$test_dir/args")" $'--recording-policy\nunknown'
+)
+
+test_diagnostics_uses_invoked_launcher_version() (
+  chrome_transport_defaults() { chrome_diag_days=30 chrome_diag_cap=1073741824; }
+  chrome_diagnostics_run() { printf '%s\n' "$@"; }
+  local output
+  output="$(chrome_diagnostics_command status snap --version caller-supplied)"
+  assert_contains "$output" $'--version\n'"$VERSION"$'\n--days'
+)
+
 tests=(
+  test_diagnostics_status_preserves_exact_attempt_and_recorded_off_policy
+  test_diagnostics_uses_invoked_launcher_version
   test_diagnostics_reset_rotates_attempt_and_preserves_policy
   test_diagnostics_record_hook_covers_both_detached_paths
   test_unsafe_bootstrap_cleanup_does_not_skip_other_owned_resources

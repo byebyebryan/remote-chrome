@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.8.1"
+VERSION="1.8.2"
 
 usage() {
   cat <<USAGE
@@ -1698,7 +1698,7 @@ chrome_diagnostics_command() {
   local action="$1"
   shift
   chrome_transport_defaults || return 1
-  chrome_diagnostics_run "$action" "$@" --days "$chrome_diag_days" --cap "$chrome_diag_cap"
+  chrome_diagnostics_run "$action" "$@" --version "$VERSION" --days "$chrome_diag_days" --cap "$chrome_diag_cap"
 }
 
 chrome_waypipe_command=()
@@ -4165,12 +4165,16 @@ chrome_status_current() {
   fi
 
   chrome_transport_status "$host" "$session" || code=1
-  local diagnostics_saved="" diagnostics_attempt=""
+  local diagnostics_saved="" diagnostics_attempt="" diagnostics_policy=unknown
   diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
   if [[ "$diagnostics_saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
     diagnostics_attempt="${BASH_REMATCH[1]}"
+    diagnostics_policy=on
+  elif [[ "$diagnostics_saved" =~ ^off:[0-9]+:[0-9]+:-$ ]]; then
+    diagnostics_policy=off
   fi
-  chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" ||
+  chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" \
+    --recording-policy "$diagnostics_policy" ||
     echo "status: diagnostics: degraded (local diagnostic store unavailable)"
   yk_prepare_for_launch "$host"
   if yk_load_state; then
@@ -8567,11 +8571,11 @@ class Store:
         return True
 
     def records(self, since, until, target=None, origin=None, session=None,
-                budget=None, stream='raw', raw_after=None):
+                budget=None, stream='raw', raw_after=None, attempt=None, newest=False):
         used = 0
         requested_stream = stream
         budget = READ_LIMIT if budget is None else budget
-        for stamp, name, _ in self.chunks():
+        for stamp, name, _ in sorted(self.chunks(), reverse=newest):
             if stamp < since:
                 continue
             try:
@@ -8603,7 +8607,7 @@ class Store:
                             if requested_stream != 'all' and row.get('stream', 'raw') != requested_stream:
                                 break
                             if any(value is not None and identity.get(key) != value for key, value in
-                                   [('target', target), ('origin', origin), ('session', session)]):
+                                   [('target', target), ('origin', origin), ('session', session), ('attempt', attempt)]):
                                 break
                             if file_stream == 'raw' and raw_after and stamp <= raw_after.get(identity.get('attempt'), -1):
                                 break
@@ -8625,6 +8629,8 @@ class Store:
                         if origin is not None and row.get("origin") != origin:
                             continue
                         if session is not None and row.get("session") != session:
+                            continue
+                        if attempt is not None and row.get('attempt') != attempt:
                             continue
                         if file_stream == 'raw' and raw_after and row['event'] not in ('mark', 'probe') and \
                                 row['wall'] <= raw_after.get(row['attempt'], -1):
@@ -8650,6 +8656,30 @@ class Store:
                         yield row
                     except (ValueError, TypeError, KeyError, AttributeError):
                         continue
+
+    def recording_identity(self, target, origin, session, attempt, budget):
+        """Read chunk headers only, including stale attempts; never prune/create."""
+        used = 0
+        for _stamp, name, _size in reversed(self.chunks()):
+            try:
+                descriptor = self.open_file(name, os.O_RDONLY)
+            except FileNotFoundError:
+                continue
+            with os.fdopen(descriptor, 'rb') as source:
+                raw = source.readline(LINE + 1)
+            used += len(raw)
+            if used > budget:
+                raise ValueError('identity read limit reached')
+            try:
+                row = json.loads(raw)
+                identity = row.get('identity', row)
+                if all(value is None or identity.get(key) == value for key, value in
+                       [('target', target), ('origin', origin), ('session', session),
+                        ('attempt', attempt), ('role', 'viewer')]):
+                    return identity
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return None
 
     def inventory(self, target=None, origin=None, session=None):
         values = []
@@ -9314,6 +9344,63 @@ def sample_quality(tcp, delta):
     return {'activity': activity, 'rtt_recent_ack_progress': recent}
 
 
+def recording_metadata(value, row):
+    for key, item in [('launchers', row.get('launcher')), ('schemas', row.get('schema'))]:
+        if (key == 'launchers' and isinstance(item, str) and 0 < len(item) <= 64) or \
+                (key == 'schemas' and type(item) is int and item > 0):
+            if item not in value[key] and len(value[key]) < 8:
+                value[key].append(item)
+    if row.get('event') == 'start':
+        for key in ('sample_seconds', 'process_seconds', 'host_seconds', 'path_seconds'):
+            item = row.get(key)
+            if type(item) in (int, float) and math.isfinite(item) and 0 < item <= 3600:
+                values = value['declared_seconds'].setdefault(key, [])
+                if item not in values and len(values) < 8:
+                    values.append(item)
+
+
+def recording_stats(row):
+    value = dict(launchers=[], schemas=[], declared_seconds={}, interval_ms_hist={},
+                 coverage_samples=0, ack_tracking_samples=0,
+                 tcp_reasons={})
+    recording_metadata(value, row)
+    return value
+
+
+def recording_lines(summary):
+    """Shared current/historical presentation; absent old fields stay unknown."""
+    value = summary.get('recording') or {}
+    versions = ','.join(str(v) for v in value.get('launchers', [])) or 'unknown'
+    schemas = ','.join(str(v) for v in value.get('schemas', [])) or 'unknown'
+    yield f'collector {versions}; record schema {schemas}'
+    declared = value.get('declared_seconds', {})
+    cadence = ', '.join(key.removesuffix('_seconds') + '=' + '/'.join(f'{v:g}s' for v in values)
+                        for key, values in sorted(declared.items())) or 'unknown'
+    hist = value.get('interval_ms_hist') or {}
+    observed = hist_percentile(hist, .5)
+    interval = f'{observed / 1000:.2f}s median ({sum(hist.values())} same-boot intervals)' if observed is not None else 'unknown'
+    yield f'sampling: declared {cadence}; observed {interval}'
+    samples = summary.get('samples', 0)
+    known = value.get('coverage_samples', 0)
+    tcp_count = samples - summary.get('unavailable', 0)
+    ack = value.get('ack_tracking_samples', 0)
+    # Old minute summaries retain sample/TCP counts but no field-coverage counts.
+    unknown = max(0, samples - known)
+    ack_text = f'{ack}/{tcp_count} TCP samples' if not unknown else f'{ack} known; {unknown} samples unknown'
+    eligible = summary.get('rtt_eligible')
+    yield (f'coverage: TCP {tcp_count}/{samples} observed samples; ACK tracking {ack_text}; '
+           f"RTT-eligible {eligible if eligible is not None else 'unknown'}; gaps {summary.get('gaps', 'unknown')}")
+    if not unknown and tcp_count and not ack:
+        yield 'RTT freshness unavailable: ACK tracking fields absent in observed TCP samples'
+    elif ack and eligible == 0:
+        yield 'no fresh RTT observations during this window; activity counts distinguish idle, baseline and outstanding data'
+    reasons = value.get('tcp_reasons') or {}
+    if reasons:
+        yield 'TCP unavailable reasons: ' + ', '.join(f'{key}={count}' for key, count in sorted(reasons.items()))
+    if unknown:
+        yield 'field coverage unavailable for older summaries; observed cadence uses only retained interval observations'
+
+
 class Analysis:
     """One bounded streaming analysis shared by recording, queries and watch.
 
@@ -9333,7 +9420,7 @@ class Analysis:
                     rtt_eligible=0, legacy_samples=0, activity={}, tx_bytes=0, rx_bytes=0,
                     traffic_seconds=0, rate_peak=0, retrans=0, retrans_observations=0,
                     retrans_bytes=0, queue=None, unsent=None, cpu={}, rss={},
-                    codecs=[], networks=[], events=[], incidents=[], timeline={})
+                    codecs=[], networks=[], events=[], incidents=[], timeline={}, recording=recording_stats(row))
 
     def group(self, row):
         key = (row['attempt'], row['role'], row['host'])
@@ -9343,7 +9430,7 @@ class Analysis:
                 return None
             self.groups[key] = {'stats': self.stats(row), 'baseline': collections.deque(maxlen=300),
                                 'path': None, 'pending': 0, 'context': {}, 'last_host': None,
-                                'last_wifi': None}
+                                'last_wifi': None, 'previous_sample': None}
         return self.groups[key]
 
     @staticmethod
@@ -9376,6 +9463,7 @@ class Analysis:
         if g is None:
             return
         s = g['stats']
+        recording_metadata(s['recording'], row)
         if not row.get('carried'):
             if row['wall'] < s['first_wall']:
                 s['first'], s['first_wall'] = row['utc'], row['wall']
@@ -9387,6 +9475,7 @@ class Analysis:
                 if isinstance(context, dict) and context.get('event') in CONTEXT_EVENTS:
                     self.feed(dict(context, carried=True, wall=row['wall'], utc=row['utc']))
             self.merge(g, row.get('aggregate', {}))
+            g['previous_sample'] = None
             if row.get('raw_records_dropped', 0):
                 s['gaps'] += 1
                 self.flag(g, row, 'raw_detail_gap', 'Minute summary exists but raw records were skipped')
@@ -9438,6 +9527,7 @@ class Analysis:
         elif event in {'collection_gap', 'clock_or_sampling_gap', 'collector_failure', 'retention_unavailable'}:
             s['gaps'] += 1
             g['pending'] = 0
+            g['previous_sample'] = None
             self.flag(g, row, 'telemetry_gap', 'Recording coverage is incomplete')
         elif event in {'mark', 'start', 'end', 'reset', 'tcp_discontinuity', 'probe'}:
             s['events'].append({k: row[k] for k in ('event', 'utc', 'reason', 'previous_attempt') if k in row})
@@ -9445,12 +9535,29 @@ class Analysis:
             if event == 'tcp_discontinuity':
                 g['baseline'].clear()
                 g['pending'] = 0
-        if event != 'sample':
+                g['previous_sample'] = None
+        if event != 'sample' or row.get('carried'):
             return
         s['samples'] += 1
         tcp, delta = row.get('tcp', {}), row.get('delta') or {}
+        coverage = s['recording']
+        coverage['coverage_samples'] += 1
+        if tcp.get('available') and all(type(tcp.get(key)) in (int, float)
+                                       for key in ('bytes_acked', 'last_ack_ms')):
+            coverage['ack_tracking_samples'] += 1
+        prior = g['previous_sample']
+        if prior and row.get('boot') and row['boot'] == prior.get('boot') and \
+                all(type(item.get('mono')) in (int, float) for item in (prior, row)):
+            interval = row['mono'] - prior['mono']
+            if 0 < interval <= 60:
+                metric_hist_add(coverage['interval_ms_hist'], interval * 1000)
+        g['previous_sample'] = row
         if not tcp.get('available'):
             s['unavailable'] += 1
+            reason = str(tcp.get('reason') or 'reason not recorded')[:128]
+            if reason not in coverage['tcp_reasons'] and len(coverage['tcp_reasons']) >= 16:
+                reason = 'other recorded reasons'
+            coverage['tcp_reasons'][reason] = coverage['tcp_reasons'].get(reason, 0) + 1
         quality = row.get('quality') or sample_quality(tcp, delta)
         activity = quality['activity']
         s['activity'][activity] = s['activity'].get(activity, 0) + 1
@@ -9528,6 +9635,22 @@ class Analysis:
 
     def merge(self, group, value):
         s = group['stats']
+        coverage = s['recording']
+        recorded = value.get('recording') or {}
+        for key in ('launchers', 'schemas'):
+            for item in recorded.get(key, []):
+                if item not in coverage[key] and len(coverage[key]) < 8:
+                    coverage[key].append(item)
+        for key, values in recorded.get('declared_seconds', {}).items():
+            combined = coverage['declared_seconds'].setdefault(key, [])
+            for item in values:
+                if item not in combined and len(combined) < 8:
+                    combined.append(item)
+        for key in ('interval_ms_hist', 'tcp_reasons'):
+            for name, count in recorded.get(key, {}).items():
+                coverage[key][name] = coverage[key].get(name, 0) + count
+        for key in ('coverage_samples', 'ack_tracking_samples'):
+            coverage[key] += recorded.get(key, 0)
         for key in ('samples', 'unavailable', 'gaps', 'rtt_eligible', 'legacy_samples', 'tx_bytes',
                     'rx_bytes', 'traffic_seconds', 'retrans', 'retrans_observations', 'retrans_bytes'):
             s[key] += value.get(key, 0)
@@ -9584,6 +9707,9 @@ class Analysis:
             if context is None:
                 context = dict(attempt=stats['attempt'], role=stats['role'], host=stats['host'], **now())
             group['stats'] = self.stats(dict(context, **now()))
+            start = group['context'].get('start')
+            if start:
+                recording_metadata(group['stats']['recording'], start)
         return result
 
 
@@ -9606,6 +9732,7 @@ def duration(value):
 
 def report(label, data, timeline=False):
     print(label + ': ' + data.get('status', 'available'))
+    print('  query helper: ' + (data.get('helper_version') or 'unknown (older or unavailable helper)'))
     if data.get('resolution'):
         print('  resolution: ' + data['resolution'] + '; RTT bins: 1 ms; flags are observations, not diagnoses')
     storage = data.get('storage') or {}
@@ -9617,6 +9744,8 @@ def report(label, data, timeline=False):
     for g in data.get('summaries', []):
         print(f"  {g['attempt']} {g['host']} {g['role']}: {g['samples']} samples, {g['unavailable']} TCP unavailable, {g['gaps']} gaps")
         print(f"    {g['first']} to {g['last']}")
+        for line in recording_lines(g):
+            print('    ' + line)
         def fmt(value, suffix='', scale=1):
             return 'unavailable' if value is None else f'{value / scale:.1f}{suffix}'
         if 'rtt_eligible' in g:
@@ -9707,6 +9836,7 @@ def query(args):
                        minute_chunks=sum(x['stream'] == 'minute' for x in inventory),
                        oldest_utc=dt.datetime.fromtimestamp(min(stamps), dt.timezone.utc).isoformat(timespec='seconds') if stamps else None)
         return dict(schema=SCHEMA, status='partial' if partial else 'available', partial=partial,
+                    helper_version=getattr(args, 'version', '') or None,
                     summaries=analysis.summaries(), records=records, storage=storage,
                     resolution='raw' if args.include_records or not minute_until else 'minute with raw tail and fallback for older attempts; boundary minutes may overlap requested window',
                     generated_wall=time.time(), requested_since=args.since_wall, requested_until=args.until_wall)
@@ -9861,37 +9991,75 @@ def mark(args):
 
 
 def status_cli(args):
+    print('status: diagnostics launcher: ' + (args.version or 'unknown'))
+    if args.recording_policy == 'off':
+        print('status: diagnostics: off for this attempt (recorded policy)')
+        return 0
+    if not args.attempt:
+        print('status: diagnostics: unknown (no recorded attempt identity; checked on next deliberate launch/reset)')
+        return 0
     try:
         store = Store(args.days, args.cap, create=False)
     except FileNotFoundError:
-        print("status: diagnostics: " + ("degraded (recorded attempt has no store)" if args.attempt else
-                                         "off for this attempt (starts on next launch/reset)"))
+        print('status: diagnostics: degraded (recorded attempt has no store)')
         return 0
     try:
-        records = list(store.records(time.time() - 300, time.time(), args.target,
-                                     socket.gethostname(), args.session or None))
-        if args.attempt:
-            records = [r for r in records if r["attempt"] == args.attempt]
-        if not records:
-            print("status: diagnostics: " + ("degraded (no recent sample for recorded attempt)" if args.attempt else
-                                             "off for this attempt (starts on next launch/reset)"))
-            return 0
-        latest = max(records, key=lambda r: r["wall"])
-        attempt = latest["attempt"]
-        rows = [r for r in records if r["attempt"] == attempt]
-        samples = [r for r in rows if r["event"] == "sample"]
-        starts = [r for r in rows if r.get("collector")]
-        running = False
-        if starts:
-            birth = max(starts, key=lambda r: r["wall"])
-            collector = birth.get("collector", {})
-            running = birth["boot"] == BOOT and exact(collector.get("pid", 0), collector.get("start", "")) is not None
-        sample = max(samples, key=lambda r: r["wall"]) if samples else None
-        owner = latest.get("owner", {})
-        owner_live = latest["boot"] == BOOT and exact(owner.get("pid", 0), owner.get("start", "")) is not None
-        state = "active" if running and sample and time.time() - sample["wall"] < 8 else \
-            "degraded" if running or (args.attempt and owner_live) else "off"
-        print(f"status: diagnostics: {state}; attempt={attempt}; last sample={sample['utc'] if sample else 'unavailable'}; {store.path}")
+        wall, mono = time.time(), time.monotonic()
+        rows, partial = [], []
+        header_budget = min(1024 * 1024, READ_LIMIT // 4)
+        try:
+            for row in store.records(wall - 300, wall, args.target, socket.gethostname(),
+                                     args.session or None, attempt=args.attempt, newest=True,
+                                     budget=READ_LIMIT - header_budget):
+                if row['role'] == 'viewer':
+                    rows.append(row)
+        except ValueError as error:
+            partial.append(str(error))
+        rows.sort(key=lambda row: row['wall'])
+        identity = next((row for row in reversed(rows) if row.get('collector') and row.get('owner')), None)
+        if identity is None:
+            try:
+                identity = store.recording_identity(args.target, socket.gethostname(), args.session or None,
+                                                    args.attempt, header_budget)
+            except ValueError as error:
+                partial.append(str(error))
+        identity = identity or {}
+        identified = all(isinstance(identity.get(key), dict) and
+                         type(identity[key].get('pid')) is int and identity[key]['pid'] > 0 and
+                         isinstance(identity[key].get('start'), str) and bool(identity[key]['start'])
+                         for key in ('owner', 'collector')) and isinstance(identity.get('boot'), str)
+        def live(key):
+            value = identity.get(key) or {}
+            return identity.get('boot') == BOOT and \
+                exact(value.get('pid', 0), value.get('start', '')) is not None
+        running, owner_live = live('collector'), live('owner')
+        samples = [r for r in rows if r['event'] == 'sample' and not r.get('carried')]
+        sample = max(samples, key=lambda r: r['wall']) if samples else None
+        age = None
+        if sample and sample.get('boot') == BOOT:
+            age = mono - sample['mono'] if type(sample.get('mono')) in (int, float) else wall - sample['wall']
+        fresh = age is not None and 0 <= age < 8
+        state = 'active' if running and owner_live and fresh else \
+            'degraded' if running or owner_live or not identity else 'off' if identified else 'unknown'
+        latest = sample['utc'] if sample else 'unavailable in last 5m'
+        age_text = f'; age={age:.1f}s' if age is not None and age >= 0 else ''
+        print(f'status: diagnostics: {state}; attempt={args.attempt}; last sample={latest}{age_text}; {store.path}')
+        if state in ('degraded', 'unknown'):
+            print(f'status: diagnostics identity: collector={"live" if running else "unverified or absent"}; '
+                  f'owner={"live" if owner_live else "unverified or absent"}; recent sample={"fresh" if fresh else "stale or unavailable"}')
+        groups = summarize(rows)
+        summary = groups[0] if groups else dict(samples=0, unavailable=0, gaps=0, rtt_eligible=0,
+                                                recording=recording_stats(identity))
+        for line in recording_lines(summary):
+            print('status: diagnostics last 5m: ' + line)
+        versions = summary['recording']['launchers']
+        def version(value):
+            return tuple(map(int, value.split('.'))) if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value) else None
+        installed = version(args.version)
+        if installed and any(version(item) and version(item) < installed for item in versions):
+            print('status: diagnostics note: collector predates this launcher; next deliberate launch/reset adopts the installed recorder')
+        if partial:
+            print('status: diagnostics coverage: PARTIAL: ' + '; '.join(partial))
     finally:
         store.close()
     return 0
@@ -9924,6 +10092,7 @@ def main(argv=None):
     parser.add_argument("--connection", default="")
     parser.add_argument("--version", default="")
     parser.add_argument("--policy", default="")
+    parser.add_argument('--recording-policy', choices=('on', 'off', 'unknown'), default='unknown')
     args = parser.parse_args(argv)
     if not 1 <= args.days <= 30 or not 2 * CHUNK <= args.cap <= 1073741824:
         raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")
@@ -9992,7 +10161,7 @@ main() {
       ;;
     _diagnostics-query)
       shift
-      chrome_diagnostics_run query-local "$@"
+      chrome_diagnostics_run query-local "$@" --version "$VERSION"
       ;;
     _yubikey-run)
       shift
