@@ -6145,6 +6145,8 @@ test_reset_post_stop_identity_check_preserves_tmux_on_unrelated_chrome() (
 test_reset_recreates_when_session_exits_after_remote_stop() (
   local test_dir command_line="waypipe --no-gpu ssh test-host google-chrome-stable --new-window"
   local events="" session_alive=1
+  local probe_message="${1-no server running on /tmp/tmux-1000/default}"
+  local probe_code="${2:-1}" expected_code="${3:-0}" code=0
   test_dir="$(mktemp -d)"
   trap 'rm -rf "$test_dir"' EXIT
   yk_prepare_for_launch() {
@@ -6157,7 +6159,10 @@ test_reset_recreates_when_session_exits_after_remote_stop() (
   tmux() {
     case "$1" in
       has-session)
-        [ "$session_alive" -eq 1 ]
+        [ "$session_alive" -eq 1 ] && return 0
+        [ "$LC_ALL" = C ] || fail "reset probe did not request stable tmux messages"
+        [ -z "$probe_message" ] || printf '%s\n' "$probe_message" >&2
+        return "$probe_code"
         ;;
       list-panes) printf '%s\n' '%0|4242|waypipe --no-gpu ssh test-host google-chrome-stable --new-window' ;;
       list-windows) printf '%s\n' chrome ;;
@@ -6184,11 +6189,88 @@ test_reset_recreates_when_session_exits_after_remote_stop() (
     return 0
   }
 
-  chrome_reset test-host --yes >"$test_dir/output" 2>&1
+  chrome_reset test-host --yes >"$test_dir/output" 2>&1 || code=$?
   assert_contains "$events" "remote-stop"
+  if [ "$expected_code" -ne 0 ]; then
+    [ "$code" -ne 0 ] || fail "uncertain tmux result unexpectedly recreated the session: $probe_message"
+    [[ "$events" != *new-session* ]] || fail "uncertain tmux result recreated the session"
+    [[ "$events" != *kill-session* ]] || fail "uncertain tmux result killed a session"
+    assert_contains "$(cat "$test_dir/output")" 'could not'
+    return 0
+  fi
+  [ "$code" -eq 0 ] || { cat "$test_dir/output" >&2; fail "confirmed session absence stopped reset"; }
   assert_contains "$events" "new-session:"
   assert_contains "$events" "$command_line"
   [[ "$events" != *kill-session* ]] || fail "reset killed a session that had already exited"
+)
+
+test_reset_distinguishes_absent_tmux_from_probe_errors() (
+  local message
+  for message in '' "can't find session: remote-chrome-test-host" \
+    'session not found: remote-chrome-test-host' \
+    'error connecting to /tmp/tmux-1000/default (No such file or directory)'; do
+    test_reset_recreates_when_session_exits_after_remote_stop "$message"
+  done
+  for message in 'error connecting to /tmp/tmux-1000/default (Permission denied)' \
+    'error connecting to /tmp/tmux-1000/default (Connection refused)' \
+    'unexpected tmux failure'; do
+    test_reset_recreates_when_session_exits_after_remote_stop "$message" 1 1
+  done
+  test_reset_recreates_when_session_exits_after_remote_stop \
+    'no server running on /tmp/tmux-1000/default' 2 1
+)
+
+test_reset_recreates_after_real_last_tmux_pane_exits() (
+  local test_dir session=remote-chrome-test-host
+  local command_line='waypipe --no-gpu ssh test-host google-chrome-stable --new-window'
+  local stopped=0 probe_output='' attempt
+  test_dir="$(mktemp -d)"
+  trap 'command tmux -S "$test_dir/tmux.sock" kill-server >/dev/null 2>&1 || true; rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  # Exercise real server shutdown/recreation with harmless panes on a private
+  # socket. The canonical browser command is recorded but never executed.
+  tmux() {
+    if [ "$1" = new-session ]; then
+      command tmux -S "$test_dir/tmux.sock" -f /dev/null \
+        new-session -d -s "$session" -n chrome 'exec sleep 60'
+    else
+      command tmux -S "$test_dir/tmux.sock" -f /dev/null "$@"
+    fi
+  }
+  tmux new-session
+  chrome_tmux_record_command "$session" "$command_line"
+  yk_prepare_for_launch() {
+    yk_remote="$1"
+    yk_control_socket="$test_dir/control.sock"
+    yk_set_runtime_paths
+  }
+  yk_local_candidate_exists() { return 1; }
+  need() { :; }
+  chrome_reset_find_local_ssh() { chrome_reset_remote_socket=/tmp/waypipe-server-test.sock; }
+  chrome_reset_remote_identity() {
+    [ "$stopped" -eq 0 ] || return 1
+    chrome_reset_remote_pid=700
+    chrome_reset_remote_pgid=701
+  }
+  chrome_reset_remote_stop() {
+    kill -TERM "$chrome_reset_pane_pid"
+    stopped=1
+    for ((attempt = 0; attempt < 100; attempt++)); do
+      probe_output="$(LC_ALL=C tmux has-session -t "=$session" 2>&1)" || true
+      [[ "$probe_output" != 'no server running on '* ]] || return 0
+      sleep 0.05
+    done
+    fail "private tmux server did not exit after its last pane: $probe_output"
+  }
+
+  chrome_reset test-host --yes >"$test_dir/output" 2>&1 || {
+    cat "$test_dir/output" >&2
+    fail 'reset did not recover after the real tmux server exited'
+  }
+  tmux has-session -t "=$session" || fail 'reset did not recreate the private session'
+  [ "$(tmux show-options -qv -t "=$session:" "$chrome_tmux_command_option")" = "$command_line" ] ||
+    fail 'real server recreation lost the canonical browser command'
+  assert_contains "$(cat "$test_dir/output")" 'already exited after remote Waypipe teardown'
 )
 
 test_reset_remote_failure_keeps_tmux_and_absent_group_recreates_command() (
@@ -6702,6 +6784,8 @@ tests=(
   test_reset_captured_browser_identity_ledger
   test_reset_post_stop_identity_check_preserves_tmux_on_unrelated_chrome
   test_reset_recreates_when_session_exits_after_remote_stop
+  test_reset_distinguishes_absent_tmux_from_probe_errors
+  test_reset_recreates_after_real_last_tmux_pane_exits
   test_reset_remote_failure_keeps_tmux_and_absent_group_recreates_command
   test_reset_yubikey_and_chrome_only_recreation_sequence
 )

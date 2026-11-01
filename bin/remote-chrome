@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.8.2"
+VERSION="1.8.3"
 
 usage() {
   cat <<USAGE
@@ -3873,7 +3873,7 @@ chrome_reset() {
       ;;
   esac
 
-  if session_probe_output="$(tmux has-session -t "=$session" 2>&1)"; then
+  if session_probe_output="$(LC_ALL=C tmux has-session -t "=$session" 2>&1)"; then
     session_probe_code=0
   else
     session_probe_code=$?
@@ -3888,12 +3888,16 @@ chrome_reset() {
       fi
       ;;
     1)
-      if [ -n "$session_probe_output" ] &&
-        [[ "$session_probe_output" != *"can't find session"* ]] &&
-        [[ "$session_probe_output" != *"session not found"* ]]; then
-        echo "Remote Waypipe teardown succeeded, but could not confirm tmux session $session absence: $session_probe_output" >&2
-        return 1
-      fi
+      # The Chrome pane may have been the server's last session. In that
+      # case tmux exits too, leaving either a stale or already removed socket.
+      case "$session_probe_output" in
+        ""|"can't find session: "*|"session not found: "*|"no server running on "*|\
+          "error connecting to "*" (No such file or directory)") ;;
+        *)
+          echo "Remote Waypipe teardown succeeded, but could not confirm tmux session $session absence: $session_probe_output" >&2
+          return 1
+          ;;
+      esac
       echo "Managed tmux session $session already exited after remote Waypipe teardown; continuing with recreation." >&2
       ;;
     *)

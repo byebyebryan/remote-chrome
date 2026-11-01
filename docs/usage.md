@@ -101,8 +101,12 @@ unreachable ownership. `--yes` skips restart or confirmed-absence warnings,
 while ownership checks still apply. Reset recreates the stream rather than
 resuming it transparently.
 
-After exact teardown, reset reruns forwarding preflight before starting the
-replacement listener and forwarding session. A failed preflight can therefore
+After exact teardown, reset also recreates the session if its last pane exited
+and tmux shut down its server. Permission errors and other uncertain tmux
+failures still stop recreation.
+
+Reset reruns forwarding preflight before starting the replacement listener and
+forwarding session. A failed preflight can therefore
 leave the old browser stopped; inspect diagnostics and retry after fixing the
 prerequisite. The replacement notification listener becomes ready before the
 new Chrome pane starts. Failed or interrupted listener startup rolls back its
