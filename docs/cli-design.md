@@ -53,8 +53,8 @@ session information remain available through verbose receipts.
 
 ## Status
 
-Host status groups identity, transport, local five-minute network history,
-recording health, and forwarding/notification checks. Network rows expose
+Host status uses a short identity and transport header, followed by four
+measurement groups: Traffic, TCP Delay, Delivery, and Recording. The groups expose
 observed average RX/TX, combined peak, TCP RTT p50/p95, TCP deviation p95,
 retransmissions, queues, recorded duration, sample age, coverage and gaps.
 TCP deviation is explicitly a variation proxy. No overall network score or
@@ -65,17 +65,52 @@ disabled, untracked, and absent states remain distinct. Queries retain exact
 attempt/session/current-boot filtering and existing read budgets. A running
 tmux session and successful liveness checks do not prove smooth delivery.
 
-Hostless status remains a local overview: one section per managed session,
-its exact network history, and the existing forwarding/incoming inventory.
+Traffic identifies observed average RX/TX and combined peak. Delay labels its
+percentiles and keeps the ACK-progress restriction and TCP deviation's variation
+proxy explanation visible. Delivery labels queue values as maxima. Recording
+shows recorder state, sample freshness, recorded seconds, TCP availability and
+gaps together, once. An older-recorder advisory is a quiet footer; stale,
+missing, partial or degraded observations remain explicit attention states.
+Values use about three significant figures for scanning; logs, exports and
+verbose output retain their existing precision and measurement semantics.
+
+Illustrative 80-column measurement layout:
+
+```text
+  NETWORK / local SSH / last 5 minutes
+
+  TRAFFIC / observed average     TCP DELAY
+  RX           220 B/s           RTT median       29 ms
+  TX           10.3 B/s          RTT p95          54 ms
+  Peak RX+TX   7.36 KiB/s        Deviation p95*   41 ms
+
+  DELIVERY                 RECORDING
+  Retransmits      0       Recorder   active / fresh 0.2s old
+  Max send queue   0 B     Coverage   300s / TCP 300/300
+  Max unsent       0 B     Gaps       0
+
+  * TCP deviation is a variation proxy; RTT uses ACK-progress samples.
+```
+
+Hostless status remains a local overview: one short section per managed session,
+its exact traffic/delay/retransmission/recording summary, and the existing forwarding/incoming inventory.
 It must not add per-session SSH requests. `--verbose` retains detailed checks,
 PIDs, paths, recorded parameters, and collector-version evidence.
+The overview can show the recorded transport preference, but must not claim
+observed hardware encoding or decoding without codec snapshots.
+Empty forwarding, orphan-daemon and incoming inventories use short `None`
+rows. Nonempty inventories retain their headings and exact records.
 
 ## Terminal behavior
 
-Use a single column, generous spacing, and aligned labels. No boxed borders,
-full-screen UI, animation, cursor movement, or persistent monitor is needed.
-Below 60 columns, values move below labels. Commands wrap naturally without
-inserting characters into their shell syntax.
+Pair Traffic with TCP Delay, then Delivery with Recording when their actual
+content fits the terminal. Otherwise stack those same groups in reading order.
+Align labels and emphasize values; leave a blank line between group pairs. No
+boxed borders, full-screen UI, animation, cursor movement, or persistent monitor
+is needed. Below 60 columns, ordinary rows move values below labels. Group rows
+also stack labels and values when needed to fit. Commands wrap naturally without
+inserting characters into their shell syntax. Redirected output preserves the
+grouping without decoration and uses 80 columns unless COLUMNS is supplied.
 
 Color is automatic on a terminal: cyan identity/sections, green confirmed
 success, amber attention, red failure, and dim secondary labels. Words carry

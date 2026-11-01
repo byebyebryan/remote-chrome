@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shlex
 import subprocess
@@ -206,7 +207,7 @@ main status snap --session custom
         p = self.status()
         self.assertEqual(p.returncode, 0, p.stderr)
         for text in ('Background session running', 'Diagnostics', 'Off for this attempt',
-                     'Network / last 5 minutes / local SSH', 'Unavailable / diagnostics off',
+                     'NETWORK / local SSH / last 5 minutes', 'Unavailable / diagnostics off',
                      'No managed forwarding', 'Disabled or untracked', 'Available session checks passed',
                      'remote-chrome status snap --session custom --verbose'):
             self.assertIn(text, p.stdout)
@@ -253,6 +254,11 @@ main status
         self.assertIn('Sessions', p.stdout)
         self.assertIn('None', p.stdout)
         self.assertNotIn('UNEXPECTED', p.stdout + p.stderr)
+        self.assertNotIn('Managed YubiKey forwarding', p.stdout)
+        self.assertNotIn('Tool-owned orphan', p.stdout)
+        self.assertNotIn('Incoming sessions', p.stdout)
+        for label in ('YubiKey', 'Orphan USB/IP', 'Incoming'):
+            self.assertRegex(p.stdout, label + r' +None')
 
     def test_overview_keeps_each_exact_session_local(self):
         p = self.shell('''
@@ -295,12 +301,13 @@ main stop snap
         values = dict(samples=300, unavailable=0, gaps=0, traffic_seconds=299,
                       rx_bytes=0, tx_bytes=0, traffic_peak_bytes_sec=0, retrans=0,
                       recording=dict(ack_tracking_samples=300))
-        rows = dict(d.network_rows(values, 20, 'degraded'))
-        self.assertIn('0.00 B/s', rows['Traffic'])
-        self.assertIn('Unavailable / no recent ACK progress', rows['RTT/variation'])
-        self.assertIn('STALE / 20.0s old', rows['Latest sample'])
+        rows = {key: value for key, value, _ in d.network_rows(values, 20, 'degraded')}
+        self.assertEqual(rows['RX'], '0 B/s')
+        self.assertIn('no recent ACK progress', rows['note'])
+        self.assertEqual(rows['RTT median'], 'unavailable')
+        self.assertIn('STALE 20.0s old', rows['Recorder'])
         self.assertEqual(rows['Retransmits'], '0')
-        self.assertEqual(dict(d.network_rows({}, None, 'unknown'))['Network'],
+        self.assertEqual({key: value for key, value, _ in d.network_rows({}, None, 'unknown')}['Network'],
                          'Unavailable / no current-boot samples for this attempt')
 
     def test_network_rows_keep_coverage_delay_and_delivery_measurements(self):
@@ -308,12 +315,148 @@ main stop snap
                       rx_bytes=297 * 250000, tx_bytes=297 * 2000, traffic_peak_bytes_sec=500000,
                       rtt_eligible=30, rtt_p50_ms=27, rtt_p95_ms=45, rttvar_p95_ms=8,
                       retrans=2, queue=1024, unsent=0)
-        rows = dict(d.network_rows(values, .7, 'active'))
-        self.assertIn('RX 2.00 Mbps / TX 1.95 KiB/s', rows['Traffic'])
-        self.assertIn('27.00 ms p50 / 45.00 ms p95', rows['TCP RTT'])
-        self.assertIn('variation proxy', rows['Variation'])
-        self.assertIn('TCP 298/300 / gaps 1', rows['Coverage'])
+        rows = {key: value for key, value, _ in d.network_rows(values, .7, 'active')}
+        self.assertEqual(rows['RX'], '2 Mbps')
+        self.assertEqual(rows['TX'], '1.95 KiB/s')
+        self.assertEqual(rows['RTT median'], '27 ms')
+        self.assertEqual(rows['RTT p95'], '45 ms')
+        self.assertEqual(rows['Deviation p95*'], '8 ms')
+        self.assertIn('variation proxy', rows['note'])
+        self.assertIn('TCP 298/300', rows['Coverage'])
+        self.assertEqual(rows['Gaps'], '1')
         self.assertEqual(rows['Retransmits'], '2')
+
+    def dashboard_values(self, **changes):
+        values = dict(samples=300, unavailable=0, gaps=0, traffic_seconds=300,
+                      rx_bytes=300 * 220.39, tx_bytes=300 * 10.32,
+                      traffic_peak_bytes_sec=7.36 * 1024, rtt_eligible=200,
+                      rtt_p50_ms=29, rtt_p95_ms=54, rttvar_p95_ms=41,
+                      retrans=0, queue=0, unsent=0)
+        values.update(changes)
+        return values
+
+    def dashboard(self, values=None, columns=80, terminal=False, age=.2, state='active', overview=False):
+        rows = d.network_rows(values if values is not None else self.dashboard_values(), age, state, overview)
+        wire = '\n'.join('\t'.join(row) for row in rows)
+        return self.shell("chrome_ui_initialize\nchrome_ui_rows <<'ROWS'\n" + wire + '\nROWS\n',
+                          env=dict(self.env, COLUMNS=str(columns)), terminal=terminal)
+
+    def test_dashboard_pairs_groups_and_keeps_all_metrics_once(self):
+        p = self.dashboard()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertRegex(p.stdout, r'TRAFFIC / observed average +TCP DELAY')
+        self.assertRegex(p.stdout, r'DELIVERY +RECORDING')
+        for text in ('220 B/s', '10.3 B/s', '7.36 KiB/s', '29 ms', '54 ms', '41 ms',
+                     'Retransmits', 'Max send queue', 'Max unsent', '300s / TCP 300/300', 'Gaps',
+                     'variation proxy', 'ACK-progress samples'):
+            self.assertIn(text, p.stdout)
+        self.assertEqual(p.stdout.count('0.2s old'), 1)
+        self.assertNotIn('Diagnostics', p.stdout)
+        self.assertNotIn('\x1b', p.stdout)
+        self.assertTrue(all(len(line) <= 80 for line in p.stdout.splitlines()))
+
+    def test_dashboard_stacks_groups_at_actual_terminal_width(self):
+        p = self.dashboard(columns=40)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        for title in ('TRAFFIC / observed average', 'TCP DELAY', 'DELIVERY', 'RECORDING'):
+            self.assertIn('  ' + title + '\n', p.stdout)
+        self.assertNotRegex(p.stdout, r'TRAFFIC / observed average +TCP DELAY')
+        # Explanatory footers may wrap naturally; metric rows must fit.
+        for line in p.stdout.split('* TCP deviation')[0].splitlines():
+            self.assertLessEqual(len(line), 40, repr(line))
+        self.assertIn('0.2s old', p.stdout)
+        # Exercise real stty discovery rather than only the COLUMNS override.
+        wire = '\n'.join('\t'.join(row) for row in d.network_rows(self.dashboard_values(), .2, 'active'))
+        p = self.shell("chrome_ui_initialize\nchrome_ui_rows <<'ROWS'\n" + wire + '\nROWS\n',
+                       terminal=True, columns=44)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotRegex(p.stdout, r'TRAFFIC / observed average[^\n]+TCP DELAY')
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', p.stdout)
+        self.assertIn('  TCP DELAY\n', plain.replace('\r\n', '\n'))
+
+    def test_nonempty_inventory_retains_sections_and_exact_records(self):
+        state = Path(self.env['XDG_RUNTIME_DIR']) / 'remote-chrome-incoming-test.state'
+        state.write_text('name\tstarship\nsession\tcustom\nnotify_backend\tdisabled\n')
+        p = self.shell('''
+chrome_incoming_live() { return 0; }
+notify_source_state_status() { return 0; }
+chrome_status_incoming
+yk_standard_pid_files() { echo /fixture/orphan.pid; }
+yk_standard_state_files() { :; }
+yk_orphan_usbipd_state() { printf '  orphan: %s\\n' "$1"; }
+yk_status_orphan_usbipd
+''')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('Incoming sessions', p.stdout)
+        self.assertIn('starship', p.stdout)
+        self.assertIn('custom / live', p.stdout)
+        self.assertIn('Tool-owned orphan USB/IP daemons', p.stdout)
+        self.assertIn('/fixture/orphan.pid', p.stdout)
+        self.assertTrue(state.exists())
+
+    def test_dashboard_uses_semantic_attention_without_network_score(self):
+        p = self.dashboard(self.dashboard_values(unavailable=2, gaps=1, retrans=2), terminal=True,
+                           age=40, state='degraded')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('\x1b[1m220 B/s', p.stdout)
+        self.assertIn('\x1b[33m2', p.stdout)
+        self.assertIn('\x1b[33mdegraded / STALE 40.0s old', p.stdout)
+        self.assertIn('TCP 298/300', p.stdout)
+        self.assertNotIn('network good', p.stdout.lower())
+
+    def test_dashboard_missing_data_does_not_invent_idle_or_delay(self):
+        values = self.dashboard_values(rx_bytes=None, tx_bytes=None, traffic_peak_bytes_sec=None,
+                                       retrans=None, queue=None, unsent=None, rtt_eligible=0,
+                                       recording=dict(ack_tracking_samples=0))
+        p = self.dashboard(values)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('unavailable', p.stdout)
+        self.assertIn('ACK freshness fields unavailable', p.stdout)
+        self.assertNotIn('0 B/s', p.stdout)
+        self.assertNotIn('29 ms', p.stdout)
+
+    def test_overview_summary_is_short_but_preserves_attention(self):
+        p = self.dashboard(overview=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(len(p.stdout.splitlines()), 3)
+        for text in ('RX 220 B/s', 'TX 10.3 B/s', '29 ms p50', '54 ms p95 (ACK)',
+                     'retransmits 0', 'active / fresh', 'TCP 300/300', 'gaps 0'):
+            self.assertIn(text, p.stdout)
+        self.assertNotIn('DELIVERY', p.stdout)
+        p = self.dashboard(overview=True, age=40, state='degraded')
+        self.assertIn('degraded / STALE', p.stdout)
+
+    def test_transport_header_wraps_whole_fields_and_keeps_warnings(self):
+        p = self.shell('''chrome_ui_initialize
+chrome_ui_transport_inline=1
+chrome_ui_transport_labels=() chrome_ui_transport_values=() chrome_ui_transport_roles=()
+chrome_ui_check Video 'H.264 / hardware preferred' unused
+chrome_ui_fact Decode hardware
+chrome_ui_fact Encode software
+chrome_ui_flush_transport
+chrome_ui_transport_inline=0
+chrome_ui_fact Warning 'Software fallback' warn
+''', env=dict(self.env, COLUMNS='60'))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('Decode hardware', p.stdout)
+        self.assertIn('Encode software', p.stdout)
+        self.assertIn('Software fallback', p.stdout)
+        self.assertTrue(all(len(line) <= 60 for line in p.stdout.splitlines()))
+
+    def test_panel_fitting_sanitizes_control_sequences_before_alignment(self):
+        p = self.shell("chrome_ui_rows <<'ROWS'\npanels\t-\tnormal\npanel\tTraffic\tnormal\nRX\t220 B/s\tmetric\npanel\tDelay\\033[2J\tnormal\nRTT\t29\\033[2J ms\tmetric\nend-panels\t-\tnormal\nROWS\n".replace('\\033', '\x1b'))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn('\x1b', p.stdout)
+        self.assertIn('29?[2J ms', p.stdout)
+
+    def test_display_rounding_retains_nonzero_values_and_original_observations(self):
+        values = self.dashboard_values()
+        before = json.dumps(values, sort_keys=True)
+        list(d.network_rows(values, .2, 'active'))
+        self.assertEqual(json.dumps(values, sort_keys=True), before)
+        for value, expected in ((0, '0'), (.000123, '0.000123'), (29.01, '29'),
+                                (220.39, '220'), (1024, '1024')):
+            self.assertEqual(d.display_number(value), expected)
 
 
 if __name__ == '__main__':

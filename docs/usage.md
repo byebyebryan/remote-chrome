@@ -83,8 +83,10 @@ for the whole session.
 
 Both `remote-chrome status` and `remote-chrome status remote-host` show the last
 five minutes of locally recorded SSH traffic, ACK-progress TCP RTT, delay
-variation and retransmissions. The overview shows each managed session;
-the host-specific command adds observed transport and recording health. Missing
+variation and retransmissions. The overview shows a short traffic, TCP and
+recording summary for each managed session. The host-specific command adds
+observed transport and the complete Traffic, TCP Delay, Delivery and Recording
+groups, including peak rate, variation and queue maxima. Missing
 or stale measurements remain explicit. See [network status](diagnostics.md#network-status)
 for units, coverage and measurement limits.
 
@@ -103,7 +105,9 @@ is plain text. `NO_COLOR` disables automatic color, `TERM=dumb` disables automat
 decoration, `--color auto|always|never` overrides color detection, and `--plain`
 disables both color and glyphs. These options work before or after commands;
 arguments after `--` belong to Chrome and are untouched. Narrow terminals place
-values beneath their labels. See the [CLI design](cli-design.md) for state
+values beneath their labels. Measurement groups sit in two columns when their
+content fits and stack otherwise. Values are rounded for display; recording,
+exports and verbose precision are unchanged. See the [CLI design](cli-design.md) for state
 semantics and the presentation contract.
 
 ## Reset

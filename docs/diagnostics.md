@@ -129,13 +129,17 @@ single bounded SSH request.
 
 Both `remote-chrome status` and `remote-chrome status HOST` show a local network
 summary for each exact managed viewer attempt over the last five minutes. The
-overview includes it beneath each session; the host-specific command also shows
-observed transport and recording health. Add `--verbose` for individual checks,
+overview keeps traffic, TCP RTT, retransmissions and recording health in three
+summary lines beneath each session. The host-specific command shows observed
+transport and four measurement groups: Traffic, TCP Delay, Delivery and Recording.
+Groups sit side by side when they fit the terminal, or stack at narrower widths.
+Display values use about three significant figures, with no change to recording
+or exports. Add `--verbose` for individual checks, full display precision,
 recorded parameters, process identities, collector versions, and byte totals.
 This works with already recorded
 history immediately after a launcher update, without restarting the tunnel.
 
-The summary shows observed RX/TX average rates in Mbps (KiB/s or B/s for light
+The full status shows observed RX/TX average rates in Mbps (KiB/s or B/s for light
 traffic), peak combined RX+TX rate, retransmissions, maximum send/unsent queues, and
 ACK-progress TCP RTT p50/p95 with TCP deviation p95. Rates average only intervals
 with recorded counter deltas, including valid idle intervals; the observed

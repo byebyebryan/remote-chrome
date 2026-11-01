@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.9.0"
+VERSION="1.9.1"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -84,6 +84,7 @@ chrome_ui_style() {
       warn) code=33 ;;
       error) code=31 ;;
       dim) code=2 ;;
+      metric) code=1 ;;
     esac
   fi
   [ -z "$code" ] || printf '\033[%sm' "$code"
@@ -129,6 +130,134 @@ chrome_ui_row() {
   printf '\n'
 }
 
+chrome_ui_line() {
+  printf '  '
+  chrome_ui_style "${2:-normal}" "$1"
+  printf '\n'
+}
+
+# The diagnostic helper emits explicit panel boundaries and semantic roles.
+# Fit using sanitized, undecorated text; ANSI styling never affects alignment.
+chrome_ui_panels() {
+  local key value role group=-1 item=0 left right row index label_width value_width width gap=5
+  local left_width right_width height used pad
+  local -a titles=() starts=() counts=() labels=() values=() roles=() widths=() label_widths=()
+  while IFS=$'\t' read -r key value role; do
+    case "$key" in
+      end-panels) break ;;
+      panel)
+        group=$((group + 1))
+        titles[group]="$(chrome_ui_text "$value")"
+        starts[group]="$item" counts[group]=0 label_widths[group]=0
+        widths[group]="${#titles[group]}"
+        ;;
+      *)
+        [ "$group" -ge 0 ] || continue
+        labels[item]="$(chrome_ui_text "$key")"
+        values[item]="$(chrome_ui_text "$value")"
+        roles[item]="${role:-metric}"
+        label_width="${#labels[item]}"
+        [ "$label_width" -le "${label_widths[group]}" ] || label_widths[group]="$label_width"
+        counts[group]=$((counts[group] + 1))
+        item=$((item + 1))
+        ;;
+    esac
+  done
+  for ((left = 0; left <= group; left++)); do
+    for ((row = 0; row < counts[left]; row++)); do
+      index=$((starts[left] + row))
+      value_width="${#values[index]}"
+      width=$((label_widths[left] + 3 + value_width))
+      [ "$width" -le "${widths[left]}" ] || widths[left]="$width"
+    done
+  done
+  for ((left = 0; left <= group; left++)); do
+    right=$((left + 1))
+    left_width="${widths[left]}"
+    right_width="${widths[right]:-0}"
+    if [ "$right" -le "$group" ] && [ "$((2 + left_width + gap + right_width))" -le "$chrome_ui_columns" ]; then
+      printf '\n  '
+      chrome_ui_style title "${titles[left]}"
+      printf '%*s' "$((left_width - ${#titles[left]} + gap))" ''
+      chrome_ui_style title "${titles[right]}"
+      printf '\n'
+      height="${counts[left]}"
+      [ "$height" -ge "${counts[right]}" ] || height="${counts[right]}"
+      for ((row = 0; row < height; row++)); do
+        printf '  '
+        used=0
+        if [ "$row" -lt "${counts[left]}" ]; then
+          index=$((starts[left] + row))
+          chrome_ui_style dim "$(printf '%-*s   ' "${label_widths[left]}" "${labels[index]}")"
+          chrome_ui_style "${roles[index]}" "${values[index]}"
+          used=$((label_widths[left] + 3 + ${#values[index]}))
+        fi
+        if [ "$row" -lt "${counts[right]}" ]; then
+          printf '%*s' "$((left_width - used + gap))" ''
+          index=$((starts[right] + row))
+          chrome_ui_style dim "$(printf '%-*s   ' "${label_widths[right]}" "${labels[index]}")"
+          chrome_ui_style "${roles[index]}" "${values[index]}"
+        fi
+        printf '\n'
+      done
+      left="$right"
+    else
+      chrome_ui_section "${titles[left]}"
+      for ((row = 0; row < counts[left]; row++)); do
+        index=$((starts[left] + row))
+        printf '  '
+        chrome_ui_style dim "${labels[index]}"
+        if [ "$((2 + label_widths[left] + 3 + ${#values[index]}))" -gt "$chrome_ui_columns" ]; then
+          printf '\n    '
+        else
+          pad=$((label_widths[left] - ${#labels[index]} + 3))
+          printf '%*s' "$pad" ''
+        fi
+        chrome_ui_style "${roles[index]}" "${values[index]}"
+        printf '\n'
+      done
+    fi
+  done
+}
+
+chrome_ui_fact() {
+  if [ "${chrome_ui_transport_inline:-0}" = 1 ]; then
+    case "$1" in
+      Video|Decode|Encode)
+        chrome_ui_transport_labels+=("$1")
+        chrome_ui_transport_values+=("$2")
+        chrome_ui_transport_roles+=("${3:-normal}")
+        return 0
+        ;;
+      *) chrome_ui_flush_transport ;;
+    esac
+  fi
+  chrome_ui_row "$@"
+}
+
+chrome_ui_flush_transport() {
+  local index text width=2 separator=' | '
+  chrome_ui_glyph dot
+  [ "$chrome_ui_symbol" != '·' ] || separator=' · '
+  for ((index = 0; index < ${#chrome_ui_transport_labels[@]}; index++)); do
+    text="${chrome_ui_transport_values[index]}"
+    [ "${chrome_ui_transport_labels[index]}" = Video ] || text="${chrome_ui_transport_labels[index]} $text"
+    if [ "$chrome_ui_columns" -lt 60 ]; then
+      chrome_ui_row "${chrome_ui_transport_labels[index]}" "${chrome_ui_transport_values[index]}" "${chrome_ui_transport_roles[index]}"
+    else
+      if [ "$width" -gt 2 ] && [ "$((width + ${#separator} + ${#text}))" -gt "$chrome_ui_columns" ]; then
+        printf '\n'
+        width=2
+      fi
+      if [ "$width" = 2 ]; then printf '  '; else chrome_ui_style dim "$separator"; width=$((width + ${#separator})); fi
+      chrome_ui_style "${chrome_ui_transport_roles[index]}" "$text"
+      width=$((width + ${#text}))
+    fi
+  done
+  [ "$width" = 2 ] || printf '\n'
+  chrome_ui_transport_labels=() chrome_ui_transport_values=() chrome_ui_transport_roles=()
+}
+
 chrome_ui_result() {
   local role="$1"
   shift
@@ -148,7 +277,7 @@ chrome_ui_check() {
   if [ "$chrome_ui_verbose" = 1 ]; then
     printf '%s\n' "$legacy"
   else
-    chrome_ui_row "$label" "$value" "$role"
+    chrome_ui_fact "$label" "$value" "$role"
   fi
 }
 
@@ -166,16 +295,21 @@ chrome_ui_issue() {
 }
 
 chrome_ui_rows() {
-  local label value role
+  local label value role after_panels=0
   while IFS=$'\t' read -r label value role; do
     [ -n "$label" ] || continue
-    if [ "$label" = section ]; then
-      chrome_ui_section "$value"
-    elif [ "$label" = Warning ] || [ "$label" = Partial ]; then
-      chrome_ui_row "$label" "$value" warn
-    else
-      chrome_ui_row "$label" "$value" "${role:-normal}"
-    fi
+    case "$label" in
+      section) chrome_ui_section "$value" ;;
+      panels) chrome_ui_panels; after_panels=1 ;;
+      note)
+        [ "$after_panels" = 0 ] || printf '\n'
+        after_panels=0
+        chrome_ui_line "$value" "${role:-normal}"
+        ;;
+      line) chrome_ui_line "$value" "${role:-normal}" ;;
+      Warning|Partial) chrome_ui_fact "$label" "$value" warn ;;
+      *) chrome_ui_fact "$label" "$value" "${role:-normal}" ;;
+    esac
   done
 }
 
@@ -2982,11 +3116,12 @@ chrome_status_incoming() {
   local state found=0 phase name session details backend
   if [ "$chrome_ui_verbose" = 1 ]; then
     echo 'Incoming remote-chrome sessions:'
-  else
-    chrome_ui_section 'Incoming sessions'
   fi
   for state in "${XDG_RUNTIME_DIR:-/tmp}"/remote-chrome-incoming-*.state; do
     [[ -f "$state" && -O "$state" && ! -L "$state" ]] || continue
+    if [ "$found" = 0 ] && [ "$chrome_ui_verbose" = 0 ]; then
+      chrome_ui_section 'Incoming sessions'
+    fi
     found=1
     phase=stale
     chrome_incoming_live "$state" && phase=live
@@ -3010,7 +3145,9 @@ chrome_status_incoming() {
       fi
     fi
   done
-  [ "$found" = "1" ] || echo "  none"
+  if [ "$found" = 0 ]; then
+    if [ "$chrome_ui_verbose" = 1 ]; then echo '  none'; else chrome_ui_row Incoming None; fi
+  fi
 }
 
 notify_helper_live() {
@@ -4300,8 +4437,14 @@ chrome_status_all() {
           sed 's/^status: /    /' ||
           echo '    network last 5m: unavailable (local diagnostic store could not be read)'
       else
-        chrome_ui_row Browser "$chrome_reset_host"
-        chrome_status_diagnostics "$chrome_reset_host" "$session" --network-only ||
+        chrome_ui_line "Browser $chrome_reset_host / Display $(hostname -s 2>/dev/null || printf 'this machine')"
+        local transport='Lossless (recorded policy)'
+        if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
+          transport='H.264 (hardware preferred)'
+          [ "${BASH_REMATCH[2]}" != sw ] || transport='H.264 (software selected)'
+        fi
+        chrome_ui_line "Background session present / $transport"
+        chrome_status_diagnostics "$chrome_reset_host" "$session" --network-only --ui-overview ||
           chrome_ui_issue 'Network unavailable / local diagnostic store could not be read'
         chrome_ui_command Inspect status "$chrome_reset_host" "$session"
       fi
@@ -4316,10 +4459,13 @@ chrome_status_all() {
   if [ "$chrome_ui_verbose" = 1 ]; then
     echo 'Managed YubiKey forwarding:'
   else
-    chrome_ui_section 'Managed YubiKey forwarding'
+    printf '\n'
   fi
   while IFS= read -r state_file; do
     [ -n "$state_file" ] || continue
+    if [ "$found_forwarding" = 0 ] && [ "$chrome_ui_verbose" = 0 ]; then
+      chrome_ui_section 'Managed YubiKey forwarding'
+    fi
     found_forwarding=1
     if state_output="$(yk_status_state_file "$state_file")"; then
       printf '  %s\n' "$state_output"
@@ -4331,15 +4477,18 @@ chrome_status_all() {
   for lock_file in "$runtime_dir"/remote-chrome-yubikey-*.sock.state.lock; do
     [ -d "$lock_file" ] || continue
     [ -e "${lock_file%.lock}" ] && continue
+    if [ "$found_forwarding" = 0 ] && [ "$chrome_ui_verbose" = 0 ]; then
+      chrome_ui_section 'Managed YubiKey forwarding'
+    fi
     found_forwarding=1
     printf '  provisional setup lock: %s\n' "$lock_file"
   done
-  [ "$found_forwarding" = "1" ] || echo "  none"
+  if [ "$found_forwarding" = 0 ]; then
+    if [ "$chrome_ui_verbose" = 1 ]; then echo '  none'; else chrome_ui_row YubiKey None; fi
+  fi
 
   if [ "$chrome_ui_verbose" = 1 ]; then
     echo 'Tool-owned orphan usbipd daemons:'
-  else
-    chrome_ui_section 'Tool-owned orphan USB/IP daemons'
   fi
   yk_status_orphan_usbipd
   chrome_status_incoming
@@ -4518,14 +4667,15 @@ chrome_status_current() {
   local code=0
   local windows
   local state_code=0
+  local chrome_ui_transport_inline=0
+  local -a chrome_ui_transport_labels=() chrome_ui_transport_values=() chrome_ui_transport_roles=()
 
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
   need tmux
   if [ "$chrome_ui_verbose" = 0 ]; then
     chrome_ui_title "$host"
     printf '\n'
-    chrome_ui_row Browser "$host"
-    chrome_ui_row Display "$(hostname -s 2>/dev/null || printf 'this machine')"
+    chrome_ui_line "Browser $host / Display $(hostname -s 2>/dev/null || printf 'this machine')"
   fi
 
   if tmux has-session -t "=$session" 2>/dev/null; then
@@ -4550,7 +4700,12 @@ chrome_status_current() {
     code=1
   fi
 
+  [ "$chrome_ui_verbose" = 1 ] || chrome_ui_transport_inline=1
   chrome_transport_status "$host" "$session" || code=1
+  if [ "$chrome_ui_transport_inline" = 1 ]; then
+    chrome_ui_flush_transport
+    chrome_ui_transport_inline=0
+  fi
   chrome_status_diagnostics "$host" "$session" ||
     chrome_ui_issue 'status: diagnostics: degraded (local diagnostic store unavailable)'
   [ "$chrome_ui_verbose" = 1 ] || chrome_ui_section 'Forwarding and notifications'
@@ -5726,11 +5881,16 @@ yk_status_orphan_usbipd() {
       fi
     done < <(yk_standard_state_files)
     [ "$owned_by_state" = "0" ] || continue
+    if [ "$found" = 0 ] && [ "$chrome_ui_verbose" = 0 ]; then
+      chrome_ui_section 'Tool-owned orphan USB/IP daemons'
+    fi
     found=1
     yk_orphan_usbipd_state "$pid_file"
   done < <(yk_standard_pid_files)
 
-  [ "$found" = "1" ] || echo "  none"
+  if [ "$found" = 0 ]; then
+    if [ "$chrome_ui_verbose" = 1 ]; then echo '  none'; else chrome_ui_row 'Orphan USB/IP' None; fi
+  fi
 }
 
 yk_wait_local_usbipd() {
@@ -10431,40 +10591,99 @@ def network_lines(summary, age, state):
            f'gaps {summary.get("gaps", "unknown")}; recorder {state}')
 
 
-def network_rows(summary, age, state):
-    """Explicit presentation fields from observations, never human-text parsing."""
-    def fmt(value, unit='ms', scale=1):
-        return 'unavailable' if value is None else f'{value / scale:.2f} {unit}'
-    def rate(value):
-        if value is None:
-            return 'unavailable'
-        unit, scale = ('Mbps', 125000) if value >= 12500 else ('KiB/s', 1024) if value >= 1024 else ('B/s', 1)
-        return fmt(value, unit, scale)
-    yield 'section', 'Network / last 5 minutes / local SSH'
+def display_number(value):
+    """About three significant figures, without scientific notation or padding."""
+    precision = max(0, min(6, 2 - math.floor(math.log10(abs(value))))) if value else 0
+    text = f'{value:.{precision}f}'
+    return text.rstrip('0').rstrip('.') if '.' in text else text
+
+
+def display_metric(value, unit='ms', scale=1):
+    return 'unavailable' if value is None else display_number(value / scale) + ' ' + unit
+
+
+def display_rate(value):
+    unit, scale = ('Mbps', 125000) if value is not None and value >= 12500 else \
+                  ('KiB/s', 1024) if value is not None and value >= 1024 else ('B/s', 1)
+    return display_metric(value, unit, scale)
+
+
+def display_bytes(value):
+    unit, scale = ('MiB', 1048576) if value is not None and value >= 1048576 else \
+                  ('KiB', 1024) if value is not None and value >= 1024 else ('B', 1)
+    return display_metric(value, unit, scale)
+
+
+def network_rows(summary, age, state, overview=False):
+    """Semantic panel fields from observations, never human-text parsing."""
     samples = summary.get('samples', 0)
+    fresh = age is not None and 0 <= age < 8
+    latest = 'fresh' if fresh else 'STALE' if age is not None and age >= 0 else 'sample unverified'
+    latest += f' {age:.1f}s old' if age is not None and age >= 0 else ''
+    recorder = state + ' / ' + latest
+    recorder_role = 'metric' if state == 'active' and fresh else 'warn'
+    if not overview:
+        yield 'section', 'NETWORK / local SSH / last 5 minutes', 'normal'
     if not samples:
-        yield 'Network', 'Unavailable / no current-boot samples for this attempt'
+        yield 'Network', 'Unavailable / no current-boot samples for this attempt', 'warn'
+        yield 'Recording', recorder, recorder_role
         return
     seconds = summary.get('traffic_seconds', 0)
-    rx, tx = summary.get('rx_bytes', 0), summary.get('tx_bytes', 0)
-    yield 'Traffic', ('RX ' + rate(rx / seconds if seconds else None) + ' / TX ' + rate(tx / seconds if seconds else None) + ' observed avg')
-    yield 'Peak RX+TX', rate(summary.get('traffic_peak_bytes_sec'))
-    if summary.get('rtt_eligible', 0):
-        yield 'TCP RTT', fmt(summary.get('rtt_p50_ms')) + ' p50 / ' + fmt(summary.get('rtt_p95_ms')) + ' p95 (ACK progress)'
-        yield 'Variation', fmt(summary.get('rttvar_p95_ms')) + ' TCP deviation p95 / variation proxy'
-    else:
-        tracked = (summary.get('recording') or {}).get('ack_tracking_samples', 0)
-        reason = 'no recent ACK progress' if tracked else 'ACK freshness fields unavailable'
-        yield 'RTT/variation', 'Unavailable / ' + reason
-    yield 'Retransmits', str(summary['retrans']) if summary.get('retrans') is not None else 'unavailable'
-    yield 'Queues (max)', ('send ' + fmt(summary.get('queue'), 'KiB', 1024) + ' / unsent ' + fmt(summary.get('unsent'), 'KiB', 1024))
-    latest = 'fresh' if age is not None and 0 <= age < 8 else 'STALE' if age is not None and age >= 0 else 'unverified'
-    yield 'Coverage', f'{seconds:.1f}s recorded / TCP {samples - summary.get("unavailable", 0)}/{samples} / gaps {summary.get("gaps", "unknown")}'
-    yield 'Latest sample', latest + (f' / {age:.1f}s old' if age is not None and age >= 0 else '') + ' / recorder ' + state
+    rx, tx = summary.get('rx_bytes'), summary.get('tx_bytes')
+    rx_rate = rx / seconds if seconds and rx is not None else None
+    tx_rate = tx / seconds if seconds and tx is not None else None
+    peak = summary.get('traffic_peak_bytes_sec')
+    eligible = summary.get('rtt_eligible', 0)
+    p50, p95, deviation = (summary.get(key) if eligible else None
+                           for key in ('rtt_p50_ms', 'rtt_p95_ms', 'rttvar_p95_ms'))
+    retrans, queue, unsent = (summary.get(key) for key in ('retrans', 'queue', 'unsent'))
+    retrans_text = str(retrans) if retrans is not None else 'unavailable'
+    gaps = summary.get('gaps')
+    tcp_samples = samples - summary.get('unavailable', 0)
+    coverage = display_number(seconds) + f's / TCP {tcp_samples}/{samples}'
+    coverage_role = 'warn' if tcp_samples != samples else 'metric'
+    gaps_text = str(gaps) if gaps is not None else 'unknown'
+    tracked = (summary.get('recording') or {}).get('ack_tracking_samples', 0)
+    delay_reason = 'no recent ACK progress' if tracked else 'ACK freshness fields unavailable'
+    def metric_role(value):
+        return 'warn' if value is None else 'metric'
+    if overview:
+        yield 'Traffic / 5m', ('RX ' + display_rate(rx_rate) + ' / TX ' + display_rate(tx_rate) +
+                               ' / peak RX+TX ' + display_rate(peak)), \
+                              'warn' if rx_rate is None or tx_rate is None or peak is None else 'normal'
+        delay = ('RTT ' + display_metric(p50) + ' p50 / ' + display_metric(p95) + ' p95 (ACK)' if eligible else
+                 'RTT unavailable / ' + delay_reason)
+        yield 'TCP / 5m', delay + ' / retransmits ' + retrans_text, \
+                          'warn' if p50 is None or p95 is None or retrans is None or retrans > 0 else 'normal'
+        yield 'Recording', recorder + ' / ' + coverage + ' / gaps ' + gaps_text, \
+                           'warn' if recorder_role == 'warn' or coverage_role == 'warn' or gaps != 0 else 'normal'
+        return
+    yield 'panels', '-', 'normal'
+    yield 'panel', 'TRAFFIC / observed average', 'normal'
+    yield 'RX', display_rate(rx_rate), metric_role(rx_rate)
+    yield 'TX', display_rate(tx_rate), metric_role(tx_rate)
+    yield 'Peak RX+TX', display_rate(peak), metric_role(peak)
+    yield 'panel', 'TCP DELAY', 'normal'
+    yield 'RTT median', display_metric(p50), metric_role(p50)
+    yield 'RTT p95', display_metric(p95), metric_role(p95)
+    yield 'Deviation p95*', display_metric(deviation), metric_role(deviation)
+    yield 'panel', 'DELIVERY', 'normal'
+    yield 'Retransmits', retrans_text, 'warn' if retrans is None or retrans > 0 else 'metric'
+    yield 'Max send queue', display_bytes(queue), metric_role(queue)
+    yield 'Max unsent', display_bytes(unsent), metric_role(unsent)
+    yield 'panel', 'RECORDING', 'normal'
+    yield 'Recorder', recorder, recorder_role
+    yield 'Coverage', coverage, coverage_role
+    yield 'Gaps', gaps_text, 'metric' if gaps == 0 else 'warn'
+    yield 'end-panels', '-', 'normal'
+    yield 'note', '* TCP deviation is a variation proxy; RTT uses ACK-progress samples.', 'dim'
+    if not eligible:
+        yield 'note', 'Delay unavailable: ' + delay_reason + '.', 'warn'
 
 
 def status_cli(args):
     compact = getattr(args, 'ui_rows', False)
+    overview = getattr(args, 'ui_overview', False)
     def ui_row(label, value, role='normal'):
         print(label + '\t' + str(value).replace('\t', '?').replace('\n', '?') + '\t' + role)
     def emit(message):
@@ -10475,8 +10694,9 @@ def status_cli(args):
             ui_row('Diagnostics', value, role)
     def unavailable(reason):
         if compact:
-            ui_row('section', 'Network / last 5 minutes / local SSH')
-            ui_row('Network', 'Unavailable / ' + reason)
+            if not overview:
+                ui_row('section', 'NETWORK / local SSH / last 5 minutes')
+            ui_row('Network', 'Unavailable / ' + reason, 'warn')
         else:
             print('status: network last 5m: unavailable (' + reason + ')')
     emit('status: diagnostics launcher: ' + (args.version or 'unknown'))
@@ -10535,8 +10755,6 @@ def status_cli(args):
         fresh = age is not None and 0 <= age < 8
         state = 'active' if running and owner_live and fresh else \
             'degraded' if running or owner_live or not identity else 'off' if identified else 'unknown'
-        recording(state + (f' / sample {age:.1f}s old' if age is not None and age >= 0 else ' / sample unavailable'),
-                  'ok' if state == 'active' else 'warn')
         latest = sample['utc'] if sample else 'unavailable in last 5m'
         age_text = f'; age={age:.1f}s' if age is not None and age >= 0 else ''
         emit(f'status: diagnostics: {state}; attempt={args.attempt}; last sample={latest}{age_text}; {store.path}')
@@ -10551,8 +10769,8 @@ def status_cli(args):
         current_rows = [row for row in rows if row.get('boot') == BOOT]
         network_summary = summarize(current_rows)[0] if current_rows else {}
         if compact:
-            for label, value in network_rows(network_summary, age, state):
-                ui_row(label, value, 'warn' if label == 'Latest sample' and not fresh else 'normal')
+            for label, value, role in network_rows(network_summary, age, state, overview):
+                ui_row(label, value, role)
         else:
             for line in network_lines(network_summary, age, state):
                 print('status: network last 5m: ' + line)
@@ -10563,7 +10781,7 @@ def status_cli(args):
         if installed and any(version(item) and version(item) < installed for item in versions):
             emit('status: diagnostics note: collector predates this launcher; next deliberate launch/reset adopts the installed recorder')
             if compact and not args.network_only:
-                ui_row('Note', 'Older collector / next deliberate launch or reset adopts the installed recorder')
+                ui_row('note', 'Older recorder / updates on next deliberate launch/reset', 'dim')
         if partial:
             emit('status: diagnostics coverage: PARTIAL: ' + '; '.join(partial))
             if compact:
@@ -10605,6 +10823,7 @@ def main(argv=None):
     parser.add_argument('--recording-policy', choices=('on', 'off', 'unknown'), default='unknown')
     parser.add_argument('--network-only', action='store_true')
     parser.add_argument('--ui-rows', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--ui-overview', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not 1 <= args.days <= 30 or not 2 * CHUNK <= args.cap <= 1073741824:
         raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")

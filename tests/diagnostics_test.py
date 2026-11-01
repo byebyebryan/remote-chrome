@@ -440,20 +440,48 @@ class DiagnosticsTests(unittest.TestCase):
         other['delta'].update(bytes_received=10**12)
         output = self.health_status([other, row], session='remote-chrome-snap', ui_rows=True)
         fields = dict(line.split('\t', 1) for line in output.splitlines())
-        self.assertIn('active / sample', fields['Diagnostics'])
-        self.assertIn('RX 100.00 B/s / TX 100.00 B/s', fields['Traffic'])
-        self.assertIn('TCP 1/1 / gaps 0', fields['Coverage'])
+        self.assertIn('active / fresh', fields['Recorder'])
+        self.assertIn('100 B/s', fields['RX'])
+        self.assertIn('100 B/s', fields['TX'])
+        self.assertIn('TCP 1/1', fields['Coverage'])
+        self.assertIn('0', fields['Gaps'])
         self.assertNotIn('8000000', output)
         self.assertNotIn('status: diagnostics launcher', output)
 
     def test_compact_status_stale_and_partial_observations_remain_explicit(self):
         output = self.health_status([self.health_sample(40)], ui_rows=True, network_only=True)
-        self.assertIn('Latest sample\tSTALE / 40.', output)
+        self.assertIn('Recorder\tdegraded / STALE 40.', output)
         self.assertNotIn('Diagnostics\t', output)
         with patch.object(d, 'READ_LIMIT', 256):
             output = self.health_status(ui_rows=True, network_only=True)
         self.assertIn('Partial\t', output)
         self.assertIn('read limit reached', output)
+
+    def test_compact_overview_reads_exact_attempt_with_short_measurement_summary(self):
+        row = self.health_sample()
+        other = self.health_sample(attempt=str(uuid.uuid4()))
+        other['delta'].update(bytes_received=10**12)
+        output = self.health_status([other, row], session='remote-chrome-snap', ui_rows=True,
+                                    ui_overview=True, network_only=True)
+        self.assertEqual(len(output.splitlines()), 3)
+        self.assertIn('RX 100 B/s / TX 100 B/s', output)
+        self.assertIn('retransmits 0', output)
+        self.assertIn('active / fresh', output)
+        self.assertIn('TCP 1/1 / gaps 0', output)
+        self.assertNotIn('8000000', output)
+        self.assertNotIn('panels\t', output)
+
+    def test_compact_overview_retains_partial_and_other_boot_limits(self):
+        with patch.object(d, 'READ_LIMIT', 256):
+            output = self.health_status([self.health_sample()], ui_rows=True, ui_overview=True,
+                                        network_only=True)
+        self.assertIn('Partial\t', output)
+        self.assertIn('read limit reached', output)
+        attempt = str(uuid.uuid4())
+        output = self.health_status([self.health_sample(attempt=attempt, boot='old-boot')],
+                                    attempt=attempt, ui_rows=True, ui_overview=True, network_only=True)
+        self.assertIn('Unavailable / no current-boot samples', output)
+        self.assertNotIn('100 B/s', output)
 
     def test_health_legacy_active_collector_is_advisory_not_degraded(self):
         rows = [self.health_sample(age, schema=1, launcher='1.7.0') for age in (4, 2, 0)]
