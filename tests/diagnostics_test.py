@@ -495,6 +495,61 @@ class DiagnosticsTests(unittest.TestCase):
         g = d.summarize([row])[0]
         self.assertIsNone(g['rtt_p95_ms'])
         self.assertEqual(g['legacy_rtt_p95_ms'], 10)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            d.report('Local', dict(summaries=[g]))
+        self.assertIn('ACK-progress TCP RTT p95 unavailable', output.getvalue())
+        self.assertIn('legacy sampled RTT p95 10.0 ms (freshness unavailable)', output.getvalue())
+
+    def test_query_labels_older_helper_rtt_without_claiming_ack_progress(self):
+        # The 1.7 helper shares the query schema but cannot establish RTT freshness.
+        summary = dict(attempt='older-attempt', host='snap', role='browser', samples=3,
+                       unavailable=0, gaps=0, first='start', last='end',
+                       rtt_p95_ms=42, rttvar_p95_ms=2)
+        for rtt in (42, None):
+            with self.subTest(rtt=rtt):
+                summary['rtt_p95_ms'] = rtt
+                peer = dict(schema=d.SCHEMA, status='available', summaries=[summary])
+                with patch.object(d, 'bounded', return_value=json.dumps(peer)), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(d.main(['query', 'snap', '--since', '20m']), 0)
+                report = output.getvalue().split('Browser endpoint:', 1)[1]
+                value = '42.0 ms' if rtt is not None else 'unavailable'
+                self.assertIn('legacy sampled RTT p95 ' + value, report)
+                self.assertIn('TCP deviation p95 2.0 ms', report)
+                self.assertIn('freshness unavailable; older diagnostics helper', report)
+                self.assertNotIn('ACK-progress', report)
+                self.assertNotIn('eligible samples', report)
+
+    def test_report_preserves_current_ack_progress_rtt(self):
+        summary = d.summarize([self.measured(100)])[0]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            d.report('Local', dict(summaries=[summary]))
+        self.assertIn('ACK-progress TCP RTT p95 10.0 ms; TCP deviation p95 1.0 ms; eligible samples 1',
+                      output.getvalue())
+        self.assertNotIn('legacy sampled RTT', output.getvalue())
+
+    def test_report_discloses_display_limit_separately_from_retention_cap(self):
+        for count in (0, 20, 21, 30, 199, 200, 201):
+            with self.subTest(count=count):
+                rows = [self.measured(100 + i * 10, delta={'retrans_total': 1}) for i in range(count)]
+                summary = d.summarize(rows or [self.measured(100)])[0]
+                before = json.dumps(summary, sort_keys=True)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    d.report('Local', dict(summaries=[summary]))
+                report = output.getvalue()
+                flags = [line for line in report.splitlines() if line.startswith('    flag:')]
+                self.assertEqual(len(flags), min(count, 20))
+                if count:
+                    self.assertIn(rows[-1]['utc'], flags[-1])
+                    self.assertIn(rows[max(0, count - 20)]['utc'], flags[0])
+                else:
+                    self.assertIn('incident flags: none', report)
+                if count > 20:
+                    self.assertIn(f'showing latest 20 of {min(count, 200)} retained incident flags', report)
+                else:
+                    self.assertNotIn('showing latest', report)
+                self.assertEqual('incident list capped' in report, count >= 200)
+                self.assertEqual(json.dumps(summary, sort_keys=True), before)
 
     def test_rtt_spike_requires_baseline_and_ack_progress(self):
         rows = [self.measured(i) for i in range(25)]

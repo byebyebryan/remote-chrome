@@ -129,7 +129,9 @@ RTT/variation are TCP's smoothed estimates, not raw packet delay or video
 jitter. The eligible RTT distribution requires acknowledged-byte progress and
 a recent ACK indicator. Idle/outstanding/unknown activity is reported
 separately so stale idle estimates cannot dominate a percentile. Schema 1 RTT
-is labeled legacy with freshness unavailable. Histograms use 1 ms bins capped
+is labeled legacy with freshness unavailable. Results returned by older helpers
+that do not report ACK eligibility carry the same freshness limitation, even
+when the querying launcher is newer. Histograms use 1 ms bins capped
 at 60000 ms; percentiles are approximate. Traffic is observed TCP data volume,
 not available capacity or a bandwidth speed test.
 
@@ -154,8 +156,10 @@ No flag means none in the available evidence; it does not establish that a
 session was hitch-free.
 
 Context before the requested window is carried forward with its observation
-time. Queries preserve endpoints and attempts separately. Incident lists are
-capped and declare truncation; narrow the window for more detail. Use the
+time. Queries preserve endpoints and attempts separately. Each summary retains
+up to 200 incident flags; the human report shows the latest 20 and states when
+earlier retained flags are omitted. It separately warns when the retained list
+reaches its cap. Narrow the window for more detail. Use the
 timeline alongside CPU/pressure observations and events. Exact input-to-display
 latency and frame pacing need further instrumentation; sampling can miss
 shorter hitches.

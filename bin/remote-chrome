@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.8.0"
+VERSION="1.8.1"
 
 usage() {
   cat <<USAGE
@@ -9619,9 +9619,14 @@ def report(label, data, timeline=False):
         print(f"    {g['first']} to {g['last']}")
         def fmt(value, suffix='', scale=1):
             return 'unavailable' if value is None else f'{value / scale:.1f}{suffix}'
-        print('    ACK-progress TCP RTT p95 ' + fmt(g.get('rtt_p95_ms'), ' ms') +
-              '; TCP deviation p95 ' + fmt(g.get('rttvar_p95_ms'), ' ms') +
-              f"; eligible samples {g.get('rtt_eligible', 0)}")
+        if 'rtt_eligible' in g:
+            print('    ACK-progress TCP RTT p95 ' + fmt(g.get('rtt_p95_ms'), ' ms') +
+                  '; TCP deviation p95 ' + fmt(g.get('rttvar_p95_ms'), ' ms') +
+                  f"; eligible samples {g['rtt_eligible']}")
+        else:
+            print('    legacy sampled RTT p95 ' + fmt(g.get('rtt_p95_ms'), ' ms') +
+                  '; TCP deviation p95 ' + fmt(g.get('rttvar_p95_ms'), ' ms') +
+                  ' (freshness unavailable; older diagnostics helper)')
         if g.get('legacy_rtt_p95_ms') is not None:
             print('    legacy sampled RTT p95 ' + fmt(g['legacy_rtt_p95_ms'], ' ms') + ' (freshness unavailable)')
         print('    peak traffic ' + fmt(g.get('traffic_peak_bytes_sec'), ' KiB/s', 1024) +
@@ -9644,6 +9649,8 @@ def report(label, data, timeline=False):
             print('    incident flags: none in the available observations')
         for incident in incidents[-20:]:
             print(f"    flag: {incident['first']}..{incident['last']} {incident['kind']}: {incident['detail']} ({incident['count']} observations)")
+        if len(incidents) > 20:
+            print(f'    showing latest 20 of {len(incidents)} retained incident flags; narrow the time window to review earlier flags')
         if g.get('flags_truncated'):
             print('    incident list capped; shorten the time window for full detail')
         if timeline:
