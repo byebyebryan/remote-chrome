@@ -10,7 +10,7 @@ change them. Runtime timeout/path settings still govern each invocation. See
 
 | Option | Purpose |
 | --- | --- |
-| `--session NAME` | Select a tmux session; also accepted by attach, status, reset, and stop |
+| `--session NAME` | Select a managed session; also accepted by logs, usb, attach, status, reset, and stop |
 | `--foreground` (`--no-tmux`) | Run transport and cleanup in the launching terminal |
 | `--chrome-command CMD` | Select a remote executable name or path, without shell syntax |
 | `--compression MODE` | Select Waypipe compression: `zstd=1` (default) or `lz4` |
@@ -38,7 +38,7 @@ apply with `--yes`, and `--password-store` browser overrides are rejected.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `REMOTE_CHROME_COMMAND` | `google-chrome-stable` | Remote executable |
-| `REMOTE_CHROME_SESSION_PREFIX` | `remote-chrome` | Prefix for default `PREFIX-HOST` tmux names and hostless discovery |
+| `REMOTE_CHROME_SESSION_PREFIX` | `remote-chrome` | Prefix for default `PREFIX-HOST` session names and hostless discovery |
 | `REMOTE_CHROME_SECRET_APPLICATION` | Derived from executable | Safe Storage application identity |
 | `REMOTE_CHROME_SECRET_SCHEMA` | Derived from executable | Safe Storage `xdg:schema` identity |
 
@@ -181,15 +181,15 @@ for the whole launch or stop.
 
 | Variable | Default | Scope |
 | --- | --- | --- |
-| `REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT` | `30` | Detached parent wait for forwarding setup to reach attachment/readiness |
+| `REMOTE_CHROME_YUBIKEY_BOOTSTRAP_TIMEOUT` | `30` | Legacy tmux parent wait for forwarding setup to reach attachment/readiness |
 | `REMOTE_CHROME_YUBIKEY_TIMEOUT` | `15` | FIDO readiness after attach |
-| `REMOTE_CHROME_YUBIKEY_READY_GRACE` | `5` | Additional detached parent grace after the readiness window |
-| `REMOTE_CHROME_YUBIKEY_POLL_INTERVAL` | `1` | Readiness polling interval; does not change the five-second hub recovery check |
+| `REMOTE_CHROME_YUBIKEY_READY_GRACE` | `5` | Additional legacy tmux parent grace after the readiness window |
+| `REMOTE_CHROME_YUBIKEY_POLL_INTERVAL` | `1` | Readiness polling interval; does not change the half-second background removal check or legacy five-second recovery check |
 | `REMOTE_CHROME_SSH_TIMEOUT` | `5` | Whole YubiKey SSH command/control request, plus one second of kill grace; invalid/zero values use `5` |
 | `REMOTE_CHROME_USBIP_TIMEOUT` | `5` | USB/IP daemon readiness and remote list/attach operations |
 | `REMOTE_CHROME_USBIP_STOP_TIMEOUT` | `3` | Owned `usbipd` termination wait |
 | `REMOTE_CHROME_TUNNEL_TIMEOUT` | `5` | Number of tunnel readiness attempts, one second apart; each SSH request has its own deadline |
-| `REMOTE_CHROME_YUBIKEY_CLEANUP_LOCK_TIMEOUT` | `30` | Wait for another cleanup caller; hub recovery uses `0` to avoid blocking |
+| `REMOTE_CHROME_YUBIKEY_CLEANUP_LOCK_TIMEOUT` | `30` | Wait for another cleanup caller; legacy hub recovery uses `0` to avoid blocking |
 | `REMOTE_CHROME_RESET_TIMEOUT` | `5` | Remote process-group termination polling during reset, not a whole SSH request deadline |
 
 Notification startup/cleanup and incoming stop use separate fixed bounded
@@ -203,3 +203,9 @@ SSH request deadline.
 selectors also apply when set in the browser host's environment. Attempt-token
 and `REMOTE_CHROME_ORIGIN_*` variables are internal lifecycle metadata;
 ordinary launch configuration should not set them.
+
+New detached sessions require systemd 254 or newer and Python 3 on the display
+host. Their supervisor checks local device identity every 0.5 seconds, permits
+90 seconds for an in-progress USB setup to settle during teardown, and gives
+service cleanup a 150-second stop deadline. Operational journal retention is
+host policy; diagnostics retain their separately configured day and byte caps.

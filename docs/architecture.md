@@ -1,7 +1,7 @@
 # Architecture and lifecycle contracts
 
 The runtime is the single executable [bin/remote-chrome](../bin/remote-chrome).
-It embeds the remote Bash bootstrap and Python notification/diagnostics helpers; nothing
+It embeds the remote Bash bootstrap and Python session/notification/diagnostics helpers; nothing
 under `docs/studies/` is a runtime dependency. [Usage](usage.md) covers commands,
 and [configuration](configuration.md) defines public defaults.
 
@@ -15,16 +15,19 @@ per-chunk locks protect open writers. There is no permanent collector service.
 
 ## Hosts and ownership
 
-The display host owns the launcher, tmux session, Waypipe/SSH client, local
+The display host owns the launcher, background supervisor, Waypipe/SSH client, local
 notification listener, and physical YubiKey export. The browser host owns the
 remote bootstrap, Chrome child, filtered D-Bus proxy, USB/IP import, and any
 notification/Secret Service helper created by that bootstrap.
 
-Detached mode normally has a `chrome` window and, when forwarding, a `yubikey`
-window. Foreground mode uses the same readiness/cleanup paths without tmux.
-The YubiKey helper remains alive to own its lease and monitor hub reconnects;
-incoming tracking and notification delivery introduce no permanent system
-service.
+New detached launches use a transient systemd user service and a private session
+record. Its supervisor watches the transport child and the exact local USB
+device. Transport exit ends the session; removal stops USB forwarding only and
+reinsertion leaves it off. A systemd post-stop hook cleans exact recorded
+resources after normal exit or supervisor failure. USB setup and the shared
+root-owned usbipd start before service handoff, outside its cgroup. Foreground
+mode retains terminal exit cleanup. Legacy tmux sessions remain supported until
+reset. See [managed session contracts](session-lifecycle.md).
 
 Ownership comes from recorded process start times, exact commands, socket/file
 identity, attempt tokens, session metadata, and boot identity where applicable.
@@ -67,10 +70,11 @@ the same availability criteria without loading modules. Attachment and FIDO
 readiness checks still follow driver preflight.
 
 Reset selects a recorded canonical Waypipe command, verifies its exact SSH
-reverse socket and remote process group, and recreates it in the same tmux
-session. It preserves recorded launch settings. After teardown, forwarding
+reverse socket and remote process group, and recreates it under the same
+managed session name. Legacy resets adopt the background service backend. Reset
+preserves recorded launch settings. After teardown, forwarding
 preflight runs again, followed by replacement listener startup and session
-creation. Listener readiness comes before the replacement Chrome pane.
+creation. Listener readiness comes before the replacement Chrome transport.
 Ambiguous identity or unreachable evidence prevents destructive reset.
 For recorded video sessions, installed FFmpeg compatibility on both hosts is
 checked before the destructive part of reset. This check concerns the next
@@ -78,10 +82,11 @@ launch; an already running binary can retain loaded libraries after an upgrade.
 
 Forwarding cleanup attempts every applicable resource and retains its ledger
 when any ownership or remote-state check remains unresolved. A later cleanup
-can retry; a failed probe does not establish absence. Hub recovery uses the
-same identities, requires confirmed absence of the old remote import, and
-preserves Chrome. It neither moves the key to another port nor reconnects an
-uncertain SSH tunnel automatically.
+can retry; a failed probe does not establish absence. New background sessions
+stop forwarding on physical removal instead of waiting for hub recovery. USB
+setup and session teardown coordinate before final cleanup; stopped or replaced
+attempts cannot publish readiness for a new generation. Legacy helpers retain
+their former recovery policy until reset.
 
 Each new browser bootstrap records its origin and identity for incoming stop.
 On the browser host, bare `stop` sends a bounded cleanup request to each live
@@ -136,6 +141,7 @@ Artifacts are ownership evidence, not a stable API for manual editing.
 
 | Host | Artifact | Purpose |
 | --- | --- | --- |
+| Display | `remote-chrome-sessions-<uid>/<name-hash>.json` and `.lock` / `.lease` | Private generation, frozen launch settings, process/service ownership and USB state |
 | Display | `remote-chrome-<session>.bootstrap.sh` | Generated bootstrap passed to the remote Waypipe environment |
 | Display | `remote-chrome-notify-<session>.state` and `.state.log` | Listener identity, sockets, diagnostics/delivery activity |
 | Display | `remote-chrome-notify-<token>.sock` | Private listener socket |
@@ -157,7 +163,9 @@ bootstrap. A deliberate reset activates it.
 
 `scripts/check` runs shell lifecycle tests, private D-Bus protocol tests, and
 generated-bootstrap tests. They exercise real private tmux/D-Bus helpers while
-mocking SSH, privileged operations, hardware, and the browser. Passing them
+mocking SSH, privileged operations, hardware, and the browser. The session suite
+also exercises real disposable supervisor and transport processes; optional
+controlled acceptance separately checks transient user services. Passing them
 establishes deterministic contracts, not real desktop appearance, physical
 token access, or cold-boot reachability.
 

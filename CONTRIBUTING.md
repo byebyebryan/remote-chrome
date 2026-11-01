@@ -34,10 +34,13 @@ Then run:
 ```
 
 The same runner is used by GitHub Actions. It checks Bash syntax, ShellCheck,
-four test suites, and `git diff --check`:
+the behavioral and Python test suites, and `git diff --check`:
 
 | Suite | Contract |
 | --- | --- |
+| `tests/sessions_test.py` | Private records, generations, service identity, independent USB lifecycle, supervisor exit and automatic events |
+| `tests/cli_test.py` | Human CLI, width/color/plain behavior and grouped status |
+| `tests/monitor_test.py` | Read-only model, chart layout, PTY help, resize and exit |
 | `tests/remote-chrome_test.sh` | CLI, tmux identity, launch/reset/stop, forwarding readiness/recovery, signal rollback, and unsafe runtime paths |
 | `tests/headless_notifications_test.py` | Real private-bus endpoint/listener negotiation, actions, replacements, closes, malformed input, delivery races, and disconnect cleanup |
 | `tests/secure_notifications_test.py` | Generated secure bootstrap, notification-name ownership, dependency failures, helper cleanup, and overlapping teardown signals |

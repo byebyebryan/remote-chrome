@@ -8,6 +8,8 @@ source "$repo_root/bin/remote-chrome"
 # Existing behavioral fixtures assert the detailed check messages. The compact
 # UI and actual terminal behavior have their own end-to-end CLI fixtures.
 chrome_ui_verbose=1
+# Retain legacy backend coverage; new lifecycle contracts have a separate suite.
+chrome_detached_backend=tmux
 test_yk_ssh_request_definition="$(declare -f yk_ssh_request)"
 
 # Keep any accidentally unmocked tmux or runtime-state access away from the
@@ -2707,7 +2709,7 @@ test_secure_bootstrap_existing_secret_owner_preserves_owner_and_exit_status() (
     bash -s -- fake-chrome chrome chrome_libsecret_os_crypt_password_v2 "" "" --new-window 2>&1)" || code=$?
   [ "$code" -eq 7 ] || fail "secure bootstrap did not preserve Chrome exit status: $code ($output)"
   assert_contains "$(cat "$test_dir/secret")" "unix:path=$test_dir/remote-chrome-dbus-proxy-"
-  assert_contains "$(cat "$test_dir/chrome")" "--password-store=gnome-libsecret --new-window"
+  assert_contains "$(cat "$test_dir/chrome")" "--password-store=gnome-libsecret --disable-background-mode --new-window"
   assert_contains "$(cat "$test_dir/events")" "--filter --talk=org.freedesktop.secrets"
   [[ "$(cat "$test_dir/events")" != *started* ]] || fail "pre-existing Secret Service owner was replaced"
   [ -z "$(find "$test_dir" -name 'remote-chrome-dbus-proxy-*.sock' -print -quit)" ] ||
@@ -3242,7 +3244,7 @@ test_status_without_host_reports_managed_overview() (
   }
 
   output="$(chrome_status)"
-  assert_contains "$output" "Managed tmux sessions:"
+  assert_contains "$output" "Managed sessions:"
   assert_contains "$output" "remote-chrome-host-one"
   [[ "$output" != *unrelated-session* ]] || fail "status included an unrelated tmux session"
   assert_contains "$output" "host-one: phase=ready readiness=verified-fido busid=5-1.2.2"
@@ -5606,7 +5608,7 @@ test_reset_help_and_target_selection() (
     code=$?
   fi
   [ "$code" -eq 1 ] || fail "hostless reset unexpectedly succeeded without a managed session"
-  assert_contains "$(cat "$test_dir/no-target")" "No managed remote-chrome tmux sessions found to reset"
+  assert_contains "$(cat "$test_dir/no-target")" "No managed remote-chrome sessions found to reset"
 )
 
 test_reset_without_host_selects_sole_managed_session() (
@@ -6205,7 +6207,7 @@ test_reset_post_stop_identity_check_preserves_tmux_on_unrelated_chrome() (
   output="$(cat "$test_dir/output")"
   [ "$code" -ne 0 ] || fail "reset unexpectedly succeeded after post-stop identity failure"
   [ "$probe_calls" -eq 2 ] || fail "reset did not perform the required post-stop probe"
-  assert_contains "$output" "preserving the existing tmux session"
+  assert_contains "$output" "preserving the existing session"
   [[ "$events" == *remote-stop* ]] || fail "reset did not stop the verified remote group"
   [[ "$events" != *kill-session* ]] || fail "post-stop probe failure killed the local tmux session"
   [[ "$events" != *new-session* ]] || fail "post-stop probe failure recreated the local tmux session"

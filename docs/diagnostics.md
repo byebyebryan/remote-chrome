@@ -325,3 +325,13 @@ missing/unsafe observations. A short passive sampler sanity check establishes
 that collection works and has bounded cost; it is not a transport comparison.
 Daily use supplies the soak. No new bitrate, codec or compression matrix is
 required for diagnostics delivery.
+
+## Session lifecycle events
+
+New background sessions record `session_started`, `session_stopped`,
+`session_cleanup_failed`, `usb_started`, `usb_stopped`, and
+`usb_cleanup_failed` automatically, without a manual mark. Reasons distinguish
+physical removal, requested stop, setup interruption and transport exit. These
+events share the normal diagnostic retention and quota and appear in incident
+queries/exports. `remote-chrome logs HOST --follow` shows operational stdout and
+stderr through the user journal, whose retention follows host policy.

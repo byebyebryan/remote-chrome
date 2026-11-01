@@ -14,22 +14,23 @@ prerequisites, defaults, and implementation contracts.
 
 ```bash
 remote-chrome remote-host
-remote-chrome attach remote-host
+remote-chrome logs remote-host --follow
 remote-chrome status remote-host
 remote-chrome monitor remote-host
 remote-chrome doctor remote-host
 remote-chrome stop remote-host
 ```
 
-Detached tmux mode is the default. Successful launches print a compact receipt
+A managed background session is the default, hosted by a transient systemd user service. Successful launches print a compact receipt
 with the browser/display hosts, selected video and diagnostics policies, and
 copyable inspect/restart/stop commands. `Background session started` confirms
 creation of the managed session, not that Chrome rendered a window. Hardware
 preference and enabled recording are policies; status checks their running state.
 The default name is `remote-chrome-HOST`, with
 awkward characters replaced by underscores: `remote.example` becomes
-`remote-chrome-remote_example`. `attach` switches the current client inside
-tmux and attaches normally outside it.
+`remote-chrome-remote_example`. Users do not need to interact with a tunnel terminal.
+Use `logs HOST --follow` for operational output; `attach` remains available for
+legacy tmux sessions. Existing sessions adopt the new backend on their next reset.
 
 The bare command starts a new session if none exists. If the selected managed
 session exists, it resets that session without asking for restart confirmation.
@@ -42,7 +43,7 @@ remote-chrome launch remote-host --no-yubikey
 remote-chrome launch remote-host --session work-browser -- --profile-directory=Default
 ```
 
-`launch` refuses an existing tmux session. A repeated bare `HOST` command keeps
+`launch` refuses an existing managed session or unresolved session cleanup. A repeated bare `HOST` command keeps
 the recorded compression, browser arguments, notification configuration, and
 YubiKey mode; new launch flags or defaults do not replace those settings.
 Runtime timeout and path settings still govern the invocation. Stop the
@@ -78,9 +79,13 @@ remote-chrome launch remote-host --foreground --with-yubikey
 ```
 
 Foreground mode uses the same secure bootstrap and forwarding readiness checks.
-Browser exit, Ctrl-C, TERM, and HUP clean its owned resources. In detached mode,
-closing Chrome can leave the `yubikey` window and forwarding running; use `stop`
-for the whole session.
+Browser exit, Ctrl-C, TERM, and HUP clean its owned resources. In the new background
+mode, closing the last managed Chrome window ends the session and cleans up USB
+forwarding and notifications. Closing one of several windows leaves the others
+running. The secure bootstrap supplies `--disable-background-mode`. Closing the
+launching terminal does not stop a background session. Foreground mode retains
+its terminal lifetime and exit cleanup; the unplug watcher belongs to the new
+background supervisor.
 
 Both `remote-chrome status` and `remote-chrome status remote-host` show the last
 five minutes of locally recorded SSH traffic, ACK-progress TCP RTT, delay
@@ -134,7 +139,7 @@ remote-chrome reset remote-host --session work-browser
 ```
 
 Reset restarts the exact managed Chrome/Waypipe stream and any recorded YubiKey
-forwarding. The normal `chrome` and `yubikey` windows can both be present. Reset
+forwarding. It accepts new background sessions and existing tmux sessions. Reset
 without a host selects the sole session under the configured default prefix;
 when several exist, specify a host or `--session NAME`.
 
@@ -144,7 +149,7 @@ USB ID and port. Older sessions without mode metadata use automatic detection;
 pre-1.3 sessions may
 fall back to a direct pane command. Wrapped pane metadata is never decoded.
 
-The launcher validates the selected pane, SSH reverse socket, remote process
+The launcher validates the recorded supervisor (or legacy pane), SSH reverse socket, remote process
 group, and runtime artifacts before stopping Chrome. It refuses ambiguous or
 unreachable ownership. `--yes` skips restart or confirmed-absence warnings,
 while ownership checks still apply. Reset recreates the stream rather than
@@ -158,14 +163,14 @@ Reset reruns forwarding preflight before starting the replacement listener and
 forwarding session. A failed preflight can therefore
 leave the old browser stopped; inspect diagnostics and retry after fixing the
 prerequisite. The replacement notification listener becomes ready before the
-new Chrome pane starts. Failed or interrupted listener startup rolls back its
+new Chrome transport starts. Failed or interrupted listener startup rolls back its
 exact process/socket, including interruption before state publication.
 
 For stale forwarding from Starship to Snap, run `remote-chrome reset snap` on
 Starship. Updating the installed launcher does not update an active bootstrap;
 update both hosts before a deliberate reset activates new behavior.
 
-## YubiKey forwarding and hub recovery
+## YubiKey forwarding and removal
 
 Automatic detection looks for the configured USB ID (`1050:0407` by default).
 A detected key makes forwarding a prerequisite; no detected key permits a
@@ -177,7 +182,7 @@ remote-chrome launch remote-host --with-yubikey
 remote-chrome launch remote-host --no-yubikey
 ```
 
-Before tmux or Chrome starts, forwarding preflight checks commands, scoped sudo,
+Before the background service or Chrome starts, forwarding preflight checks commands, scoped sudo,
 `usbip-host` on the display host, and `vhci-hcd` on the browser host. A module
 in the `live` state with its driver registered passes without module-file
 lookup or another `modprobe`, including after an upgrade removes its files.
@@ -191,34 +196,44 @@ If those files are already missing and the driver is unavailable, restore the
 matching modules or reboot that host. The launcher never installs modules or
 reboots it; `doctor` only reads driver/module availability and never loads them.
 
-Detached setup starts in the `yubikey` window. The parent allows a separate
-bootstrap phase (30 seconds by default), then readiness after attach (15
-seconds), plus a small final grace period (5 seconds). These are separate
-limits; 15 seconds is not the deadline for the whole launch. See
+USB setup completes in the launching command before ownership is handed to the
+background supervisor. Readiness after attach has a 15-second default deadline;
+USB/IP and SSH operations have their own bounds. The old 30-second parent wait
+and final grace apply only to the legacy tmux startup path. See
 [timeouts](configuration.md#timeouts-and-polling).
 
 Preferred readiness uses `fido2-token -L` as the browser user. If unavailable,
 the matching accessible udev/hidraw device provides a lower-confidence USB-only
 result. Both require the configured USB ID, FIDO metadata, and read/write
 access; an OTP keyboard interface or unrelated key cannot satisfy readiness.
-A failed child or timeout prints pane/log diagnostics and rolls back the
+A failed setup or timeout reports diagnostics and rolls back the
 resources acquired by that attempt.
 
 For headless access and stale reverse listeners after a display-host reboot,
 follow [the host setup instructions](../README.md#yubikey-forwarding). While
 forwarded, the key belongs to the browser host and may be unavailable locally.
 
-If a display-powered USB hub goes dark, the helper waits for the key to return
-to the recorded physical USB port with the configured USB ID. It checks every
-five seconds, validates the original session and SSH tunnel, and attempts
-recovery only after confirming that the old remote import is absent. Chrome
-stays running. It does not detach a surviving import or select another port.
+New background sessions observe the exact local USB port, USB ID and device
+identity every half second. Unplugging the key, replacing it, or losing hub
+power stops forwarding and leaves Chrome running. A failed SSH/FIDO probe is
+not treated as physical removal. Reinserting the key does not automatically
+export it again; start forwarding when needed:
 
-A failed recovery preserves the ledger and reports a manual reset fallback
-instead of repeatedly requesting sudo or rebuilding an uncertain tunnel.
-Network failures and moving the key to a different port still require manual
-reset. The five-second hub check is separate from the one-second readiness
-poll configured by `REMOTE_CHROME_YUBIKEY_POLL_INTERVAL`.
+```bash
+remote-chrome usb status remote-host
+remote-chrome usb start remote-host
+remote-chrome usb stop remote-host
+```
+
+These commands accept `--session NAME` and do not restart Chrome. Stopping USB
+is normal and is shown as `off / device-removed` or `off / requested`; an
+unconfirmed cleanup retains its ledger and is shown as `cleanup-failed`.
+Background cleanup uses noninteractive sudo, so local USB/IP cleanup permissions
+must remain valid without cached authentication. See [host setup](../README.md#yubikey-forwarding).
+
+An already running legacy tmux helper keeps its original five-second hub
+reconnect policy until a deliberate reset replaces it. Independent USB commands
+require the new backend. See [session lifecycle](session-lifecycle.md).
 
 ## Stop and desktop handoff
 
@@ -229,7 +244,7 @@ remote-chrome stop remote-host
 remote-chrome stop remote-host --session work-browser
 ```
 
-Bare `stop` handles default-prefix outgoing tmux sessions, default-runtime
+Bare `stop` handles default-prefix outgoing background and legacy tmux sessions, default-runtime
 YubiKey ledgers, recorded notification listeners, and tracked incoming sessions:
 
 ```bash
@@ -259,7 +274,7 @@ all default managed sessions on Starship; add `--session NAME` for a custom
 session. This explicit command requires noninteractive SSH and returns failure
 if the request or cleanup fails.
 
-Hostless teardown selects tmux names beginning with the configured prefix plus
+Hostless teardown selects managed session names beginning with the configured prefix plus
 `-`; it preserves an exact-name `remote-chrome` session and unrelated sessions.
 For a custom session outside that prefix, specify both `HOST` and
 `--session NAME`. For a custom YubiKey control socket, reuse its
@@ -338,7 +353,7 @@ handles startup failure before its state file exists.
 
 ## Diagnostics and recovery
 
-`status HOST` performs read-only probes of tmux, recorded USB/IP state, daemon
+`status HOST` performs read-only probes of the managed session, recorded USB/IP state, daemon
 identity, tunnel, actual remote readiness, and notification ownership. It sends
 no notifications and returns nonzero for stale, failed, or unreachable checks.
 `status` without a host is the managed-state overview.
@@ -349,17 +364,22 @@ a Safe Storage lookup, or change USB/IP state. With a live relay it sends a
 **visible notification probe** and checks delivery; this does not test a user
 click callback.
 
-Inspect pane output on the display host, substituting the printed session name:
+Inspect operational output on the display host:
 
 ```bash
-tmux capture-pane -pt remote-chrome-remote-host:chrome
-tmux capture-pane -pt remote-chrome-remote-host:yubikey
+remote-chrome logs remote-host
+remote-chrome logs remote-host --follow
 ```
+
+Logs use the user journal, including the last ended attempt retained in the
+session record. Journal retention is separate from the bounded diagnostic store.
+For an old tmux session, `logs HOST` captures the Chrome pane; use `attach HOST`
+to follow its terminal.
 
 For failed authentication, distinguish stored `ready` state from a fresh
 `fido2-token -L` as the Chrome user and the exact attachment in `sudo usbip port`
-on the browser host. If the physical hub is off, restore power first; if
-automatic recovery cannot establish ownership, save browser work and reset.
+on the browser host. After restoring hub power or reinserting a key, use
+`usb start HOST`; retry `usb stop HOST` first if an earlier cleanup is unresolved.
 
 If cleanup fails, retry the same scoped `stop HOST` with its custom session and
 socket settings. Do not delete a ledger merely because a host is unreachable:

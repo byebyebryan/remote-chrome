@@ -15,6 +15,7 @@ This README covers installation and host setup. See:
 - [Usage and troubleshooting](docs/usage.md) for launch, reset, handoff, and cleanup.
 - [Configuration](docs/configuration.md) for options and environment defaults.
 - [Architecture](docs/architecture.md) for lifecycle ownership and notification contracts.
+- [Managed sessions](docs/session-lifecycle.md) for background ownership, browser exit and USB removal.
 - [Session diagnostics](docs/diagnostics.md) for daily-use incident logs, retention, and export.
 - [Notification study and acceptance index](docs/studies/headless-notifications/README.md)
   for dated evidence, roadmap reconciliation, and remaining acceptance limits.
@@ -31,7 +32,7 @@ for Chrome transport; forwarding still needs noninteractive SSH.
 
 | Host | Required commands and environment |
 | --- | --- |
-| Display | `bash`, `ssh`, `waypipe` with Zstd support, a graphical Wayland session, and `tmux` for detached mode |
+| Display | `bash`, `ssh`, `waypipe` with Zstd support, a graphical Wayland session, and Python 3 plus systemd 254+ with a running user manager for detached mode |
 | Browser | `bash`, `waypipe` with Zstd support, `xdg-dbus-proxy`, `secret-tool` (libsecret), `ksecretd` (KWallet/Secret Service), `busctl` (systemd), and the selected Chrome executable |
 | Both, with notifications enabled | `python3` |
 | Both, with session diagnostics enabled | `python3`; `ss` and `ip` (iproute2) for TCP/network observations; optional `tailscale` for passive path context |
@@ -39,7 +40,7 @@ for Chrome transport; forwarding still needs noninteractive SSH.
 | Both, for interactive headless notifications | Python D-Bus and GLib bindings (`python-dbus` and `python-gobject` on Arch; `python3-dbus` and `python3-gi` on Debian) |
 | Display, for existing-daemon informational forwarding | `notify-send` (libnotify); `busctl` detects body markup support |
 | Display, for bounded notification diagnostics, cleanup, and incoming stop requests | `timeout` (coreutils) |
-| Browser, for `stop` at desktop handoff | `tmux`, `ssh`, and `timeout`; SSH back to the display host enables its cleanup request |
+| Browser, for `stop` at desktop handoff | `ssh` and `timeout`; SSH back to the display host enables its cleanup request |
 
 Interactive notifications also need a display-host notification daemon that
 advertises body and action support. Missing bindings or unsupported capabilities
@@ -76,7 +77,7 @@ Forwarding is automatic when a local key matches the configured USB ID
 
 | Host | Additional forwarding requirements |
 | --- | --- |
-| Display | `usbip`, `ss` (iproute2), `timeout` (coreutils), and sudo for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and starting/stopping `usbipd` |
+| Display | `usbip`, `ss` (iproute2), `timeout` (coreutils), and sudo for `modprobe usbip-host`, `usbip bind`, `usbip unbind`, and starting/stopping `usbipd`; background cleanup requires scoped passwordless sudo for its cleanup commands |
 | Browser | `usbip`, `timeout`, passwordless scoped sudo for `modprobe vhci-hcd`, `usbip attach`, `usbip port`, and `usbip detach` |
 | Browser, for verified FIDO readiness | `fido2-token` (libfido2) and read/write access to the matching FIDO hidraw device as the Chrome user |
 
@@ -169,7 +170,7 @@ Chrome untouched when the forwarding port is occupied.
 On the display host, install transport and notification dependencies:
 
 ```bash
-sudo pacman -S --needed openssh waypipe tmux coreutils python python-dbus python-gobject libnotify
+sudo pacman -S --needed openssh waypipe systemd coreutils python python-dbus python-gobject libnotify
 ```
 
 On the browser host:
@@ -219,7 +220,7 @@ On the display host:
 ```bash
 remote-chrome remote-host
 remote-chrome status remote-host
-remote-chrome attach remote-host
+remote-chrome logs remote-host --follow
 remote-chrome reset remote-host
 remote-chrome stop remote-host
 ```

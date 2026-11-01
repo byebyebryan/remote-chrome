@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.10.2"
+VERSION="1.11.0"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -369,7 +369,9 @@ usage() {
     chrome_ui_row 'stop [HOST]' 'Clean up one session, or all managed sessions'
     chrome_ui_section 'More commands'
     chrome_ui_row 'launch HOST' 'Create a fresh session with selected launch options'
-    chrome_ui_row 'attach HOST' 'Attach to the session terminal'
+    chrome_ui_row 'logs [HOST]' 'Read session output (--follow for live logs)'
+    chrome_ui_row 'usb start|stop HOST' 'Manage forwarding without restarting Chrome'
+    chrome_ui_row 'attach HOST' 'Attach to a legacy tmux session'
     chrome_ui_row 'doctor HOST' 'Check launch prerequisites'
     chrome_ui_row 'mark HOST' 'Mark a moment for later investigation'
     chrome_ui_row 'diagnostics HOST' 'Review history (--since, --timeline, --export)'
@@ -390,13 +392,15 @@ Usage:
   $PROGRAM monitor [HOST] [--session NAME]
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
+  $PROGRAM logs [HOST] [--follow]
+  $PROGRAM usb start|stop|status HOST
   $PROGRAM reset [HOST] [--session NAME] [--yes]
   $PROGRAM mark HOST [--session NAME]
   $PROGRAM diagnostics HOST [--session NAME] [--since 20m | --at ISO --window 5m]
     [--timeline] [--resolution auto|raw|minute] [--watch [60s] | --probe [30s]] [--export FILE]
 
 Chrome options:
-      --session NAME       tmux session name
+      --session NAME       managed session name
       --foreground         run Chrome remoting in the foreground
       --chrome-command CMD remote Chrome command, default: google-chrome-stable
       --compression MODE   Waypipe compression: zstd=1 (default) or lz4
@@ -1815,7 +1819,7 @@ fi
 
 # Run Chrome as a child so EXIT/signal cleanup always owns the proxy and any
 # KWallet Secret Service started above. The caller's exit status is preserved.
-"$chrome_command" --password-store=gnome-libsecret "$@" &
+"$chrome_command" --password-store=gnome-libsecret --disable-background-mode "$@" &
 chrome_pid=$!
 chrome_starttime="$(remote_secure_pid_starttime "$chrome_pid" 2>/dev/null || true)"
 if [ -z "$chrome_starttime" ] && kill -0 "$chrome_pid" >/dev/null 2>&1; then
@@ -2313,9 +2317,8 @@ chrome_ensure() {
     return
   fi
 
-  need tmux
-  if tmux has-session -t "=$chrome_launch_target_session" 2>/dev/null; then
-    chrome_ui_issue "Managed tmux session $chrome_launch_target_session already exists; resetting the remote Chrome/Waypipe stream." >&2
+  if chrome_session_exists "$chrome_launch_target_session"; then
+    chrome_ui_issue "Managed session $chrome_launch_target_session already exists; resetting the remote Chrome/Waypipe stream." >&2
     chrome_reset "$chrome_launch_target_host" --session "$chrome_launch_target_session" --yes
     return
   fi
@@ -2462,6 +2465,7 @@ chrome_launch() {
     chrome_args=(--disable-gpu "${chrome_args[@]}")
   fi
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
+  chrome_validate_host "$host" && chrome_validate_session "$session" || return 1
   chrome_validate_password_store_args "${chrome_args[@]}"
   chrome_secret_identity "$chrome_command" || exit 1
   chrome_yubikey_mode="$yubikey_mode"
@@ -2501,9 +2505,9 @@ chrome_launch() {
   # previous tmux session or managed/provisional YubiKey state means this
   # launch is a duplicate and must abort without touching the browser.
   if [ "$foreground" != "1" ]; then
-    need tmux
-    if tmux has-session -t "=$session" 2>/dev/null; then
-      die "tmux session already exists: $session"
+    if [ "$chrome_detached_backend" = systemd ]; then chrome_service_preflight; else need tmux; fi
+    if chrome_session_exists "$session"; then
+      die "Managed session already exists: $session"
     fi
   fi
   if [ "$forwarding_expected" = "1" ] && runtime_path_present "$yk_state_file"; then
@@ -2529,7 +2533,9 @@ chrome_launch() {
   if [ "$forwarding_expected" = "1" ]; then
     yk_preflight_for_forwarding 1
   fi
-  chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
+  if [ "$foreground" = 1 ] || [ "$chrome_detached_backend" = tmux ]; then
+    chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" "$foreground"
+  fi
 
   chrome_diag_policy="$transport:$video_codecs:$compression"
   [ "$transport" != video ] || chrome_diag_policy+=":h264,bpf=250000"
@@ -2593,18 +2599,26 @@ chrome_launch() {
     exec "${command[@]}" <<<"$secure_script"
   fi
 
-  if [ -n "$notify_local_socket" ]; then
-    trap 'notify_stop_listener' EXIT
-    notify_start_listener ||
-      echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
-  fi
   local bootstrap_script
-  bootstrap_script="$(chrome_prepare_bootstrap_script "$session")" ||
-    die "Could not prepare the remote Chrome bootstrap script for $host."
+  if [ "$chrome_detached_backend" = systemd ]; then
+    # Reserve the generation before publishing any shared session artifact.
+    bootstrap_script="$(chrome_bootstrap_script_path "$session")"
+  else
+    if [ -n "$notify_local_socket" ]; then
+      trap 'notify_stop_listener' EXIT
+      notify_start_listener ||
+        echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
+    fi
+    bootstrap_script="$(chrome_prepare_bootstrap_script "$session")" ||
+      die "Could not prepare the remote Chrome bootstrap script for $host."
+  fi
   command_line="$(chrome_secure_command_line "$compression" "$host" "$chrome_command" \
     "$chrome_secret_application" "$chrome_secret_schema" "$notify_remote_socket" \
     "$notify_local_socket" "$notify_apps" "$bootstrap_script" "${chrome_args[@]}")"
-  if [ "$forwarding_expected" = "1" ]; then
+  if [ "$chrome_detached_backend" = systemd ]; then
+    chrome_service_launch "$host" "$session" "$command_line" "$forwarding_expected" \
+      "$allow_existing" "$assume_yes" "$chrome_command" || return $?
+  elif [ "$forwarding_expected" = "1" ]; then
     chrome_launch_detached_with_yubikey "$host" "$session" "$command_line" "${yubikey_args[@]}"
   else
     if ! chrome_tmux_create_chrome_session "$session" "$command_line"; then
@@ -2615,11 +2629,15 @@ chrome_launch() {
   trap - EXIT
 
   if [ "$chrome_ui_verbose" = 1 ]; then
-    echo "Started remote Chrome on $host in tmux session $session."
+    echo "Started remote Chrome on $host in background session $session ($chrome_detached_backend)."
     if [ "$forwarding_expected" = "1" ]; then
-      echo "YubiKey forwarding is ready in tmux window ${session}:yubikey."
+      echo "YubiKey forwarding is ready for session $session."
     fi
-    print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
+    if [ "$chrome_detached_backend" = systemd ]; then
+      print_command_hint "Logs:" "$PROGRAM" logs "$host" --session "$session" --follow
+    else
+      print_command_hint "Attach:" "$PROGRAM" attach "$host" --session "$session"
+    fi
     print_command_hint "Status:" "$PROGRAM" status "$host" --session "$session"
     print_command_hint "Stop:" "$PROGRAM" stop "$host" --session "$session"
   else
@@ -3374,8 +3392,14 @@ chrome_stop() {
     session="$(chrome_default_session "$host")"
   }
 
-  need tmux
-  if tmux has-session -t "=$session" 2>/dev/null; then
+  if chrome_service_known "$session"; then
+    chrome_service_read "$session" || return $?
+    [ -z "$host" ] || [ "$host" = "$chrome_reset_host" ] || die "Selected session targets $chrome_reset_host, not $host."
+    host="$chrome_reset_host"
+    chrome_session_manager stop "$session" "$chrome_service_generation" || code=1
+    if [ "$chrome_ui_verbose" = 0 ] && [ "$code" = 0 ]; then chrome_ui_result ok "Session cleanup completed: $session"; fi
+    return "$code"
+  elif command -v tmux >/dev/null && tmux has-session -t "=$session" 2>/dev/null; then
     if tmux kill-session -t "=$session"; then
       chrome_ui_detail "Stopped tmux session $session."
       chrome_remove_bootstrap_script "$session" || code=1
@@ -3405,25 +3429,32 @@ chrome_stop() {
 }
 
 chrome_managed_sessions() {
-  local session
+  local session services="" legacy="" code=0
   local prefix="${REMOTE_CHROME_SESSION_PREFIX:-remote-chrome}"
-
+  if command -v python3 >/dev/null; then services="$(chrome_session_manager names)" || code=1; fi
+  if command -v tmux >/dev/null; then legacy="$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)"; fi
   while IFS= read -r session; do
-    case "$session" in
-      "$prefix"-*) printf '%s\n' "$session" ;;
-    esac
-  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+    case "$session" in "$prefix"-*) printf '%s\n' "$session" ;; esac
+  done <<<"$services
+$legacy" | sort -u
+  return "$code"
 }
 
 chrome_stop_all() {
-  local session
+  local session session_list=""
   local stopped_sessions=0
   local code=0
 
-  need tmux
+  session_list="$(chrome_managed_sessions)" || code=1
   while IFS= read -r session; do
     [ -n "$session" ] || continue
-    if tmux kill-session -t "=$session"; then
+    if chrome_service_known "$session"; then
+      if chrome_service_read "$session" && chrome_session_manager stop "$session" "$chrome_service_generation"; then
+        stopped_sessions=$((stopped_sessions + 1))
+      else
+        code=1
+      fi
+    elif tmux kill-session -t "=$session"; then
       chrome_ui_detail "Stopped tmux session $session."
       chrome_remove_bootstrap_script "$session" || code=1
       stopped_sessions=$((stopped_sessions + 1))
@@ -3431,10 +3462,10 @@ chrome_stop_all() {
       echo "Could not stop tmux session $session." >&2
       code=1
     fi
-  done < <(chrome_managed_sessions)
+  done <<<"$session_list"
 
   if [ "$stopped_sessions" = "0" ]; then
-    echo "No managed remote-chrome tmux sessions found."
+    echo "No managed remote-chrome sessions found."
   fi
 
   if ! yk_stop_all; then
@@ -3483,6 +3514,12 @@ chrome_attach() {
     session="$(chrome_default_session "$host")"
   }
 
+  if chrome_service_known "$session"; then
+    chrome_service_read "$session" || return $?
+    chrome_ui_line "This session runs in the background; use logs to inspect its output."
+    chrome_ui_command Logs logs "$chrome_reset_host" "$session" --follow
+    return 0
+  fi
   need tmux
   tmux has-session -t "=$session" 2>/dev/null ||
     die "tmux session not found: $session"
@@ -3511,6 +3548,11 @@ chrome_reset_video_prefix='^waypipe-remote-chrome[[:space:]]+--compress[[:space:
 
 chrome_reset_read_pane() {
   local session="$1"
+  if chrome_service_known "$session"; then
+    chrome_session_manager read-live "$session" >/dev/null || return $?
+    chrome_service_read "$session"
+    return $?
+  fi
   local pane_output=""
   local line_count=0
   local pane_line
@@ -4148,6 +4190,7 @@ chrome_reset() {
   local notify_reset_previous_traps=""
   local recreate_failed=0
   local diagnostics_saved="" diagnostics_previous="" diagnostics_mode=""
+  local reset_service_backend=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -4179,19 +4222,20 @@ chrome_reset() {
     esac
   done
 
-  need tmux
   if [ -z "$host" ] && [ -z "$session" ]; then
     local -a managed_sessions=()
-    mapfile -t managed_sessions < <(chrome_managed_sessions)
+    local session_list
+    session_list="$(chrome_managed_sessions)" || { echo 'Session inventory is incomplete; select an explicit host/session.' >&2; return 1; }
+    if [ -n "$session_list" ]; then mapfile -t managed_sessions <<<"$session_list"; fi
     case "${#managed_sessions[@]}" in
       0)
-        die "No managed remote-chrome tmux sessions found to reset."
+        die "No managed remote-chrome sessions found to reset."
         ;;
       1)
         session="${managed_sessions[0]}"
         ;;
       *)
-        printf 'More than one managed remote-chrome tmux session exists; select one with %s reset HOST or --session NAME:\n' "$PROGRAM" >&2
+        printf 'More than one managed remote-chrome session exists; select one with %s reset HOST or --session NAME:\n' "$PROGRAM" >&2
         printf '  %s\n' "${managed_sessions[@]}" >&2
         return 1
         ;;
@@ -4201,17 +4245,18 @@ chrome_reset() {
 
   need ssh
   need ps
-  tmux has-session -t "=$session" 2>/dev/null ||
-    die "tmux session not found: $session"
+  chrome_session_exists "$session" || die "Managed session not found: $session"
+  if [ "$chrome_detached_backend" = systemd ]; then chrome_service_preflight; fi
   chrome_reset_read_pane "$session" || return 1
   chrome_reset_parse_pane_host "$chrome_reset_pane_command" || return 1
   pane_host="$chrome_reset_host"
+  if chrome_service_known "$session"; then reset_service_backend=1; fi
   if [ -n "$host" ] && [ "$host" != "$pane_host" ]; then
     die "The selected chrome pane targets $pane_host, not requested host $host; refusing reset."
   fi
   host="$pane_host"
   chrome_transport_defaults || return 1
-  diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+  diagnostics_saved="$(chrome_session_diagnostics_policy "$session" 2>/dev/null || true)"
   if [ -n "$diagnostics_saved" ]; then
     if [[ "$diagnostics_saved" =~ ^off:([0-9]+):([0-9]+):-$ ]]; then
       chrome_diagnostics=off
@@ -4240,6 +4285,9 @@ chrome_reset() {
     chrome_video_compatibility "$host" || return 1
   fi
   chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" || return 1
+  if [ "$chrome_detached_backend" = systemd ]; then
+    chrome_session_manager lease "$session" "${BASHPID:-$$}" || return $?
+  fi
 
   notify_set_runtime_paths "$session"
   if [ -f "$notify_state_file" ]; then
@@ -4247,9 +4295,17 @@ chrome_reset() {
     notify_reset_state=1
   fi
 
+  if chrome_service_known "$session"; then
+    yk_control_socket="$chrome_service_usb_socket"
+    yk_usb_id="$chrome_service_usb_id"
+    yk_usbip_port="$chrome_service_usb_port"
+  fi
   yk_prepare_for_launch "$host"
   runtime_path_present "$yk_state_file" && yk_state_present=1
-  if tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null |
+  if chrome_service_known "$session"; then
+    chrome_service_read "$session" || return $?
+    [ "$chrome_service_usb_state" = off ] || yk_window_present=1
+  elif tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null |
     grep -qx yubikey; then
     yk_window_present=1
   fi
@@ -4260,10 +4316,14 @@ chrome_reset() {
     reset_forwarding_expected=1
   fi
   if ! chrome_validate_launch_artifacts "$session" "$reset_forwarding_expected" 0 1; then
-    echo "Unsafe runtime artifact prevents resetting $session; the existing browser and tmux session are unchanged." >&2
+    echo "Unsafe runtime artifact prevents resetting $session; the existing browser session is unchanged." >&2
     return 1
   fi
 
+  if [ "$chrome_detached_backend" = systemd ] && [ "$reset_forwarding_expected" = 1 ]; then
+    yk_local_candidate_exists || { echo "Required USB key is absent; preserving the current browser. Use stop then launch --no-yubikey to omit forwarding." >&2; return 1; }
+    sudo -v || return 1
+  fi
   chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" "$session" || remote_identity_code=$?
   case "$remote_identity_code" in
     0)
@@ -4271,7 +4331,7 @@ chrome_reset() {
       [ "$chrome_ui_verbose" = 1 ] || chrome_ui_row Restart "$host / $session" >&2
       if [ "$assume_yes" != "1" ] &&
         ! confirm "Reset will restart remote Chrome/Waypipe and may lose unsaved in-page state. Continue?"; then
-        echo "Reset canceled; the existing tmux session is unchanged." >&2
+        echo "Reset canceled; the existing session is unchanged." >&2
         return 1
       fi
       chrome_reset_remote_stop "$host" "$chrome_reset_remote_socket" \
@@ -4281,7 +4341,7 @@ chrome_reset() {
       chrome_reset_remote_identity "$host" "$chrome_reset_remote_socket" "$session" 1 ||
         post_stop_identity_code=$?
       if [ "$post_stop_identity_code" -ne 1 ]; then
-        echo "Remote Waypipe teardown did not leave a cleanly absent server; preserving the existing tmux session." >&2
+        echo "Remote Waypipe teardown did not leave a cleanly absent server; preserving the existing session." >&2
         return 1
       fi
       ;;
@@ -4289,7 +4349,7 @@ chrome_reset() {
       echo "The exact remote waypipe server is already absent for socket $chrome_reset_remote_socket." >&2
       if [ "$assume_yes" != "1" ] &&
         ! confirm "No matching remote waypipe server or Chrome was found; recreate this frozen session?"; then
-        echo "Reset canceled; the existing tmux session is unchanged." >&2
+        echo "Reset canceled; the existing session is unchanged." >&2
         return 1
       fi
       ;;
@@ -4298,6 +4358,10 @@ chrome_reset() {
       ;;
   esac
 
+  if chrome_service_known "$session"; then
+    chrome_service_read "$session" || return $?
+    chrome_session_manager stop "$session" "$chrome_service_generation" || return $?
+  else
   if session_probe_output="$(LC_ALL=C tmux has-session -t "=$session" 2>&1)"; then
     session_probe_code=0
   else
@@ -4331,11 +4395,15 @@ chrome_reset() {
       ;;
   esac
 
+  fi
+
   if [ "$yk_state_present" = "1" ] || [ "$yk_window_present" = "1" ]; then
-    yk_stop || {
-      echo "YubiKey cleanup remains incomplete; retry $PROGRAM stop $host before resetting." >&2
-      return 1
-    }
+    if [ "$reset_service_backend" = 0 ]; then
+      yk_stop || {
+        echo "YubiKey cleanup remains incomplete; retry $PROGRAM stop $host before resetting." >&2
+        return 1
+      }
+    fi
     if [ "$chrome_yubikey_mode" != "off" ]; then
       yk_needed=1
     fi
@@ -4344,18 +4412,18 @@ chrome_reset() {
     yk_needed=1
   fi
 
-  if [ "$notify_reset_state" = "1" ]; then
+  if [ "$notify_reset_state" = "1" ] && [ "$reset_service_backend" = 0 ]; then
     notify_stop_listener "$host"
   fi
 
   # Recreate the session-scoped bootstrap the canonical pane command reads from
   # stdin; it may have been pruned from the runtime directory since launch.
-  chrome_prepare_bootstrap_script "$session" >/dev/null || return 1
+  if [ "$chrome_detached_backend" = tmux ]; then chrome_prepare_bootstrap_script "$session" >/dev/null || return 1; fi
 
   if [ "$yk_needed" = "1" ]; then
     yk_preflight_for_forwarding 1 || return $?
   fi
-  if [ "$notify_reset_state" = "1" ]; then
+  if [ "$notify_reset_state" = "1" ] && [ "$chrome_detached_backend" = tmux ]; then
     # The remote endpoint connects once during bootstrap. Its local listener
     # must already be accepting connections before the Chrome pane starts.
     if notify_start_listener; then
@@ -4370,7 +4438,12 @@ chrome_reset() {
     fi
   fi
 
-  if [ "$yk_needed" = "1" ]; then
+  if [ "$chrome_detached_backend" = systemd ]; then
+    if ! chrome_service_launch "$host" "$session" "$chrome_reset_pane_command" "$yk_needed"; then
+      echo "Could not recreate the managed background session after remote Waypipe teardown." >&2
+      recreate_failed=1
+    fi
+  elif [ "$yk_needed" = "1" ]; then
     if ! chrome_launch_detached_with_yubikey "$host" "$session" "$chrome_reset_pane_command"; then
       echo "Could not recreate the Chrome/YubiKey tmux session after remote Waypipe teardown." >&2
       recreate_failed=1
@@ -4420,7 +4493,8 @@ chrome_validate_session() {
 chrome_monitor_inventory() {
   local session host attempt saved policy transport pane inventory
   local requested="${1:-}"
-  command -v tmux >/dev/null || { echo 'tmux is unavailable' >&2; return 1; }
+  chrome_session_manager inventory "$requested" || return $?
+  command -v tmux >/dev/null || return 0
   if ! inventory="$(tmux list-sessions -F '#{session_name}' 2>&1)"; then
     case "$inventory" in
       *'no server running on '*|*'no sessions'*|*'No such file or directory'*) return 0 ;;
@@ -4440,7 +4514,7 @@ chrome_monitor_inventory() {
       if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
         transport="h264,${BASH_REMATCH[2]},bpf=${BASH_REMATCH[3]}"
       fi
-      saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+      saved="$(chrome_session_diagnostics_policy "$session" 2>/dev/null || true)"
       if [[ "$saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
         attempt="${BASH_REMATCH[1]}" policy=on
       elif [[ "$saved" =~ ^off:[0-9]+:[0-9]+:-$ ]]; then
@@ -4458,7 +4532,7 @@ chrome_monitor_transport() {
   local host="$1" session="$2" attempt="$3" saved code=0
   chrome_validate_host "$host" || return 1
   chrome_validate_session "$session" || return 1
-  saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null)" || return 1
+  saved="$(chrome_session_diagnostics_policy "$session" 2>/dev/null)" || return 1
   [[ "$saved" = *":$attempt" ]] || return 1
   # Explicit semantic fields, not a parser for the one-shot human dashboard.
   chrome_ui_check() { printf '%s\t%s\n' "$1" "$2"; }
@@ -4506,14 +4580,14 @@ chrome_status_all() {
   local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
   local found_sessions=0
   local found_forwarding=0
-  local code=0
+  local code=0 session_list=""
 
-  need tmux
   if [ "$chrome_ui_verbose" = 1 ]; then
-    echo 'Managed tmux sessions:'
+    echo 'Managed sessions:'
   else
     chrome_ui_title 'sessions'
   fi
+  session_list="$(chrome_managed_sessions)" || { chrome_ui_issue 'Session inventory incomplete; inspect unreadable records.'; code=1; }
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     found_sessions=1
@@ -4522,7 +4596,17 @@ chrome_status_all() {
     else
       chrome_ui_section "$session"
     fi
-    if windows="$(tmux list-windows -t "=$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null)"; then
+    if chrome_service_known "$session"; then
+      if chrome_service_read "$session"; then
+        chrome_ui_detail "    service: $chrome_service_phase / USB $chrome_service_usb_state"
+        if [ "$chrome_service_phase" != running ] || [ "$chrome_service_usb_state" = cleanup-failed ]; then
+          chrome_ui_issue "Session needs attention: $chrome_service_phase / USB $chrome_service_usb_state"
+          code=1
+        fi
+      else
+        code=1
+      fi
+    elif windows="$(tmux list-windows -t "=$session" -F '    window: #{window_name} (#{window_index})' 2>/dev/null)"; then
       chrome_ui_detail "$windows"
     else
       chrome_ui_issue 'Windows unavailable (session may have exited)' >&2
@@ -4549,7 +4633,7 @@ chrome_status_all() {
     else
       chrome_ui_check Network 'Unavailable / launch metadata could not be read' '    network last 5m: unavailable (launch metadata could not be read)' warn
     fi
-  done < <(chrome_managed_sessions)
+  done <<<"$session_list"
   if [ "$found_sessions" = 0 ]; then
     chrome_ui_check Sessions None '  none'
   fi
@@ -4740,7 +4824,7 @@ chrome_status_diagnostics() {
   local host="$1" session="$2"
   shift 2
   local diagnostics_saved="" diagnostics_attempt="" diagnostics_policy=unknown
-  diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+  diagnostics_saved="$(chrome_session_diagnostics_policy "$session" 2>/dev/null || true)"
   if [[ "$diagnostics_saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
     diagnostics_attempt="${BASH_REMATCH[1]}"
     diagnostics_policy=on
@@ -4769,14 +4853,26 @@ chrome_status_current() {
   local -a chrome_ui_transport_labels=() chrome_ui_transport_values=() chrome_ui_transport_roles=()
 
   [ -n "$session" ] || session="$(chrome_default_session "$host")"
-  need tmux
   if [ "$chrome_ui_verbose" = 0 ]; then
     chrome_ui_title "$host"
     printf '\n'
     chrome_ui_line "Browser $host / Display $(hostname -s 2>/dev/null || printf 'this machine')"
   fi
 
-  if tmux has-session -t "=$session" 2>/dev/null; then
+  if chrome_service_known "$session"; then
+    chrome_service_read "$session" || return $?
+    if [ "$chrome_reset_host" != "$host" ]; then die "Selected session targets $chrome_reset_host, not $host."; fi
+    if [ "$chrome_service_phase" = running ] &&
+      [ "$chrome_service_boot" = "$(cat /proc/sys/kernel/random/boot_id)" ] &&
+      [ "$(notify_pid_starttime "$chrome_reset_pane_pid" 2>/dev/null || true)" = "$chrome_service_owner_start" ]; then
+      chrome_ui_check Session 'Background session running' "status: managed service running: $session"
+    else
+      chrome_ui_issue "Session $chrome_service_phase / $chrome_service_reason" >&2
+      code=1
+    fi
+    chrome_ui_row USB "$chrome_service_usb_state / $chrome_service_usb_reason"
+    if [ "$chrome_service_usb_state" = cleanup-failed ]; then code=1; fi
+  elif command -v tmux >/dev/null && tmux has-session -t "=$session" 2>/dev/null; then
     local session_label='Background session running'
     [ "$session" = "$(chrome_default_session "$host")" ] || session_label+=" / $session"
     chrome_ui_check Session "$session_label" "status: tmux session running: $session"
@@ -5814,7 +5910,7 @@ yk_sysfs_busids() {
   wanted_vendor="${wanted_vendor,,}"
   wanted_product="${wanted_product,,}"
 
-  for candidate in /sys/bus/usb/devices/*; do
+  for candidate in "${REMOTE_CHROME_USB_SYSFS_ROOT:-/sys/bus/usb/devices}"/*; do
     [ -d "$candidate" ] || continue
     [ -r "$candidate/idVendor" ] || continue
     [ -r "$candidate/idProduct" ] || continue
@@ -6362,11 +6458,17 @@ chrome_doctor() {
     ! doctor_check "video FFmpeg compatibility on both hosts" chrome_video_compatibility "$host"; then
     code=1
   fi
-  for command_name in ssh "${chrome_waypipe_command[0]}" tmux; do
+  for command_name in ssh "${chrome_waypipe_command[0]}" python3 systemctl systemd-run; do
     if ! doctor_check "local command: $command_name" doctor_local_command "$command_name"; then
       code=1
     fi
   done
+  if [ "$chrome_detached_backend" = systemd ]; then
+    if ! doctor_check "systemd user manager" timeout 5 systemctl --user show-environment >/dev/null; then
+      echo "doctor: background sessions require a reachable systemd user manager." >&2
+      code=1
+    fi
+  fi
   if [ "$notifications_default" = "1" ]; then
     if ! doctor_check "local command: python3" doctor_local_command python3; then
       code=1
@@ -6570,8 +6672,8 @@ yk_preflight_for_forwarding() {
   need usbip
   need ss
   need timeout
-  # Local sudo may authenticate interactively before a detached session is
-  # created; only remote sudo is required to be noninteractive.
+  # Setup may authenticate interactively before background handoff. The new
+  # supervisor always requests cleanup with noninteractive, uncached sudo.
   sudo -v || die "YubiKey forwarding needs local sudo for usbip."
   yk_ensure_local_module_loaded || die "Local YubiKey USB/IP preflight failed."
   yk_remote_module_preflight || die "Remote YubiKey USB/IP preflight failed for $yk_remote."
@@ -9294,7 +9396,7 @@ class Store:
                             continue
                         if attempt is not None and row.get('attempt') != attempt:
                             continue
-                        if file_stream == 'raw' and raw_after and row['event'] not in ('mark', 'probe') and \
+                        if file_stream == 'raw' and raw_after and row['event'] not in ('mark', 'probe', 'session_started', 'session_stopped', 'session_cleanup_failed', 'usb_started', 'usb_stopped', 'usb_cleanup_failed') and \
                                 row['wall'] <= raw_after.get(row['attempt'], -1):
                             if row['event'] in CONTEXT_EVENTS:
                                 carried[row['event']] = row
@@ -10191,7 +10293,7 @@ class Analysis:
             g['pending'] = 0
             g['previous_sample'] = None
             self.flag(g, row, 'telemetry_gap', 'Recording coverage is incomplete')
-        elif event in {'mark', 'start', 'end', 'reset', 'tcp_discontinuity', 'probe'}:
+        elif event in {'mark', 'start', 'end', 'reset', 'tcp_discontinuity', 'probe', 'session_started', 'session_stopped', 'session_cleanup_failed', 'usb_started', 'usb_stopped', 'usb_cleanup_failed'}:
             s['events'].append({k: row[k] for k in ('event', 'utc', 'reason', 'previous_attempt') if k in row})
             s['events'] = s['events'][-100:]
             if event == 'tcp_discontinuity':
@@ -10990,14 +11092,20 @@ def monitor_inventory(raw):
     sessions = []
     for line in raw.splitlines():
         fields = line.split('\t')
-        if len(fields) != 6:
+        if len(fields) not in (6, 9):
             raise ValueError('Invalid local session inventory')
-        name, host, attempt, policy, transport, pane = fields
+        name, host, attempt, policy, transport, pane = fields[:6]
         if not name or any(c in name for c in '.:') or len(name) > 253 or \
                 any(not c.isprintable() for c in name) or not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}|-', host) or \
                 policy not in ('on', 'off', 'unknown') or (attempt != '-' and str(uuid.UUID(attempt)) != attempt):
             raise ValueError('Invalid local session identity')
-        sessions.append(dict(session=name, target=host, attempt=attempt, policy=policy, transport=transport, pane=pane))
+        row = dict(session=name, target=host, attempt=attempt, policy=policy, transport=transport, pane=pane)
+        if len(fields) == 9:
+            phase, usb, reason = fields[6:]
+            if phase not in {'preparing', 'starting', 'running', 'stopping', 'cleanup-failed'} or usb not in {'off', 'starting', 'ready', 'stopping', 'cleanup-failed'} or not re.fullmatch(r'[a-z-]{1,64}', reason):
+                raise ValueError('Invalid managed session state')
+            row.update(phase=phase, usb=usb, usb_reason=reason)
+        sessions.append(row)
     return sorted(sessions, key=lambda s: s['session'])
 
 
@@ -11075,6 +11183,10 @@ def monitor_attention(session, data, remote, now_mono=None):
     if session is None:
         return ['Session absent / waiting for the requested tunnel']
     alerts = []
+    if session.get('phase') not in (None, 'running'):
+        alerts.append('Session ' + session['phase'])
+    if session.get('usb') == 'cleanup-failed':
+        alerts.append('USB cleanup incomplete / use status for details')
     if not data:
         alerts.append('Local observations pending')
     else:
@@ -11200,6 +11312,8 @@ def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None, r
         add(alert, 'warn')
     add(session['session'] + ' / attempt ' + session['attempt'][:8], 'dim')
     add('Transport: ' + monitor_transport(session['transport']) + ' / Display ' + socket.gethostname(), 'dim')
+    if 'usb' in session:
+        add('Session ' + session['phase'] + ' / USB ' + session['usb'] + ' / ' + session['usb_reason'].replace('-', ' '), 'dim')
     if session['transport'] == 'lossless':
         add('Codecs: not applicable / recorded lossless transport', 'dim')
     elif session['attempt'] == '-':
@@ -11546,7 +11660,7 @@ def monitor_cli(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("collect", "query", "query-local", "mark", "status", "monitor", "monitor-data"))
+    parser.add_argument("action", choices=("collect", "query", "query-local", "mark", "status", "monitor", "monitor-data", "lifecycle"))
     parser.add_argument("target")
     parser.add_argument("--session", default="")
     parser.add_argument("--origin", default="")
@@ -11565,6 +11679,8 @@ def main(argv=None):
     parser.add_argument('--probe', nargs='?', const='30s')
     parser.add_argument("--attempt", default="")
     parser.add_argument("--previous", default="")
+    parser.add_argument("--event", default="")
+    parser.add_argument("--reason", default="")
     parser.add_argument("--role", choices=("viewer", "browser"), default="viewer")
     parser.add_argument("--owner", type=int, default=0)
     parser.add_argument("--start", default="")
@@ -11584,6 +11700,18 @@ def main(argv=None):
         raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")
     if not (args.action == 'monitor' and args.target == '-') and not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}", args.target):
         raise ValueError("invalid diagnostic target")
+    if args.action == 'lifecycle':
+        if args.event not in {'session_started', 'session_stopped', 'session_cleanup_failed', 'usb_started', 'usb_stopped', 'usb_cleanup_failed'} or not re.fullmatch(r'[a-z-]{0,64}', args.reason):
+            raise ValueError('invalid lifecycle event')
+        store = Store(args.days, args.cap)
+        try:
+            store.prune()
+            record = dict(common(args), **now(), schema=RECORD_SCHEMA,
+                          owner=dict(pid=args.owner, start=args.start), event=args.event,
+                          reason=args.reason, launcher=args.version)
+            return 0 if store.append(record) else 1
+        finally:
+            store.close()
     if args.action == 'monitor':
         return monitor_cli(args)
     if args.action == 'monitor-data':
@@ -11616,16 +11744,871 @@ if __name__ == "__main__":
 REMOTE_CHROME_DIAGNOSTICS
 }
 
+# Detached sessions use systemd; the internal override is only used by legacy
+# behavioral fixtures. Existing tmux sessions remain discoverable and manageable.
+chrome_detached_backend=systemd
+chrome_service_generation=""
+chrome_service_phase=""
+chrome_service_usb_state=""
+chrome_service_usb_reason=""
+chrome_service_usb_token=""
+chrome_service_saved_diagnostics=""
+
+chrome_service_known() {
+  command -v python3 >/dev/null || return 1
+  chrome_session_manager known "$1"
+}
+
+chrome_service_read() {
+  local output
+  local -a fields=()
+  output="$(chrome_session_manager read "$1")" || return $?
+  mapfile -t fields <<<"$output"
+  [ "${#fields[@]}" = 19 ] || return 1
+  chrome_reset_pane_command="${fields[0]}"
+  chrome_reset_pane_pid="${fields[1]}"
+  chrome_reset_pane_id="${fields[2]}"
+  chrome_yubikey_mode="${fields[3]}"
+  chrome_service_saved_diagnostics="${fields[4]}"
+  chrome_reset_host="${fields[5]}"
+  chrome_service_generation="${fields[6]}"
+  chrome_service_phase="${fields[7]}"
+  chrome_service_usb_state="${fields[8]}"
+  chrome_service_usb_reason="${fields[9]}"
+  chrome_service_usb_token="${fields[10]}"
+  chrome_service_usb_socket="${fields[12]}"
+  chrome_service_usb_id="${fields[13]}"
+  chrome_service_usb_port="${fields[14]}"
+  chrome_service_owner_start="${fields[15]}"
+  chrome_service_boot="${fields[16]}"
+  chrome_service_reason="${fields[18]}"
+}
+
+chrome_session_exists() {
+  if chrome_service_known "$1"; then
+    chrome_session_manager active "$1"
+  else
+    command -v tmux >/dev/null && tmux has-session -t "=$1" 2>/dev/null
+  fi
+}
+
+chrome_session_diagnostics_policy() {
+  if chrome_service_known "$1"; then
+    chrome_service_read "$1" || return $?
+    printf '%s\n' "$chrome_service_saved_diagnostics"
+  else
+    tmux show-options -qv -t "=$1:" @remote-chrome-diagnostics 2>/dev/null
+  fi
+}
+
+chrome_service_preflight() {
+  need python3
+  need systemd-run
+  need systemctl
+  local systemd_version
+  systemd_version="$(systemd-run --version | awk 'NR == 1 {print $2; exit}')"
+  [[ "$systemd_version" =~ ^[0-9]+$ ]] && [ "$systemd_version" -ge 254 ] ||
+    die 'Background sessions require systemd 254 or newer; use --foreground for a terminal session.'
+  timeout 5 systemctl --user show-environment >/dev/null 2>&1 ||
+    die 'A running systemd user manager is required for background sessions; use --foreground for a terminal session.'
+}
+
+chrome_service_abort() {
+  [ -n "$chrome_service_generation" ] || return 0
+  chrome_session_manager stop "$session" "$chrome_service_generation" ||
+    echo "Session cleanup remains incomplete; retry remote-chrome stop $host." >&2
+}
+
+chrome_service_launch() {
+  local host="$1" session="$2" canonical="$3" forwarding="$4"
+  local allow_existing="${5:-}" assume_yes="${6:-0}" chrome_command="${7:-}"
+  local owner="${BASHPID:-$$}" prior_traps saved code=0
+  local session_usb_id="$yk_usb_id" session_usb_port="$yk_usbip_port" session_usb_socket="$yk_control_socket"
+  [[ "$session_usb_id" =~ ^[[:xdigit:]]{1,4}:[[:xdigit:]]{1,4}$ ]] || session_usb_id=1050:0407
+  if [[ ! "$session_usb_port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$session_usb_port))" -lt 1 ] || [ "$((10#$session_usb_port))" -gt 65535 ]; then session_usb_port=3240; fi
+  [ -n "$session_usb_socket" ] || session_usb_socket="${XDG_RUNTIME_DIR:-/tmp}/remote-chrome-yubikey-$(safe_name "$host").sock"
+  local REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN=""
+  saved="$chrome_diagnostics:$chrome_diag_days:$chrome_diag_cap:${chrome_diag_attempt:--}"
+  prior_traps="$(trap -p EXIT INT TERM HUP)"
+  chrome_service_generation="$(chrome_session_manager reserve "$session" "$host" "$canonical" \
+    "$chrome_yubikey_mode" "$saved" "$chrome_diag_policy" "$(hostname)" \
+    "$(realpath -- "${BASH_SOURCE[0]}")" "$owner" "$session_usb_socket" "$session_usb_id" \
+    "$session_usb_port" "${notify_local_socket:-}")" || return $?
+  trap 'chrome_service_abort' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  chrome_prepare_bootstrap_script "$session" >/dev/null || code=$?
+  if [ "$code" = 0 ] && [ -n "${notify_local_socket:-}" ]; then
+    notify_start_listener || echo "remote-chrome notify: listener start failed; notifications are not forwarded." >&2
+  fi
+  if [ "$code" = 0 ] && [ -n "$chrome_command" ]; then
+    chrome_handle_existing "$host" "$chrome_command" "$allow_existing" "$assume_yes" 0 || code=$?
+  fi
+  if [ "$code" = 0 ] && [ "$forwarding" = 1 ]; then
+    REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN="$(chrome_session_manager usb-prepare "$session" "$chrome_service_generation" "$owner")" || code=$?
+    if [ "$code" = 0 ]; then yk_start || code=$?; fi
+    if [ "$code" = 0 ]; then
+      chrome_session_manager usb-ready "$session" "$chrome_service_generation" \
+        "$REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN" "$yk_active_busid" || code=$?
+    fi
+  fi
+  if [ "$code" = 0 ]; then
+    chrome_session_manager start "$session" "$chrome_service_generation" || code=$?
+  fi
+  if [ "$code" = 0 ]; then
+    chrome_service_read "$session" || code=$?
+    if [ "$code" = 0 ]; then
+      chrome_diagnostics_start "$chrome_reset_pane_pid" "$chrome_service_owner_start" viewer \
+        "$host" "$session" "$(hostname)"
+    fi
+  fi
+  if [ "$code" != 0 ]; then chrome_service_abort || true; fi
+  trap - EXIT INT TERM HUP
+  [ -z "$prior_traps" ] || eval "$prior_traps"
+  return "$code"
+}
+
+_chrome_session_resources() {
+  local host="$1" session="$2" token="$3" socket="$4" usb_id="$5" port="$6" notify_socket="$7"
+  local code=0 state_code=0 scope="${8:-session}"
+  chrome_validate_host "$host" && chrome_validate_session "$session" || return 1
+  # Every background privilege request fails promptly rather than trying to
+  # prompt on a journal stream or relying on a terminal's sudo timestamp.
+  sudo() { command sudo -n -k "$@"; }
+  if [ "$token" != - ]; then
+    yk_control_socket="$socket"
+    yk_prepare_for_launch "$host" --usb-id "$usb_id" --port "$port"
+    yk_load_state || state_code=$?
+    if [ "$state_code" = 0 ]; then
+      if [ "$yk_attempt_token" = "$token" ]; then
+        yk_attempt_owned=1
+        yk_attempt_lock_identity="$(runtime_path_identity "$yk_attempt_lock" 2>/dev/null || true)"
+        yk_stop "$token" || code=1
+      else
+        echo 'USB generation changed; preserving the current forwarding owner.' >&2
+        code=1
+      fi
+    elif [ "$state_code" = 1 ]; then
+      yk_release_orphan_attempt || code=1
+    else
+      code=1
+    fi
+  fi
+  if [ "$notify_socket" != - ]; then
+    notify_set_runtime_paths "$session"
+    if runtime_artifact_status "$notify_state_file"; then
+      if [ "$(notify_state_field "$notify_state_file" local_socket)" = "$notify_socket" ]; then
+        notify_stop_listener "$host" || code=1
+      else
+        echo 'Notification generation changed; preserving the current listener.' >&2
+        code=1
+      fi
+    elif runtime_path_present "$notify_state_file"; then
+      echo 'Notification state is unsafe; preserving it.' >&2
+      code=1
+    fi
+  fi
+  if [ "$scope" = session ]; then chrome_remove_bootstrap_script "$session" || code=1; fi
+  return "$code"
+}
+
+chrome_select_session() {
+  local host="$1" session="$2"
+  if [ -z "$session" ]; then
+    if [ -n "$host" ]; then
+      session="$(chrome_default_session "$host")"
+    else
+      local -a names=()
+      local selected_names
+      selected_names="$(chrome_managed_sessions)" || return 1
+      if [ -n "$selected_names" ]; then mapfile -t names <<<"$selected_names"; fi
+      [ "${#names[@]}" = 1 ] || { echo 'Select a session with HOST or --session NAME.' >&2; return 1; }
+      session="${names[0]}"
+    fi
+  fi
+  chrome_validate_session "$session" || return 1
+  chrome_selected_session="$session"
+}
+
+chrome_logs() {
+  local host="" session="" follow="" argument
+  while [ "$#" -gt 0 ]; do
+    argument="$1"; shift
+    case "$argument" in
+      --session) [ "$#" -gt 0 ] || die '--session requires a name.'; session="$1"; shift ;;
+      --session=*) session="${argument#*=}" ;;
+      --follow|-f) follow=follow ;;
+      -h|--help) printf 'Usage: %s logs [HOST] [--session NAME] [--follow]\n' "$PROGRAM"; return 0 ;;
+      -*) die "Unknown logs option: $argument" ;;
+      *) [ -z "$host" ] || die "Unexpected argument: $argument"; host="$argument" ;;
+    esac
+  done
+  chrome_select_session "$host" "$session" || return 1
+  session="$chrome_selected_session"
+  if chrome_service_known "$session"; then
+    chrome_service_read "$session" || return $?
+    [ -z "$host" ] || [ "$host" = "$chrome_reset_host" ] || die 'Selected session targets a different host.'
+    if [ -n "$follow" ]; then chrome_session_manager logs "$session" follow; else chrome_session_manager logs "$session"; fi
+  else
+    [ -z "$follow" ] || die 'For a legacy tmux session, use attach HOST to follow output.'
+    tmux capture-pane -p -t "=$session:=chrome"
+  fi
+}
+
+chrome_usb() {
+  local action="${1:-}" host="" session="" argument owner="${BASHPID:-$$}" code=0 token
+  [ "$#" -gt 0 ] && shift
+  case "$action" in
+    start|stop|status) ;;
+    -h|--help|"") printf 'Usage: %s usb start|stop|status HOST [--session NAME]\n' "$PROGRAM"; return 0 ;;
+    *) die "Unknown USB action: $action" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    argument="$1"; shift
+    case "$argument" in
+      --session) [ "$#" -gt 0 ] || die '--session requires a name.'; session="$1"; shift ;;
+      --session=*) session="${argument#*=}" ;;
+      -*) die "Unknown USB option: $argument" ;;
+      *) [ -z "$host" ] || die "Unexpected argument: $argument"; host="$argument" ;;
+    esac
+  done
+  chrome_select_session "$host" "$session" || return 1
+  session="$chrome_selected_session"
+  chrome_service_known "$session" || die 'Independent USB management requires a new background session; reset the legacy session first.'
+  chrome_service_read "$session" || return $?
+  [ -z "$host" ] || [ "$host" = "$chrome_reset_host" ] || die 'Selected session targets a different host.'
+  host="$chrome_reset_host"
+  if [ "$action" = status ]; then
+    chrome_ui_row YubiKey "$chrome_service_usb_state / $chrome_service_usb_reason"
+    return 0
+  fi
+  if [ "$action" = stop ]; then
+    chrome_session_manager usb-cleanup "$session" "$chrome_service_generation" "$chrome_service_usb_token" requested || return $?
+    chrome_ui_result ok 'USB forwarding stopped / Chrome kept running'
+    return 0
+  fi
+  [ "$chrome_service_phase" = running ] || die 'The browser session is not running.'
+  yk_control_socket="$chrome_service_usb_socket"
+  yk_prepare_for_launch "$host" --usb-id "$chrome_service_usb_id" --port "$chrome_service_usb_port"
+  yk_preflight_for_forwarding 1
+  token="$(chrome_session_manager usb-prepare "$session" "$chrome_service_generation" "$owner")" || return $?
+  local REMOTE_CHROME_YUBIKEY_ATTEMPT_TOKEN="$token"
+  trap 'chrome_session_manager usb-cleanup "$session" "$chrome_service_generation" "$token" setup-interrupted' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  yk_start || code=$?
+  if [ "$code" = 0 ]; then
+    chrome_session_manager usb-ready "$session" "$chrome_service_generation" "$token" "$yk_active_busid" || code=$?
+  fi
+  if [ "$code" != 0 ]; then
+    chrome_session_manager usb-cleanup "$session" "$chrome_service_generation" "$token" setup-failed || true
+  fi
+  trap - EXIT INT TERM HUP
+  return "$code"
+}
+
+_chrome_session_event() {
+  chrome_diagnostics_run lifecycle "$1" --session "$2" --attempt "$3" --event "$4" --reason "$5" \
+    --owner "$6" --start "$7" --days "$8" --cap "$9" --role viewer --origin "$(hostname)" --version "$VERSION"
+}
+
+chrome_session_manager() {
+  local -a session_python=(python3)
+  [ "${1:-}" != run ] || session_python=(exec python3)
+  "${session_python[@]}" - "$@" <<'REMOTE_CHROME_SESSIONS'
+"""Private session records and the transient-service supervisor."""
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+UID = os.getuid()
+BOOT = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+ROOT = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) / f'remote-chrome-sessions-{UID}'
+PHASES = {'preparing', 'starting', 'running', 'stopping', 'stopped', 'cleanup-failed'}
+USB_STATES = {'off', 'starting', 'ready', 'stopping', 'cleanup-failed'}
+
+
+def process(pid):
+    try:
+        fields = Path(f'/proc/{int(pid)}/stat').read_text().rsplit(')', 1)[1].split()
+        return {'pid': int(pid), 'start': fields[19]} if fields[0] not in ('Z', 'X') else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def exact(identity):
+    return bool(identity and process(identity['pid']) == identity)
+
+
+def name_ok(value):
+    return bool(value and len(value) <= 253 and not re.search(r'[\x00-\x20\x7f.:/]', value))
+
+
+def target_ok(value):
+    return bool(re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}', value))
+
+
+def private_root(create=False):
+    if create:
+        ROOT.mkdir(mode=0o700, exist_ok=True)
+    s = ROOT.lstat()
+    if not stat.S_ISDIR(s.st_mode) or s.st_uid != UID or s.st_mode & 0o077:
+        raise ValueError('unsafe session directory: ' + str(ROOT))
+
+
+def path_for(session):
+    if not name_ok(session):
+        raise ValueError('invalid session name')
+    return ROOT / (hashlib.sha256(session.encode()).hexdigest() + '.json')
+
+
+def read_file(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        s = os.fstat(stream.fileno())
+        if not stat.S_ISREG(s.st_mode) or s.st_uid != UID or s.st_mode & 0o077 or s.st_nlink != 1 or s.st_size > 262144:
+            raise ValueError('unsafe session record: ' + str(path))
+        return json.load(stream)
+
+
+def load(session):
+    private_root()
+    value = read_file(path_for(session))
+    if value.get('schema') != 1 or value.get('session') != session or not target_ok(value.get('target', '')) or \
+            value.get('phase') not in PHASES or value.get('usb', {}).get('state') not in USB_STATES or \
+            not re.fullmatch(r'[a-f0-9]{32}', value.get('generation', '')) or \
+            value.get('unit') != unit_name(session, value['generation']) or \
+            not isinstance(value.get('command'), str) or re.search(r'[\x00-\x1f\x7f]', value['command']) or \
+            value.get('yk_mode') not in ('auto', 'force', 'off'):
+        raise ValueError('invalid session record: ' + str(path_for(session)))
+    return value
+
+
+def unit_name(session, generation):
+    return 'remote-chrome-' + hashlib.sha256(session.encode()).hexdigest()[:16] + '-' + generation + '.service'
+
+
+@contextlib.contextmanager
+def locked(session):
+    private_root(create=True)
+    path = path_for(session).with_suffix('.lock')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        s = os.fstat(fd)
+        if not stat.S_ISREG(s.st_mode) or s.st_uid != UID or s.st_mode & 0o077 or s.st_nlink != 1:
+            raise ValueError('unsafe session lock')
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError('session update is busy; retry shortly')
+                time.sleep(.02)
+        yield
+    finally:
+        os.close(fd)
+
+
+def save(value):
+    if len(json.dumps(value).encode()) > 262144:
+        raise ValueError('session settings exceed the private record limit')
+    path = path_for(value['session'])
+    if path.is_symlink():
+        raise ValueError('unsafe session record')
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=ROOT)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(value, stream, separators=(',', ':'))
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def current(session, generation):
+    value = load(session)
+    if value['generation'] != generation:
+        raise ValueError('session generation changed; preserving the current owner')
+    return value
+
+
+def command(argv, timeout=10, env=None):
+    return subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
+
+
+def service(value):
+    p = command(['systemctl', '--user', 'show', value['unit'], '--property=Description',
+                 '--property=ActiveState', '--property=MainPID', '--property=Transient'], timeout=5)
+    if p.returncode:
+        raise ValueError('could not inspect managed user service: ' + p.stderr.strip())
+    fields = dict(line.split('=', 1) for line in p.stdout.splitlines() if '=' in line)
+    if fields.get('ActiveState') in ('inactive', 'failed', None) and fields.get('MainPID', '0') == '0':
+        return False
+    if fields.get('Description') != 'remote-chrome session ' + value['generation'] or fields.get('Transient') != 'yes':
+        raise ValueError('user-service identity changed; refusing to signal it')
+    if value.get('supervisor') and (fields.get('MainPID') not in ('0', str(value['supervisor']['pid'])) or
+            (fields.get('MainPID') != '0' and not exact(value['supervisor']))):
+        raise ValueError('user-service process identity changed')
+    return True
+
+
+def active(value):
+    return value['phase'] != 'stopped'
+
+
+def retained_environment():
+    names = {'PATH', 'HOME', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'DISPLAY', 'WAYLAND_DISPLAY',
+             'XDG_RUNTIME_DIR', 'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'DBUS_SESSION_BUS_ADDRESS',
+             'SSH_AUTH_SOCK', 'NIRI_SOCKET', 'XAUTHORITY'}
+    return {k: v for k, v in os.environ.items() if k in names or k.startswith('REMOTE_CHROME_')}
+
+
+def environment(value):
+    result = dict(os.environ)
+    result.update(value['environment'])
+    result['REMOTE_CHROME_BACKGROUND'] = '1'
+    return result
+
+
+def event(value, kind, reason=''):
+    if not value['diagnostics'].startswith('on:'):
+        return
+    _, days, cap, attempt = value['diagnostics'].split(':')
+    owner = value.get('supervisor') or value['launch_owner']
+    try:
+        p = command([value['launcher'], '_session-event', value['target'], value['session'], attempt,
+                     kind, reason, str(owner['pid']), owner['start'], days, cap], timeout=5, env=environment(value))
+        if p.returncode:
+            print('remote-chrome: lifecycle recording unavailable', file=sys.stderr, flush=True)
+    except (OSError, subprocess.TimeoutExpired):
+        print('remote-chrome: lifecycle recording unavailable', file=sys.stderr, flush=True)
+
+
+def check_lease(session, owner):
+    try:
+        lease = read_file(path_for(session).with_suffix('.lease'))
+    except FileNotFoundError:
+        return
+    if lease.get('boot') == BOOT and exact(lease.get('owner')) and lease['owner'] != owner:
+        raise ValueError('another reset owns this session; retry after it finishes')
+
+
+def claim_lease(session, owner):
+    identity = process(owner)
+    if not identity:
+        raise ValueError('reset owner exited')
+    with locked(session):
+        check_lease(session, identity)
+        path = path_for(session).with_suffix('.lease')
+        fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=ROOT)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(dict(boot=BOOT, owner=identity), stream)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def reserve(args):
+    session, target, canonical, mode, diagnostics, policy, origin, launcher, owner, socket, usb_id, port, notify_socket = args
+    if not target_ok(target) or mode not in ('auto', 'force', 'off') or \
+            not re.fullmatch(r'(?:on:[0-9]+:[0-9]+:[a-f0-9-]{36}|off:[0-9]+:[0-9]+:-)', diagnostics) or \
+            re.search(r'[\x00-\x1f\x7f]', canonical) or not Path(launcher).is_absolute():
+        raise ValueError('invalid session launch settings')
+    identity = process(owner)
+    if not identity:
+        raise ValueError('launch owner exited before reservation')
+    with locked(session):
+        check_lease(session, identity)
+        try:
+            prior = load(session)
+        except FileNotFoundError:
+            prior = None
+        if prior and active(prior):
+            raise ValueError('session is active or needs cleanup; use remote-chrome stop first')
+        generation = uuid.uuid4().hex
+        value = dict(schema=1, session=session, target=target, generation=generation, boot=BOOT,
+                     unit=unit_name(session, generation), launcher=launcher, command=canonical,
+                     yk_mode=mode, diagnostics=diagnostics, policy=policy, origin=origin,
+                     environment=retained_environment(), launch_owner=identity, supervisor=None,
+                     transport=None, phase='preparing', reason='', created=time.time(),
+                     notify_socket=notify_socket, usb=dict(state='off', reason='not-requested', token='',
+                     socket=socket, usb_id=usb_id, port=int(port), busid='', identity=None))
+        save(value)
+    print(generation)
+
+
+def unit_arg(value):
+    if re.search(r'[\x00-\x1f\x7f]', value):
+        raise ValueError('control character in service argument')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$') + '"'
+
+
+def start(session, generation):
+    with locked(session):
+        value = current(session, generation)
+        if value['phase'] != 'preparing' or value['boot'] != BOOT or not exact(value['launch_owner']):
+            raise ValueError('session is no longer owned by this launch')
+        value['phase'] = 'starting'
+        save(value)
+    hook = ' '.join(unit_arg(s) for s in [value['launcher'], '_session', 'cleanup', session, generation])
+    argv = ['systemd-run', '--user', '--quiet', '--collect', '--service-type=exec', '--expand-environment=no',
+            '--unit=' + value['unit'], '--description=remote-chrome session ' + generation,
+            '--property=Restart=no', '--property=TimeoutStopSec=150', '--property=ExecStopPost=' + hook]
+    for key, content in value['environment'].items():
+        argv.append('--setenv=' + key + '=' + content)
+    argv += [value['launcher'], '_session', 'run', session, generation]
+    p = command(argv, timeout=15)
+    if p.returncode:
+        raise ValueError('background service could not start: ' + p.stderr.strip())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        value = current(session, generation)
+        if value['phase'] == 'running' and exact(value.get('supervisor')):
+            return
+        if value['phase'] in ('stopped', 'cleanup-failed'):
+            raise ValueError('session exited during startup; inspect remote-chrome logs ' + value['target'])
+        time.sleep(.05)
+    raise ValueError('background supervisor did not become ready; inspect remote-chrome logs ' + value['target'])
+
+
+def usb_identity(value):
+    usb = value['usb']
+    root = Path(value['environment'].get('REMOTE_CHROME_USB_SYSFS_ROOT', '/sys/bus/usb/devices'))
+    path = root / usb['busid']
+    try:
+        s = path.stat()
+        vendor = (path / 'idVendor').read_text().strip().lower()
+        product = (path / 'idProduct').read_text().strip().lower()
+        if vendor + ':' + product != usb['usb_id'].lower():
+            return False
+        return [s.st_dev, s.st_ino]
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None  # Unreadable local evidence is not device removal.
+
+
+def usb_prepare(session, generation, owner):
+    with locked(session):
+        value = current(session, generation)
+        if value['phase'] not in ('preparing', 'running') or value['boot'] != BOOT or \
+                (value['phase'] == 'running' and not exact(value.get('supervisor'))):
+            raise ValueError('browser session is not running')
+        if value['usb']['state'] != 'off':
+            raise ValueError('USB forwarding is active or needs cleanup; use remote-chrome usb stop first')
+        token = uuid.uuid4().hex
+        value['usb'].update(state='starting', reason='', token=token, setup_owner=process(owner))
+        if not value['usb']['setup_owner']:
+            raise ValueError('USB setup owner exited')
+        save(value)
+    print(token)
+
+
+def usb_ready(session, generation, token, busid):
+    if not re.fullmatch(r'[0-9]+-[0-9]+(?:\.[0-9]+)*', busid):
+        raise ValueError('invalid physical USB port')
+    with locked(session):
+        value = current(session, generation)
+        if value['phase'] not in ('preparing', 'running') or value['usb']['token'] != token or value['usb']['state'] != 'starting':
+            raise ValueError('session ended or USB ownership changed during setup')
+        value['usb']['busid'] = busid
+        identity = usb_identity(value)
+        if not identity:
+            raise ValueError('USB device disappeared or is unreadable during setup')
+        value['usb'].update(state='ready', reason='', identity=identity)
+        save(value)
+    event(value, 'usb_started')
+
+
+def resources(value, usb_only=False):
+    usb = value['usb']
+    argv = [value['launcher'], '_session-resources', value['target'], value['session'],
+            usb['token'] or '-', usb['socket'], usb['usb_id'], str(usb['port']),
+            '-' if usb_only else value['notify_socket'] or '-', 'usb' if usb_only else 'session']
+    try:
+        p = command(argv, timeout=120, env=environment(value))
+        if p.stdout:
+            print(p.stdout, end='', flush=True)
+        if p.stderr:
+            print(p.stderr, end='', file=sys.stderr, flush=True)
+        return p.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print('remote-chrome: cleanup could not finish: ' + str(error), file=sys.stderr, flush=True)
+        return False
+
+
+def wait_for_usb_setup(session, generation, owner):
+    if not owner or owner['pid'] == os.getppid():
+        return
+    deadline = time.monotonic() + 90
+    while True:
+        latest = current(session, generation)
+        if latest['usb']['state'] not in ('starting', 'stopping') or not exact(owner):
+            return
+        if time.monotonic() >= deadline:
+            raise ValueError('USB setup has not finished; cleanup state is retained for retry')
+        time.sleep(.1)
+
+
+def usb_cleanup(session, generation, token, reason):
+    if not re.fullmatch(r'[a-z-]{1,64}', reason):
+        raise ValueError('invalid USB stop reason')
+    with locked(session):
+        value = current(session, generation)
+        if value['usb']['token'] != token or value['usb']['state'] == 'off':
+            return 0
+        setup_owner = value['usb'].get('setup_owner') if value['usb']['state'] == 'starting' else None
+        value['usb'].update(state='stopping', reason=reason)
+        save(value)
+    wait_for_usb_setup(session, generation, setup_owner)
+    ok = resources(value, usb_only=True)
+    with locked(session):
+        latest = current(session, generation)
+        if latest['usb']['token'] == token:
+            latest['usb'].update(state='off' if ok else 'cleanup-failed', reason=reason)
+            save(latest)
+    event(value, 'usb_stopped' if ok else 'usb_cleanup_failed', reason)
+    return 0 if ok else 1
+
+
+def cleanup(session, generation):
+    with locked(session):
+        value = current(session, generation)
+        if value['phase'] == 'stopped':
+            return 0
+        if value['boot'] == BOOT and exact(value.get('supervisor')):
+            raise ValueError('supervisor is still running; stop the managed service first')
+        if value['phase'] == 'preparing' and exact(value['launch_owner']) and value['launch_owner']['pid'] != os.getppid():
+            raise ValueError('launch is still preparing; preserving its resources')
+        setup_owner = value['usb'].get('setup_owner') if value['usb']['state'] == 'starting' else None
+        value['phase'] = 'stopping'
+        if not value['reason']:
+            value['reason'] = 'owner-exited'
+        save(value)
+    wait_for_usb_setup(session, generation, setup_owner)
+    ok = resources(value)
+    with locked(session):
+        latest = current(session, generation)
+        latest['phase'] = 'stopped' if ok else 'cleanup-failed'
+        latest['ended'] = time.time()
+        if ok:
+            latest['usb'].update(state='off', reason=latest['usb']['reason'] or 'session-ended')
+        else:
+            latest['usb']['state'] = 'cleanup-failed'
+        save(latest)
+    event(latest, 'session_stopped' if ok else 'session_cleanup_failed', latest['reason'] or 'owner-exited')
+    return 0 if ok else 1
+
+
+def stop(session, generation):
+    value = current(session, generation)
+    if value['phase'] == 'stopped':
+        return 0
+    if value['boot'] == BOOT and service(value):
+        with locked(session):
+            latest = current(session, generation)
+            latest['reason'] = 'requested'
+            save(latest)
+        p = command(['systemctl', '--user', 'stop', value['unit']], timeout=155)
+        if p.returncode:
+            raise ValueError('session stop failed: ' + p.stderr.strip())
+    else:
+        if value['boot'] == BOOT and exact(value.get('supervisor')):
+            raise ValueError('supervisor is live but service identity is absent; preserving it')
+        return cleanup(session, generation)
+    value = current(session, generation)
+    if value['phase'] != 'stopped':
+        return cleanup(session, generation)
+    return 0
+
+
+def run(session, generation):
+    value = current(session, generation)
+    identity = process(os.getpid())
+    if value['phase'] != 'starting' or value['boot'] != BOOT or not identity:
+        raise ValueError('session was replaced before supervisor startup')
+    stopped = False
+    def terminate(_number, _frame):
+        nonlocal stopped
+        stopped = True
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGINT, terminate)
+    with locked(session):
+        value = current(session, generation)
+        value['supervisor'] = identity
+        save(value)
+    child = subprocess.Popen(['bash', '-c', value['command']], stdin=subprocess.DEVNULL)
+    cleaner = None
+    with locked(session):
+        value = current(session, generation)
+        value.update(transport=process(child.pid), phase='running')
+        save(value)
+    event(value, 'session_started')
+    try:
+        while child.poll() is None and not stopped:
+            value = current(session, generation)
+            if cleaner and cleaner.poll() is not None:
+                cleaner = None
+            usb = value['usb']
+            reason = None
+            if not cleaner and usb['state'] == 'ready':
+                local = usb_identity(value)
+                if local is False or (local is not None and local != usb['identity']):
+                    reason = 'device-removed'
+            elif not cleaner and usb['state'] == 'starting' and not exact(usb.get('setup_owner')):
+                reason = 'setup-owner-exited'
+            if reason:
+                cleaner = subprocess.Popen([value['launcher'], '_session', 'usb-cleanup', session,
+                                            generation, usb['token'], reason])
+            time.sleep(.5)
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+        with locked(session):
+            value = current(session, generation)
+            value['reason'] = value['reason'] or ('requested' if stopped else 'transport-exited' if child.returncode == 0 else 'transport-failed')
+            value['transport_exit'] = child.returncode
+            save(value)
+    return 0 if stopped else child.returncode if child.returncode >= 0 else 128 - child.returncode
+
+
+def records():
+    try:
+        private_root()
+    except FileNotFoundError:
+        return []
+    result = []
+    for path in sorted(ROOT.glob('*.json')):
+        row = read_file(path)
+        row = load(row.get('session', ''))
+        if path != path_for(row['session']):
+            raise ValueError('session record path does not match its identity')
+        result.append(row)
+    return result
+
+
+def read_metadata(value):
+    usb = value['usb']
+    owner = value.get('supervisor') or value['launch_owner']
+    fields = [value['command'], str(owner['pid']), value['unit'], value['yk_mode'], value['diagnostics'],
+              value['target'], value['generation'], value['phase'], usb['state'], usb['reason'] or '-',
+              usb['token'] or '-', value['notify_socket'] or '-', usb['socket'], usb['usb_id'], str(usb['port']),
+              owner['start'], value['boot'], value['launcher'], value['reason'] or '-']
+    if any('\n' in field or '\r' in field or '\0' in field for field in fields):
+        raise ValueError('invalid session metadata')
+    print('\n'.join(fields))
+
+
+def main(argv):
+    action, *args = argv
+    if action == 'lease':
+        claim_lease(*args)
+    elif action == 'reserve':
+        reserve(args)
+    elif action == 'known':
+        return 0 if os.path.lexists(path_for(args[0])) else 1
+    elif action == 'active':
+        try:
+            return 0 if active(load(args[0])) else 1
+        except FileNotFoundError:
+            return 1
+    elif action == 'names':
+        for row in records():
+            if active(row):
+                print(row['session'])
+    elif action in ('read', 'read-live'):
+        value = load(args[0])
+        if action == 'read-live' and (value['boot'] != BOOT or not exact(value.get('supervisor'))):
+            raise ValueError('managed supervisor is absent or its identity changed')
+        read_metadata(value)
+    elif action == 'inventory':
+        requested = args[0] if args else ''
+        prefix = os.environ.get('REMOTE_CHROME_SESSION_PREFIX', 'remote-chrome') + '-'
+        for row in records():
+            if active(row) and (row['session'].startswith(prefix) or row['session'] == requested):
+                transport = 'lossless'
+                match = re.search(r'--video\s+(h264,(?:hw|sw),bpf=[0-9]+)', row['command'])
+                if match:
+                    transport = match[1]
+                diag = row['diagnostics'].split(':')
+                owner = row.get('supervisor') or row['launch_owner']
+                print('\t'.join([row['session'], row['target'], diag[3], diag[0], transport, str(owner['pid']), row['phase'], row['usb']['state'], row['usb']['reason'] or 'none']))
+    elif action == 'start':
+        start(*args)
+    elif action == 'run':
+        return run(*args)
+    elif action == 'stop':
+        return stop(*args)
+    elif action == 'cleanup':
+        return cleanup(*args)
+    elif action == 'usb-prepare':
+        usb_prepare(*args)
+    elif action == 'usb-ready':
+        usb_ready(*args)
+    elif action == 'usb-cleanup':
+        return usb_cleanup(*args)
+    elif action == 'logs':
+        value = load(args[0])
+        os.execvp('journalctl', ['journalctl', '--user', '--unit=' + value['unit'], '--no-pager',
+                               '--lines=100', '--output=short-iso', *(['--follow'] if args[1:] == ['follow'] else [])])
+    else:
+        raise ValueError('unknown internal session operation')
+    return 0
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
+        print('remote-chrome session: ' + str(error), file=sys.stderr)
+        sys.exit(2)
+
+REMOTE_CHROME_SESSIONS
+}
+
 main() {
   # Internal subprocesses carry machine arguments and must retain their exact
   # protocol. Presentation options are for human entry points only.
   case "${1:-}" in
+    _session|_session-resources|_session-event) ;;
     _diagnostics-query|_yubikey-run|_notify-listener|_notify-status|_monitor-inventory|_monitor-data|_monitor-transport) ;;
     *) chrome_ui_options "$@"; set -- "${chrome_ui_args[@]}" ;;
   esac
   local subcommand="${1:-}"
 
   case "$subcommand" in
+    _session) shift; chrome_session_manager "$@" ;;
+    _session-resources) shift; _chrome_session_resources "$@" ;;
+    _session-event) shift; _chrome_session_event "$@" ;;
+    logs) shift; chrome_logs "$@" ;;
+    usb) shift; chrome_usb "$@" ;;
     launch)
       shift
       chrome_launch "$@"

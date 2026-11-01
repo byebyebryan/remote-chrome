@@ -24,4 +24,5 @@ python3 tests/secure_notifications_test.py
 python3 tests/diagnostics_test.py
 python3 tests/cli_test.py
 python3 tests/monitor_test.py
+python3 tests/sessions_test.py
 git diff --check

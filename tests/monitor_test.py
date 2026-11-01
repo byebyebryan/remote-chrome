@@ -90,6 +90,22 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(value['state'], 'active')
         self.assertEqual(value['ack']['rtt'], 30)
 
+    def test_managed_inventory_exposes_usb_state_without_changing_attempt_identity(self):
+        raw = f'remote-chrome-snap\tsnap\t{ATTEMPT}\ton\th264,hw,bpf=250000\t123\trunning\toff\tdevice-removed'
+        session = d.monitor_inventory(raw)[0]
+        self.assertEqual(session['usb'], 'off')
+        self.assertEqual(session['usb_reason'], 'device-removed')
+        self.assertEqual(d.monitor_identity(session), d.monitor_identity(dict(session, usb='ready', usb_reason='none')))
+        lines = '\n'.join(text for text, _ in d.monitor_lines(session, None, None, 100))
+        self.assertIn('USB off / device removed', lines)
+
+    def test_normal_usb_stop_is_not_an_attention_warning(self):
+        value = dict(state='active', age=.1, mono=10, latest=dict(tcp=dict(available=True)))
+        session = self.session(phase='running', usb='off', usb_reason='device-removed')
+        self.assertEqual(d.monitor_attention(session, value, None, now_mono=10), [])
+        session['usb'] = 'cleanup-failed'
+        self.assertIn('USB cleanup incomplete', d.monitor_attention(session, value, None, now_mono=10)[0])
+
     def test_idle_zero_has_bar_missing_and_idle_ack_do_not(self):
         idle = sample(delta=dict(seconds=1, bytes_sent=0, bytes_received=0, bytes_acked=0, retrans_total=0))
         buckets = d.monitor_buckets([idle], idle['wall'])
