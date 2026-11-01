@@ -39,6 +39,7 @@ the behavioral and Python test suites, and `git diff --check`:
 | Suite | Contract |
 | --- | --- |
 | `tests/sessions_test.py` | Private records, generations, service identity, independent USB lifecycle, supervisor exit and automatic events |
+| `tests/logs_test.py` | Retained journal discovery without runtime records, generation/time selection, follow ownership and legacy pane capture |
 | `tests/cli_test.py` | Human CLI, width/color/plain behavior and grouped status |
 | `tests/monitor_test.py` | Read-only model, chart layout, PTY help, resize and exit |
 | `tests/remote-chrome_test.sh` | CLI, tmux identity, launch/reset/stop, forwarding readiness/recovery, signal rollback, and unsafe runtime paths |

@@ -49,7 +49,7 @@ if sys.argv[1] == '_session':
 with (base/'calls').open('a') as f:
     f.write(json.dumps(sys.argv[1:])+'\\n')
 if sys.argv[1] == '_session-resources' and (base/'fail-cleanup').exists():
-    sys.exit(1)
+    sys.exit(int((base/'fail-cleanup').read_text().strip() or '1'))
 ''')
         self.fake.chmod(0o755)
         self.name = 'remote-chrome-test'
@@ -256,6 +256,77 @@ tmux() {{ echo 'UNEXPECTED TMUX' >&2; return 97; }}
         self.assertEqual(s.cleanup(self.name, generation), 0)
         self.assertEqual(s.load(self.name)['phase'], 'stopped')
 
+    def test_notification_failure_keeps_unused_usb_off_and_stop_can_retry(self):
+        generation = self.reserve()
+        self.update(phase='running', notify_socket='/private/notify.sock')
+        (self.base / 'fail-cleanup').write_text('2')
+        self.assertEqual(s.cleanup(self.name, generation), 1)
+        row = s.load(self.name)
+        self.assertEqual(row['cleanup_failures'], ['notifications'])
+        self.assertEqual(row['usb']['state'], 'off')
+        self.assertEqual(row['usb']['reason'], 'not-requested')
+        (self.base / 'fail-cleanup').unlink()
+        with patch.object(s, 'service', return_value=False):
+            self.assertEqual(s.stop(self.name, generation), 0)
+        self.assertEqual(s.load(self.name)['phase'], 'stopped')
+        self.assertEqual(s.load(self.name)['cleanup_failures'], [])
+
+    def test_bootstrap_failure_does_not_hide_successful_usb_cleanup(self):
+        generation = self.reserve()
+        self.ready_usb(generation)
+        self.update(phase='running')
+        (self.base / 'fail-cleanup').write_text('4')
+        self.assertEqual(s.cleanup(self.name, generation), 1)
+        row = s.load(self.name)
+        self.assertEqual(row['phase'], 'cleanup-failed')
+        self.assertEqual(row['cleanup_failures'], ['bootstrap'])
+        self.assertEqual(row['usb']['state'], 'off')
+
+    def test_multiple_cleanup_failures_remain_specific(self):
+        generation = self.reserve()
+        self.ready_usb(generation)
+        self.update(phase='running', notify_socket='/private/notify.sock')
+        (self.base / 'fail-cleanup').write_text('3')
+        self.assertEqual(s.cleanup(self.name, generation), 1)
+        row = s.load(self.name)
+        self.assertEqual(row['cleanup_failures'], ['notifications', 'usb'])
+        self.assertEqual(row['usb']['state'], 'cleanup-failed')
+
+    def test_unknown_or_legacy_cleanup_result_is_not_attributed_to_unused_usb(self):
+        generation = self.reserve()
+        self.update(phase='running')
+        for code in (64, 1):
+            with self.subTest(code=code):
+                (self.base / 'fail-cleanup').write_text(str(code))
+                if code == 1:
+                    with s.locked(self.name):
+                        row = s.load(self.name)
+                        row.pop('resource_protocol')
+                        s.save(row)
+                self.assertEqual(s.cleanup(self.name, generation), 1)
+                row = s.load(self.name)
+                self.assertEqual(row['cleanup_failures'], ['unknown'])
+                self.assertEqual(row['usb']['state'], 'off')
+
+    def test_resource_helper_attempts_every_resource_and_reports_combined_failure(self):
+        p = self.shell('''
+yk_prepare_for_launch() { :; }
+yk_load_state() { yk_attempt_token=token; }
+runtime_path_identity() { printf identity; }
+yk_stop() { echo USB-ATTEMPT; return 1; }
+notify_set_runtime_paths() { notify_state_file=/private/notify; }
+runtime_artifact_status() { return 0; }
+notify_state_field() { printf notify.sock; }
+notify_stop_listener() { echo NOTIFY-ATTEMPT; return 1; }
+chrome_remove_bootstrap_script() { echo BOOTSTRAP-ATTEMPT; return 1; }
+_chrome_session_resources test-host remote-chrome-test token usb.sock 1050:0407 3240 notify.sock session
+''')
+        self.assertEqual(p.returncode, 7, p.stderr)
+        for resource in ('USB', 'NOTIFY', 'BOOTSTRAP'):
+            self.assertIn(resource + '-ATTEMPT', p.stdout)
+        for resource in ('USB', 'notification', 'bootstrap'):
+            self.assertIn(resource + ' cleanup incomplete', p.stderr)
+
     def test_cleanup_is_idempotent_and_passes_exact_resources(self):
         generation = self.reserve()
         token = self.ready_usb(generation)
@@ -431,13 +502,15 @@ chrome_stop test-host --session remote-chrome-test
     def test_lifecycle_events_are_saved_without_marking(self):
         attempt = '22222222-2222-4222-8222-222222222222'
         p = subprocess.run([str(LAUNCHER), '_session-event', 'test-host', self.name, attempt,
-                            'usb_stopped', 'device-removed', self.pid, s.process(self.pid)['start'], '30', '1073741824'],
+                            'usb_stopped', 'device-removed', self.pid, s.process(self.pid)['start'], '30', '1073741824',
+                            '', 'a' * 32],
                            env=self.env, capture_output=True, text=True, timeout=5)
         self.assertEqual(p.returncode, 0, p.stderr)
         store = self.base / 'state/remote-chrome/diagnostics'
         records = '\n'.join(path.read_text() for path in store.rglob('*.jsonl'))
         self.assertIn('usb_stopped', records)
         self.assertIn('device-removed', records)
+        self.assertIn('"session_generation":"' + 'a' * 32 + '"', records)
 
     def test_background_resource_cleanup_never_prompts(self):
         script = f'''source {shlex.quote(str(LAUNCHER))}
@@ -494,8 +567,22 @@ chrome_monitor_inventory
 ''')
         self.assertEqual(p.returncode, 0, p.stderr)
         fields = p.stdout.strip().split('\t')
-        self.assertEqual(len(fields), 9)
-        self.assertEqual(fields[-3:], ['running', 'off', 'device-removed'])
+        self.assertEqual(len(fields), 10)
+        self.assertEqual(fields[-4:], ['running', 'off', 'device-removed', '-'])
+
+    def test_status_reports_notification_cleanup_without_usb_failure(self):
+        self.reserve()
+        self.update(phase='cleanup-failed', cleanup_failures=['notifications'])
+        p = self.shell('''chrome_transport_status() { :; }
+chrome_status_diagnostics() { :; }
+yk_load_state() { return 1; }
+notify_status_current() { return 0; }
+chrome_status_current test-host remote-chrome-test
+''')
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn('notifications / retry stop', p.stdout)
+        self.assertIn('off / not-requested', p.stdout)
+        self.assertNotIn('USB cleanup', p.stdout + p.stderr)
 
     def test_explicit_service_stop_cannot_fall_through_to_unqualified_usb_stop(self):
         self.reserve()

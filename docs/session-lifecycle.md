@@ -42,7 +42,14 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
   authentication. Foreground launch remains available for debugging.
 - Session lifecycle events enter the existing diagnostics store and share its
   configured 30-day / 1-GiB maximum retention. Operational stdout/stderr is
-  available through `logs [HOST] [--follow]` and follows journal retention.
+  available through `logs [HOST] [--since 2h]` across retained launches, and
+  follows journal retention. `logs --list` and `--generation ID` select past
+  launches without relying on runtime records, including after reboot when
+  journal history survives. `--follow` stays with its selected generation.
+- Cleanup records identify USB, notification and bootstrap failures separately.
+  Each owned resource is attempted even when another fails. Successfully
+  cleaned or unused USB remains off after a different resource fails. Unknown
+  helper results retain uncertainty and do not claim unused USB has failed.
 - `status`, `monitor`, `stop`, `reset`, bare HOST and incoming stop discover
   both new sessions and legacy tmux sessions. Existing sessions are preserved;
   their next deliberate reset adopts the new backend. `attach` still works for
@@ -60,6 +67,9 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
    cleanup; no unattended privilege prompt.
 5. Existing secure bootstrap, reset identity, notifications, diagnostics,
    status and monitor regression suites remain green.
+   Historical journal selection works without runtime state, isolates session
+   and generation, and preserves legacy pane capture. Partial cleanup retains
+   accurate resource state and can be retried through the public stop path.
 6. Disposable real user-service checks exercise normal exit and forced
    supervisor failure without touching a real key, browser profile or tunnel.
 7. Publish a checksum-pinned launcher and apply only its selector/payload on

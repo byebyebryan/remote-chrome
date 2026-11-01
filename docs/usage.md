@@ -368,13 +368,33 @@ Inspect operational output on the display host:
 
 ```bash
 remote-chrome logs remote-host
+remote-chrome logs remote-host --since 2h --lines 500
+remote-chrome logs remote-host --since 2026-11-01T13:00:00-08:00 --until 2026-11-01T13:10:00-08:00
+remote-chrome logs remote-host --list
+remote-chrome logs remote-host --generation GENERATION_ID
 remote-chrome logs remote-host --follow
 ```
 
-Logs use the user journal, including the last ended attempt retained in the
-session record. Journal retention is separate from the bounded diagnostic store.
+Logs show the last 100 retained journal lines across launches of the selected
+session. `--lines` accepts 1–10000. Time filters accept positive durations in
+`s`, `m`, `h`, or `d` ago, or ISO timestamps with a timezone. An end time must
+follow the start time. `--session NAME` selects a custom session.
+
+`--list` discovers launch generations from retained journal fields; it needs
+neither a running service nor a runtime record. `--generation ID` selects one
+complete 32-character generation from that list. A generation identifies a
+background launch and differs from a diagnostic attempt UUID. History can be
+read after reset or reboot if the journal retained it. `--follow` follows only
+the current generation, or the explicitly selected one; a reset does not move
+that view to the replacement launch. Following without a current record needs
+an explicit generation. List mode cannot be combined with time filters or
+following; following cannot be combined with an end time.
+
+Journal retention follows host policy, separately from the bounded diagnostic
+store. Missing journal history cannot be recovered from a session record;
+diagnostic events and network samples remain available under their own limits.
 For an old tmux session, `logs HOST` captures the Chrome pane; use `attach HOST`
-to follow its terminal.
+to follow its terminal. Historical log options are unavailable for that backend.
 
 For failed authentication, distinguish stored `ready` state from a fresh
 `fido2-token -L` as the Chrome user and the exact attachment in `sudo usbip port`
@@ -384,6 +404,13 @@ on the browser host. After restoring hub power or reinserting a key, use
 If cleanup fails, retry the same scoped `stop HOST` with its custom session and
 socket settings. Do not delete a ledger merely because a host is unreachable:
 it is the ownership evidence for later safe recovery.
+
+Session cleanup reports failed resources separately: USB, notifications and the
+bootstrap file. A notification or bootstrap failure does not mark successfully
+cleaned or unused USB forwarding as failed. An unavailable helper or an older
+helper without resource-specific results is reported as `unknown`; unresolved
+owned USB resources remain pending. `status`, `monitor`, lifecycle diagnostics
+and journal messages retain this context for a later retry.
 
 Secure startup can prompt for wallet unlock after a cold boot. Unlock and retry
 if canceled. Pre-login networking, a fresh wallet unlock, and fresh FIDO access

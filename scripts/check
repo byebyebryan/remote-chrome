@@ -25,4 +25,5 @@ python3 tests/diagnostics_test.py
 python3 tests/cli_test.py
 python3 tests/monitor_test.py
 python3 tests/sessions_test.py
+python3 tests/logs_test.py
 git diff --check

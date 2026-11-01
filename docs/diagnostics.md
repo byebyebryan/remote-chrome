@@ -94,7 +94,8 @@ hostnames, addresses and process identities. Review it before sharing.
 
 ## Recording health
 
-`status HOST` describes the current local viewer attempt recorded in tmux.
+`status HOST` describes the current local viewer attempt recorded in its managed
+service record or legacy tmux metadata.
 It prints the invoked launcher version separately from the collector version
 and record schema found in that attempt's evidence. Installing a launcher does
 not replace a running collector. A collector that predates the command gets an
@@ -333,5 +334,16 @@ New background sessions record `session_started`, `session_stopped`,
 `usb_cleanup_failed` automatically, without a manual mark. Reasons distinguish
 physical removal, requested stop, setup interruption and transport exit. These
 events share the normal diagnostic retention and quota and appear in incident
-queries/exports. `remote-chrome logs HOST --follow` shows operational stdout and
-stderr through the user journal, whose retention follows host policy.
+queries/exports. Cleanup failures include the affected resources where the
+launcher supports that protocol; older or unavailable helpers remain `unknown`.
+The same resource details appear in status and monitor attention messages.
+New lifecycle records also include the launch generation, so a diagnostic
+attempt can be matched to `logs --generation ID` without a runtime record.
+
+`remote-chrome logs HOST --since 2h` shows retained operational stdout and stderr
+across launches. `--list` finds launch generations and `--generation ID` selects
+one, including after runtime records disappear. `--follow` follows the selected
+generation and does not switch on reset. Journal retention follows host policy;
+the diagnostic store's 30-day / 1-GiB cap does not configure the journal. Journal
+output is not included in diagnostic JSONL exports. See [operational log options](usage.md#diagnostics-and-recovery)
+for timestamp and selection rules.

@@ -208,6 +208,26 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(rows, [first])
         self.assertEqual(list(s.records(time.time() + 5, time.time() + 10)), [])
 
+    def test_cleanup_resources_survive_recording_query_and_report(self):
+        attempt = str(uuid.uuid4())
+        self.assertEqual(d.main(['lifecycle', 'snap', '--session', 'remote-chrome-snap',
+                                 '--attempt', attempt, '--origin', socket.gethostname(),
+                                 '--event', 'session_cleanup_failed', '--reason', 'transport-exited',
+                                 '--cleanup-resources', 'notifications,bootstrap',
+                                 '--session-generation', 'a' * 32]), 0)
+        result = d.query(self.query_args(include_records=True))
+        expected = ['bootstrap', 'notifications']
+        self.assertEqual(result['records'][0]['cleanup_resources'], expected)
+        self.assertEqual(result['summaries'][0]['events'][0]['cleanup_resources'], expected)
+        self.assertEqual(result['summaries'][0]['events'][0]['session_generation'], 'a' * 32)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            d.report('Viewer', result)
+        self.assertIn('cleanup: bootstrap, notifications', output.getvalue())
+        self.assertIn('launch ' + 'a' * 32, output.getvalue())
+        with self.assertRaisesRegex(ValueError, 'invalid cleanup resource'):
+            d.main(['lifecycle', 'snap', '--event', 'session_cleanup_failed',
+                    '--cleanup-resources', 'made-up'])
+
     def test_query_read_limit_is_explicit(self):
         s = self.store()
         s.append(record())

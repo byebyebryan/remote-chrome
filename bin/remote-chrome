@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.11.0"
+VERSION="1.11.1"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -369,7 +369,7 @@ usage() {
     chrome_ui_row 'stop [HOST]' 'Clean up one session, or all managed sessions'
     chrome_ui_section 'More commands'
     chrome_ui_row 'launch HOST' 'Create a fresh session with selected launch options'
-    chrome_ui_row 'logs [HOST]' 'Read session output (--follow for live logs)'
+    chrome_ui_row 'logs [HOST]' 'Read retained output (--since 2h, --follow, --list)'
     chrome_ui_row 'usb start|stop HOST' 'Manage forwarding without restarting Chrome'
     chrome_ui_row 'attach HOST' 'Attach to a legacy tmux session'
     chrome_ui_row 'doctor HOST' 'Check launch prerequisites'
@@ -392,7 +392,8 @@ Usage:
   $PROGRAM monitor [HOST] [--session NAME]
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
-  $PROGRAM logs [HOST] [--follow]
+  $PROGRAM logs [HOST] [--since 2h] [--until ISO] [--lines 100] [--follow]
+    [--list | --generation ID] [--session NAME]
   $PROGRAM usb start|stop|status HOST
   $PROGRAM reset [HOST] [--session NAME] [--yes]
   $PROGRAM mark HOST [--session NAME]
@@ -4608,6 +4609,7 @@ chrome_status_all() {
           chrome_ui_issue "Session needs attention: $chrome_service_phase / USB $chrome_service_usb_state"
           code=1
         fi
+        [ -z "$chrome_service_cleanup_failures" ] || chrome_ui_row Cleanup "$chrome_service_cleanup_failures / retry stop"
       else
         code=1
       fi
@@ -4876,6 +4878,10 @@ chrome_status_current() {
       code=1
     fi
     chrome_ui_row USB "$chrome_service_usb_state / $chrome_service_usb_reason"
+    if [ -n "$chrome_service_cleanup_failures" ]; then
+      chrome_ui_row Cleanup "$chrome_service_cleanup_failures / retry stop"
+      code=1
+    fi
     if [ "$chrome_service_usb_state" = cleanup-failed ]; then code=1; fi
   elif command -v tmux >/dev/null && tmux has-session -t "=$session" 2>/dev/null; then
     local session_label='Background session running'
@@ -10299,7 +10305,7 @@ class Analysis:
             g['previous_sample'] = None
             self.flag(g, row, 'telemetry_gap', 'Recording coverage is incomplete')
         elif event in {'mark', 'start', 'end', 'reset', 'tcp_discontinuity', 'probe', 'session_started', 'session_stopped', 'session_cleanup_failed', 'usb_started', 'usb_stopped', 'usb_cleanup_failed'}:
-            s['events'].append({k: row[k] for k in ('event', 'utc', 'reason', 'previous_attempt') if k in row})
+            s['events'].append({k: row[k] for k in ('event', 'utc', 'reason', 'previous_attempt', 'cleanup_resources', 'session_generation') if k in row})
             s['events'] = s['events'][-100:]
             if event == 'tcp_discontinuity':
                 g['baseline'].clear()
@@ -10536,7 +10542,11 @@ def report(label, data, timeline=False):
         if g.get('cpu'):
             print('    peak process CPU ' + ', '.join(f'{k}={v:.1f}%' for k, v in sorted(g['cpu'].items())))
         for event in g.get('events', [])[-8:]:
-            print('    event: ' + event['event'] + '@' + event['utc'])
+            failed = event.get('cleanup_resources', [])
+            detail = ' / cleanup: ' + ', '.join(failed) if failed else ''
+            if event.get('session_generation'):
+                detail += ' / launch ' + event['session_generation']
+            print('    event: ' + event['event'] + '@' + event['utc'] + detail)
         if g.get('codecs'):
             print('    codec context: ' + json.dumps(g['codecs'][-1], separators=(',', ':')))
         if g.get('networks'):
@@ -11097,7 +11107,7 @@ def monitor_inventory(raw):
     sessions = []
     for line in raw.splitlines():
         fields = line.split('\t')
-        if len(fields) not in (6, 9):
+        if len(fields) not in (6, 9, 10):
             raise ValueError('Invalid local session inventory')
         name, host, attempt, policy, transport, pane = fields[:6]
         if not name or any(c in name for c in '.:') or len(name) > 253 or \
@@ -11105,11 +11115,16 @@ def monitor_inventory(raw):
                 policy not in ('on', 'off', 'unknown') or (attempt != '-' and str(uuid.UUID(attempt)) != attempt):
             raise ValueError('Invalid local session identity')
         row = dict(session=name, target=host, attempt=attempt, policy=policy, transport=transport, pane=pane)
-        if len(fields) == 9:
-            phase, usb, reason = fields[6:]
+        if len(fields) >= 9:
+            phase, usb, reason = fields[6:9]
             if phase not in {'preparing', 'starting', 'running', 'stopping', 'cleanup-failed'} or usb not in {'off', 'starting', 'ready', 'stopping', 'cleanup-failed'} or not re.fullmatch(r'[a-z-]{1,64}', reason):
                 raise ValueError('Invalid managed session state')
             row.update(phase=phase, usb=usb, usb_reason=reason)
+        if len(fields) == 10:
+            failed = [] if fields[9] == '-' else fields[9].split(',')
+            if any(item not in {'usb', 'notifications', 'bootstrap', 'unknown'} for item in failed):
+                raise ValueError('Invalid cleanup resource state')
+            row['cleanup_failures'] = failed
         sessions.append(row)
     return sorted(sessions, key=lambda s: s['session'])
 
@@ -11189,7 +11204,8 @@ def monitor_attention(session, data, remote, now_mono=None):
         return ['Session absent / waiting for the requested tunnel']
     alerts = []
     if session.get('phase') not in (None, 'running'):
-        alerts.append('Session ' + session['phase'])
+        detail = ' / ' + ', '.join(session['cleanup_failures']) if session.get('cleanup_failures') else ''
+        alerts.append('Session ' + session['phase'] + detail)
     if session.get('usb') == 'cleanup-failed':
         alerts.append('USB cleanup incomplete / use status for details')
     if not data:
@@ -11686,6 +11702,8 @@ def main(argv=None):
     parser.add_argument("--previous", default="")
     parser.add_argument("--event", default="")
     parser.add_argument("--reason", default="")
+    parser.add_argument('--cleanup-resources', default='')
+    parser.add_argument('--session-generation', default='')
     parser.add_argument("--role", choices=("viewer", "browser"), default="viewer")
     parser.add_argument("--owner", type=int, default=0)
     parser.add_argument("--start", default="")
@@ -11708,12 +11726,21 @@ def main(argv=None):
     if args.action == 'lifecycle':
         if args.event not in {'session_started', 'session_stopped', 'session_cleanup_failed', 'usb_started', 'usb_stopped', 'usb_cleanup_failed'} or not re.fullmatch(r'[a-z-]{0,64}', args.reason):
             raise ValueError('invalid lifecycle event')
+        failed = args.cleanup_resources.split(',') if args.cleanup_resources else []
+        if any(item not in {'usb', 'notifications', 'bootstrap', 'unknown'} for item in failed):
+            raise ValueError('invalid cleanup resource')
+        if args.session_generation and not re.fullmatch(r'[a-f0-9]{32}', args.session_generation):
+            raise ValueError('invalid session generation')
         store = Store(args.days, args.cap)
         try:
             store.prune()
             record = dict(common(args), **now(), schema=RECORD_SCHEMA,
                           owner=dict(pid=args.owner, start=args.start), event=args.event,
                           reason=args.reason, launcher=args.version)
+            if failed:
+                record['cleanup_resources'] = sorted(set(failed))
+            if args.session_generation:
+                record['session_generation'] = args.session_generation
             return 0 if store.append(record) else 1
         finally:
             store.close()
@@ -11757,6 +11784,7 @@ chrome_service_phase=""
 chrome_service_usb_state=""
 chrome_service_usb_reason=""
 chrome_service_usb_token=""
+chrome_service_cleanup_failures=""
 chrome_service_saved_diagnostics=""
 
 chrome_service_known() {
@@ -11769,7 +11797,7 @@ chrome_service_read() {
   local -a fields=()
   output="$(chrome_session_manager read "$1")" || return $?
   mapfile -t fields <<<"$output"
-  [ "${#fields[@]}" = 19 ] || return 1
+  [ "${#fields[@]}" = 19 ] || [ "${#fields[@]}" = 20 ] || return 1
   chrome_reset_pane_command="${fields[0]}"
   chrome_reset_pane_pid="${fields[1]}"
   chrome_reset_pane_id="${fields[2]}"
@@ -11787,6 +11815,8 @@ chrome_service_read() {
   chrome_service_owner_start="${fields[15]}"
   chrome_service_boot="${fields[16]}"
   chrome_service_reason="${fields[18]}"
+  chrome_service_cleanup_failures="${fields[19]:--}"
+  [ "$chrome_service_cleanup_failures" != - ] || chrome_service_cleanup_failures=""
 }
 
 chrome_session_exists() {
@@ -11877,7 +11907,7 @@ chrome_service_launch() {
 _chrome_session_resources() {
   local host="$1" session="$2" token="$3" socket="$4" usb_id="$5" port="$6" notify_socket="$7"
   local code=0 state_code=0 scope="${8:-session}"
-  chrome_validate_host "$host" && chrome_validate_session "$session" || return 1
+  chrome_validate_host "$host" && chrome_validate_session "$session" || return 64
   # Every background privilege request fails promptly rather than trying to
   # prompt on a journal stream or relying on a terminal's sudo timestamp.
   sudo() { command sudo -n -k "$@"; }
@@ -11889,32 +11919,35 @@ _chrome_session_resources() {
       if [ "$yk_attempt_token" = "$token" ]; then
         yk_attempt_owned=1
         yk_attempt_lock_identity="$(runtime_path_identity "$yk_attempt_lock" 2>/dev/null || true)"
-        yk_stop "$token" || code=1
+        yk_stop "$token" || code=$((code | 1))
       else
         echo 'USB generation changed; preserving the current forwarding owner.' >&2
-        code=1
+        code=$((code | 1))
       fi
     elif [ "$state_code" = 1 ]; then
-      yk_release_orphan_attempt || code=1
+      yk_release_orphan_attempt || code=$((code | 1))
     else
-      code=1
+      code=$((code | 1))
     fi
   fi
   if [ "$notify_socket" != - ]; then
     notify_set_runtime_paths "$session"
     if runtime_artifact_status "$notify_state_file"; then
       if [ "$(notify_state_field "$notify_state_file" local_socket)" = "$notify_socket" ]; then
-        notify_stop_listener "$host" || code=1
+        notify_stop_listener "$host" || code=$((code | 2))
       else
         echo 'Notification generation changed; preserving the current listener.' >&2
-        code=1
+        code=$((code | 2))
       fi
     elif runtime_path_present "$notify_state_file"; then
       echo 'Notification state is unsafe; preserving it.' >&2
-      code=1
+      code=$((code | 2))
     fi
   fi
-  if [ "$scope" = session ]; then chrome_remove_bootstrap_script "$session" || code=1; fi
+  if [ "$scope" = session ]; then chrome_remove_bootstrap_script "$session" || code=$((code | 4)); fi
+  [ "$((code & 1))" = 0 ] || echo 'remote-chrome: USB cleanup incomplete.' >&2
+  [ "$((code & 2))" = 0 ] || echo 'remote-chrome: notification cleanup incomplete.' >&2
+  [ "$((code & 4))" = 0 ] || echo 'remote-chrome: bootstrap cleanup incomplete.' >&2
   return "$code"
 }
 
@@ -11938,27 +11971,46 @@ chrome_select_session() {
 
 chrome_logs() {
   local host="" session="" follow="" argument
+  local historical=0
+  local -a options=()
   while [ "$#" -gt 0 ]; do
     argument="$1"; shift
     case "$argument" in
       --session) [ "$#" -gt 0 ] || die '--session requires a name.'; session="$1"; shift ;;
       --session=*) session="${argument#*=}" ;;
       --follow|-f) follow=follow ;;
-      -h|--help) printf 'Usage: %s logs [HOST] [--session NAME] [--follow]\n' "$PROGRAM"; return 0 ;;
+      --list) options+=(--list); historical=1 ;;
+      --since|--until|--lines|--generation)
+        [ "$#" -gt 0 ] || die "$argument requires a value."
+        options+=("$argument" "$1"); shift; historical=1 ;;
+      --since=*|--until=*|--lines=*|--generation=*) options+=("$argument"); historical=1 ;;
+      -h|--help)
+        printf 'Usage: %s logs [HOST] [--session NAME] [--since 2h] [--until ISO]\n' "$PROGRAM"
+        printf '       [--lines 100] [--follow] [--list | --generation ID]\n'
+        printf '\nRead the last 100 retained lines across launches; --follow selects the current launch.\n'
+        printf 'Times accept durations (s/m/h/d ago) or ISO timestamps with a timezone.\n'
+        printf 'Use --list to find launch generations; these differ from diagnostic attempt IDs.\n'
+        printf 'History follows local journal retention, separately from diagnostic retention.\n'
+        return 0 ;;
       -*) die "Unknown logs option: $argument" ;;
       *) [ -z "$host" ] || die "Unexpected argument: $argument"; host="$argument" ;;
     esac
   done
+  [ -z "$host" ] || chrome_validate_host "$host" || return 1
   chrome_select_session "$host" "$session" || return 1
   session="$chrome_selected_session"
   if chrome_service_known "$session"; then
     chrome_service_read "$session" || return $?
     [ -z "$host" ] || [ "$host" = "$chrome_reset_host" ] || die 'Selected session targets a different host.'
-    if [ -n "$follow" ]; then chrome_session_manager logs "$session" follow; else chrome_session_manager logs "$session"; fi
-  else
+  elif command -v tmux >/dev/null && tmux has-session -t "=$session" 2>/dev/null; then
+    [ "$historical" = 0 ] || die 'Historical log options require managed service logs; this session uses tmux.'
     [ -z "$follow" ] || die 'For a legacy tmux session, use attach HOST to follow output.'
     tmux capture-pane -p -t "=$session:=chrome"
+    return $?
   fi
+  [ -z "$follow" ] || options+=(--follow)
+  need journalctl
+  chrome_session_manager logs "$session" "${options[@]}"
 }
 
 chrome_usb() {
@@ -12016,7 +12068,9 @@ chrome_usb() {
 
 _chrome_session_event() {
   chrome_diagnostics_run lifecycle "$1" --session "$2" --attempt "$3" --event "$4" --reason "$5" \
-    --owner "$6" --start "$7" --days "$8" --cap "$9" --role viewer --origin "$(hostname)" --version "$VERSION"
+    --owner "$6" --start "$7" --days "$8" --cap "$9" --cleanup-resources "${10:-}" \
+    --session-generation "${11:-}" \
+    --role viewer --origin "$(hostname)" --version "$VERSION"
 }
 
 chrome_session_manager() {
@@ -12024,7 +12078,9 @@ chrome_session_manager() {
   [ "${1:-}" != run ] || session_python=(exec python3)
   "${session_python[@]}" - "$@" <<'REMOTE_CHROME_SESSIONS'
 """Private session records and the transient-service supervisor."""
+import argparse
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
@@ -12044,6 +12100,7 @@ BOOT = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 ROOT = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) / f'remote-chrome-sessions-{UID}'
 PHASES = {'preparing', 'starting', 'running', 'stopping', 'stopped', 'cleanup-failed'}
 USB_STATES = {'off', 'starting', 'ready', 'stopping', 'cleanup-failed'}
+CLEANUP_RESOURCES = {'usb', 'notifications', 'bootstrap', 'unknown'}
 
 
 def process(pid):
@@ -12097,7 +12154,9 @@ def load(session):
             not re.fullmatch(r'[a-f0-9]{32}', value.get('generation', '')) or \
             value.get('unit') != unit_name(session, value['generation']) or \
             not isinstance(value.get('command'), str) or re.search(r'[\x00-\x1f\x7f]', value['command']) or \
-            value.get('yk_mode') not in ('auto', 'force', 'off'):
+            value.get('yk_mode') not in ('auto', 'force', 'off') or \
+            not isinstance(value.get('cleanup_failures', []), list) or \
+            any(not isinstance(item, str) or item not in CLEANUP_RESOURCES for item in value.get('cleanup_failures', [])):
         raise ValueError('invalid session record: ' + str(path_for(session)))
     return value
 
@@ -12200,7 +12259,8 @@ def event(value, kind, reason=''):
     owner = value.get('supervisor') or value['launch_owner']
     try:
         p = command([value['launcher'], '_session-event', value['target'], value['session'], attempt,
-                     kind, reason, str(owner['pid']), owner['start'], days, cap], timeout=5, env=environment(value))
+                     kind, reason, str(owner['pid']), owner['start'], days, cap,
+                     ','.join(value.get('cleanup_failures', [])), value['generation']], timeout=5, env=environment(value))
         if p.returncode:
             print('remote-chrome: lifecycle recording unavailable', file=sys.stderr, flush=True)
     except (OSError, subprocess.TimeoutExpired):
@@ -12255,7 +12315,7 @@ def reserve(args):
                      unit=unit_name(session, generation), launcher=launcher, command=canonical,
                      yk_mode=mode, diagnostics=diagnostics, policy=policy, origin=origin,
                      environment=retained_environment(), launch_owner=identity, supervisor=None,
-                     transport=None, phase='preparing', reason='', created=time.time(),
+                     transport=None, phase='preparing', reason='', cleanup_failures=[], resource_protocol=2, created=time.time(),
                      notify_socket=notify_socket, usb=dict(state='off', reason='not-requested', token='',
                      socket=socket, usb_id=usb_id, port=int(port), busid='', identity=None))
         save(value)
@@ -12356,10 +12416,22 @@ def resources(value, usb_only=False):
             print(p.stdout, end='', flush=True)
         if p.stderr:
             print(p.stderr, end='', file=sys.stderr, flush=True)
-        return p.returncode == 0
+        if p.returncode == 0:
+            return set()
+        if value.get('resource_protocol', 1) != 2:
+            return {'usb'} if usb_only else {'unknown'}
+        if p.returncode not in range(1, 8):
+            return {'unknown'}
+        failed = {name for bit, name in ((1, 'usb'), (2, 'notifications'), (4, 'bootstrap')) if p.returncode & bit}
+        owned = {'usb'} if usb_only else {'bootstrap'}
+        if usb['token']:
+            owned.add('usb')
+        if not usb_only and value['notify_socket']:
+            owned.add('notifications')
+        return failed if failed <= owned else {'unknown'}
     except (OSError, subprocess.TimeoutExpired) as error:
         print('remote-chrome: cleanup could not finish: ' + str(error), file=sys.stderr, flush=True)
-        return False
+        return {'unknown'}
 
 
 def wait_for_usb_setup(session, generation, owner):
@@ -12386,14 +12458,16 @@ def usb_cleanup(session, generation, token, reason):
         value['usb'].update(state='stopping', reason=reason)
         save(value)
     wait_for_usb_setup(session, generation, setup_owner)
-    ok = resources(value, usb_only=True)
+    failed = resources(value, usb_only=True)
     with locked(session):
         latest = current(session, generation)
         if latest['usb']['token'] == token:
-            latest['usb'].update(state='off' if ok else 'cleanup-failed', reason=reason)
+            latest['usb'].update(state='cleanup-failed' if failed else 'off', reason=reason)
+            previous = set(latest.get('cleanup_failures', [])) - {'usb'}
+            latest['cleanup_failures'] = sorted(previous | ({'usb'} if failed else set()))
             save(latest)
-    event(value, 'usb_stopped' if ok else 'usb_cleanup_failed', reason)
-    return 0 if ok else 1
+    event(latest, 'usb_cleanup_failed' if failed else 'usb_stopped', reason)
+    return 1 if failed else 0
 
 
 def cleanup(session, generation):
@@ -12411,18 +12485,19 @@ def cleanup(session, generation):
             value['reason'] = 'owner-exited'
         save(value)
     wait_for_usb_setup(session, generation, setup_owner)
-    ok = resources(value)
+    failed = resources(value)
     with locked(session):
         latest = current(session, generation)
-        latest['phase'] = 'stopped' if ok else 'cleanup-failed'
+        latest['phase'] = 'cleanup-failed' if failed else 'stopped'
+        latest['cleanup_failures'] = sorted(failed)
         latest['ended'] = time.time()
-        if ok:
-            latest['usb'].update(state='off', reason=latest['usb']['reason'] or 'session-ended')
-        else:
+        if latest['usb']['token'] and failed & {'usb', 'unknown'}:
             latest['usb']['state'] = 'cleanup-failed'
+        elif latest['usb']['token']:
+            latest['usb'].update(state='off', reason=latest['usb']['reason'] or 'session-ended')
         save(latest)
-    event(latest, 'session_stopped' if ok else 'session_cleanup_failed', latest['reason'] or 'owner-exited')
-    return 0 if ok else 1
+    event(latest, 'session_cleanup_failed' if failed else 'session_stopped', latest['reason'] or 'owner-exited')
+    return 1 if failed else 0
 
 
 def stop(session, generation):
@@ -12524,10 +12599,96 @@ def read_metadata(value):
     fields = [value['command'], str(owner['pid']), value['unit'], value['yk_mode'], value['diagnostics'],
               value['target'], value['generation'], value['phase'], usb['state'], usb['reason'] or '-',
               usb['token'] or '-', value['notify_socket'] or '-', usb['socket'], usb['usb_id'], str(usb['port']),
-              owner['start'], value['boot'], value['launcher'], value['reason'] or '-']
+              owner['start'], value['boot'], value['launcher'], value['reason'] or '-',
+              ','.join(value.get('cleanup_failures', [])) or '-']
     if any('\n' in field or '\r' in field or '\0' in field for field in fields):
         raise ValueError('invalid session metadata')
     print('\n'.join(fields))
+
+
+def log_time(value, now):
+    relative = re.fullmatch(r'([1-9][0-9]{0,7})([smhd])', value)
+    if relative:
+        number, unit = relative.groups()
+        stamp = now - int(number) * {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[unit]
+    else:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError('timezone required')
+            stamp = parsed.timestamp()
+        except (ValueError, OverflowError) as error:
+            raise ValueError('log time requires a duration (2h) or ISO timestamp with a timezone') from error
+    if stamp < 0 or stamp > now:
+        raise ValueError('log time must be in the past')
+    return stamp
+
+
+def journal_units(session):
+    # Journal fields, unlike runtime records or systemctl's loaded-unit list,
+    # retain launch identities after reset, unit collection and reboot.
+    prefix = unit_name(session, '').removesuffix('.service')
+    units = set()
+    for field in ('_SYSTEMD_USER_UNIT', 'USER_UNIT'):
+        p = command(['journalctl', '--user', '--no-pager', '--quiet', '--field=' + field], timeout=15)
+        if p.returncode:
+            raise ValueError('could not read retained journal launches: ' + p.stderr.strip())
+        units.update(line for line in p.stdout.splitlines()
+                     if re.fullmatch(re.escape(prefix) + r'[a-f0-9]{32}\.service', line))
+    return sorted(units)
+
+
+def logs(session, args):
+    if not name_ok(session):
+        raise ValueError('invalid session name')
+    parser = argparse.ArgumentParser(prog='remote-chrome logs')
+    parser.add_argument('--follow', action='store_true')
+    parser.add_argument('--list', action='store_true')
+    parser.add_argument('--generation')
+    parser.add_argument('--since')
+    parser.add_argument('--until')
+    parser.add_argument('--lines', type=int, default=100)
+    options = parser.parse_args(args)
+    if not 1 <= options.lines <= 10000:
+        raise ValueError('--lines must be between 1 and 10000')
+    if options.generation is not None and not re.fullmatch(r'[a-f0-9]{32}', options.generation):
+        raise ValueError('--generation requires a complete 32-character launch generation from --list')
+    if options.list and (options.follow or options.generation or options.since or options.until):
+        raise ValueError('--list cannot be combined with follow, generation or time filters')
+    if options.follow and options.until:
+        raise ValueError('--follow cannot be combined with --until')
+    now = time.time()
+    since = log_time(options.since, now) if options.since is not None else None
+    until = log_time(options.until, now) if options.until is not None else None
+    if since is not None and until is not None and since >= until:
+        raise ValueError('--since must be earlier than --until')
+    if options.follow and not options.generation:
+        try:
+            options.generation = load(session)['generation']
+        except FileNotFoundError as error:
+            raise ValueError('no current launch record; select --generation from logs --list to follow retained output') from error
+    units = [unit_name(session, options.generation)] if options.generation else journal_units(session)
+    if not units:
+        print('No retained journal launches for ' + session + '. Journal retention follows host policy.')
+        return 0
+    if options.list:
+        print('Retained launch generations / ' + session)
+        for unit in units:
+            print('  ' + unit.removesuffix('.service').rsplit('-', 1)[1])
+        print('Use --generation ID to select one. Journal retention follows host policy.')
+        return 0
+    if len(units) > 2048:
+        raise ValueError('too many retained launches; select --generation from logs --list')
+    argv = ['journalctl', '--user', '--no-pager', '--output=short-iso', '--lines=' + str(options.lines)]
+    argv += ['--unit=' + unit for unit in units]
+    if since is not None:
+        argv.append('--since=@' + format(since, '.6f'))
+    if until is not None:
+        argv.append('--until=@' + format(until, '.6f'))
+    if options.follow:
+        argv.append('--follow')
+    os.execvp('journalctl', argv)
+    return 0
 
 
 def main(argv):
@@ -12563,7 +12724,7 @@ def main(argv):
                     transport = match[1]
                 diag = row['diagnostics'].split(':')
                 owner = row.get('supervisor') or row['launch_owner']
-                print('\t'.join([row['session'], row['target'], diag[3], diag[0], transport, str(owner['pid']), row['phase'], row['usb']['state'], row['usb']['reason'] or 'none']))
+                print('\t'.join([row['session'], row['target'], diag[3], diag[0], transport, str(owner['pid']), row['phase'], row['usb']['state'], row['usb']['reason'] or 'none', ','.join(row.get('cleanup_failures', [])) or '-']))
     elif action == 'start':
         start(*args)
     elif action == 'run':
@@ -12579,9 +12740,7 @@ def main(argv):
     elif action == 'usb-cleanup':
         return usb_cleanup(*args)
     elif action == 'logs':
-        value = load(args[0])
-        os.execvp('journalctl', ['journalctl', '--user', '--unit=' + value['unit'], '--no-pager',
-                               '--lines=100', '--output=short-iso', *(['--follow'] if args[1:] == ['follow'] else [])])
+        return logs(args[0], args[1:])
     else:
         raise ValueError('unknown internal session operation')
     return 0

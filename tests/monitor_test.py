@@ -106,6 +106,15 @@ class MonitorTests(unittest.TestCase):
         session['usb'] = 'cleanup-failed'
         self.assertIn('USB cleanup incomplete', d.monitor_attention(session, value, None, now_mono=10)[0])
 
+    def test_cleanup_attention_identifies_failed_resource_without_usb_alarm(self):
+        raw = f'remote-chrome-snap\tsnap\t{ATTEMPT}\ton\tlossless\t123\tcleanup-failed\toff\tnot-requested\tnotifications,bootstrap'
+        session = d.monitor_inventory(raw)[0]
+        alerts = d.monitor_attention(session, None, None)
+        self.assertIn('Session cleanup-failed / notifications, bootstrap', alerts)
+        self.assertFalse(any('USB cleanup' in alert for alert in alerts))
+        with self.assertRaisesRegex(ValueError, 'cleanup resource'):
+            d.monitor_inventory(raw.rsplit('\t', 1)[0] + '\tbad-resource')
+
     def test_idle_zero_has_bar_missing_and_idle_ack_do_not(self):
         idle = sample(delta=dict(seconds=1, bytes_sent=0, bytes_received=0, bytes_acked=0, retrans_total=0))
         buckets = d.monitor_buckets([idle], idle['wall'])
