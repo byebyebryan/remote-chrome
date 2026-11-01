@@ -3270,6 +3270,65 @@ test_attach_uses_tmux_context_appropriate_action() (
   assert_contains "$events" "switch:=remote-chrome-test-host"
 )
 
+test_status_overview_shows_local_network_for_each_exact_session() (
+  local test_dir output events=''
+  test_dir="$(mktemp -d)"
+  trap 'rm -rf "$test_dir"' EXIT
+  XDG_RUNTIME_DIR="$test_dir"
+  need() { :; }
+  tmux() {
+    case "$1" in
+      list-sessions) printf '%s\n' remote-chrome-snap remote-chrome-work unrelated-session ;;
+      list-windows) printf '%s\n' '    window: chrome (0)' ;;
+      *) return 1 ;;
+    esac
+  }
+  chrome_reset_read_pane() { chrome_reset_pane_command="$1"; }
+  chrome_reset_parse_pane_host() {
+    case "$1" in
+      remote-chrome-snap) chrome_reset_host=snap ;;
+      remote-chrome-work) chrome_reset_host=other-host ;;
+      *) return 1 ;;
+    esac
+  }
+  chrome_status_diagnostics() {
+    printf '%s\n' "$*" >>"$test_dir/calls"
+    printf 'status: network last 5m: local SSH traffic for %s\n' "$1"
+  }
+  yk_standard_state_files() { :; }
+  yk_status_orphan_usbipd() { :; }
+  chrome_status_incoming() { :; }
+  output="$(chrome_status)"
+  events="$(cat "$test_dir/calls")"
+  assert_contains "$events" 'snap remote-chrome-snap --network-only'
+  assert_contains "$events" 'other-host remote-chrome-work --network-only'
+  assert_contains "$output" '    network last 5m: local SSH traffic for snap'
+  [[ "$events" != *unrelated-session* ]] || fail 'overview inspected an unrelated tmux session'
+  chrome_reset_read_pane() { return 1; }
+  output="$(chrome_status)"
+  assert_contains "$output" 'network last 5m: unavailable (launch metadata could not be read)'
+)
+
+test_status_diagnostics_preserves_exact_recorded_attempt_and_policy() (
+  local saved='' events='' expected attempt=11111111-1111-4111-8111-111111111111
+  tmux() {
+    [ "$*" = 'show-options -qv -t =custom-session: @remote-chrome-diagnostics' ] ||
+      fail 'status did not read exact session metadata'
+    printf '%s\n' "$saved"
+  }
+  chrome_diagnostics_command() { events="$*"; }
+  saved="on:30:1073741824:$attempt"
+  chrome_status_diagnostics snap custom-session --network-only
+  assert_contains "$events" "status snap --session custom-session --attempt $attempt --recording-policy on --network-only"
+  for saved in 'off:30:1073741824:-' 'invalid' ''; do
+    expected=unknown
+    [[ "$saved" != off:* ]] || expected=off
+    chrome_status_diagnostics snap custom-session
+    assert_contains "$events" "--attempt  --recording-policy $expected"
+    [[ "$events" != *"$attempt"* ]] || fail 'status reused another recorded attempt'
+  done
+)
+
 test_subcommands_accept_help() (
   local output
 
@@ -6707,6 +6766,8 @@ tests=(
   test_yubikey_status_line_reports_phase_without_cleanup
   test_yubikey_status_line_reports_provisional_setup_lock
   test_status_without_host_reports_managed_overview
+  test_status_overview_shows_local_network_for_each_exact_session
+  test_status_diagnostics_preserves_exact_recorded_attempt_and_policy
   test_attach_uses_tmux_context_appropriate_action
   test_subcommands_accept_help
   test_status_rejects_removed_live_option

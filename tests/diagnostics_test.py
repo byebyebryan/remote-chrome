@@ -354,7 +354,9 @@ class DiagnosticsTests(unittest.TestCase):
         argv = ['status', 'snap', '--version', '1.8.2', '--attempt',
                 options.pop('attempt', '11111111-1111-4111-8111-111111111111')]
         for key, value in options.items():
-            argv += ['--' + key.replace('_', '-'), value]
+            argv += ['--' + key.replace('_', '-')]
+            if value is not True:
+                argv += [value]
         with patch.object(d, 'bounded', side_effect=AssertionError('status must not run tools')), \
                 patch.object(d.Store, 'prune', side_effect=AssertionError('status must not prune')), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
@@ -362,6 +364,75 @@ class DiagnosticsTests(unittest.TestCase):
         after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in store.path.iterdir()}
         self.assertEqual(after, before)
         return output.getvalue()
+
+    def test_network_status_directional_traffic_and_ack_qualified_delay(self):
+        rows = [self.health_sample(age) for age in (2, 0)]
+        for row, rtt in zip(rows, (10, 40)):
+            row['tcp'].update(rtt_ms=rtt, rttvar_ms=8, send_queue=2048, notsent_bytes=1024)
+            row['delta'].update(seconds=2, bytes_received=250000, bytes_sent=125000, retrans_total=1)
+        output = self.health_status(rows)
+        self.assertIn('local SSH traffic: RX observed avg 1.00 Mbps; TX observed avg 0.50 Mbps', output)
+        self.assertIn('peak RX+TX 1.50 Mbps; 4.0s of recorded intervals', output)
+        self.assertIn('recorded totals RX 0.48 MiB; TX 0.24 MiB; retransmissions 2', output)
+        self.assertIn('max send queue 2.00 KiB; max unsent 1.00 KiB', output)
+        self.assertIn('TCP RTT p50 10.00 ms; p95 40.00 ms; TCP deviation p95 8.00 ms (variation proxy)', output)
+        self.assertIn('eligible samples 2', output)
+        self.assertIn('latest sample fresh', output)
+        self.assertIn('TCP 2/2 samples; gaps 0; recorder active', output)
+
+    def test_network_status_idle_traffic_is_zero_but_delay_is_unavailable(self):
+        row = self.health_sample()
+        row['tcp'].update(rtt_ms=500, rttvar_ms=250)
+        row['delta'].update(bytes_sent=0, bytes_received=0, bytes_acked=0)
+        output = self.health_status([row], network_only=True)
+        self.assertIn('RX observed avg 0.00 B/s; TX observed avg 0.00 B/s', output)
+        self.assertIn('TCP RTT and variation unavailable: no recent ACK progress', output)
+        self.assertNotIn('500.00 ms', output)
+        self.assertNotIn('diagnostics launcher', output)
+        self.assertNotIn('diagnostics last 5m', output)
+
+    def test_network_status_missing_measurements_do_not_become_zero(self):
+        row = self.health_sample(tcp={'available': False}, delta=None)
+        output = self.health_status([row], network_only=True)
+        self.assertIn('RX observed avg unavailable; TX observed avg unavailable', output)
+        self.assertIn('peak RX+TX unavailable', output)
+        self.assertIn('recorded totals RX unavailable; TX unavailable; retransmissions unavailable', output)
+        self.assertIn('max send queue unavailable; max unsent unavailable', output)
+        self.assertIn('ACK freshness fields unavailable', output)
+        self.assertIn('TCP 0/1 samples', output)
+        self.assertNotIn('0.00 B/s', output)
+
+    def test_network_status_selects_exact_attempt_session_and_current_window(self):
+        row = self.health_sample()
+        others = [self.health_sample(600), self.health_sample(attempt=str(uuid.uuid4())),
+                  self.health_sample(session='another-session'), self.health_sample(boot='other-boot')]
+        for other in others:
+            other['delta'].update(bytes_received=10**12)
+        output = self.health_status([*others, row], session='remote-chrome-snap', network_only=True)
+        self.assertIn('RX observed avg 100.00 B/s; TX observed avg 100.00 B/s', output)
+        self.assertIn('TCP 1/1 samples', output)
+        self.assertNotIn('8000000', output)
+
+    def test_network_status_stale_off_unknown_and_other_boot_stay_explicit(self):
+        output = self.health_status([self.health_sample(40)], network_only=True)
+        self.assertIn('latest sample stale (40.', output)
+        self.assertIn('recorder degraded', output)
+        output = self.health_status(attempt='', recording_policy='off', network_only=True)
+        self.assertIn('unavailable (diagnostics off for this attempt)', output)
+        self.assertNotIn('observed avg', output)
+        output = self.health_status(attempt='', network_only=True)
+        self.assertIn('unavailable (no recorded attempt identity)', output)
+        attempt = str(uuid.uuid4())
+        output = self.health_status([self.health_sample(attempt=attempt, boot='old-boot')],
+                                   attempt=attempt, network_only=True)
+        self.assertIn('unavailable (no current-boot samples', output)
+        self.assertNotIn('observed avg', output)
+
+    def test_network_status_partial_read_remains_visible_in_overview(self):
+        with patch.object(d, 'READ_LIMIT', 256):
+            output = self.health_status([self.health_sample()], network_only=True)
+        self.assertIn('network last 5m: coverage PARTIAL:', output)
+        self.assertIn('read limit reached', output)
 
     def test_health_legacy_active_collector_is_advisory_not_degraded(self):
         rows = [self.health_sample(age, schema=1, launcher='1.7.0') for age in (4, 2, 0)]

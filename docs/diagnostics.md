@@ -125,6 +125,36 @@ missing metadata stays unknown. Historical context does not claim that the
 collector is currently running. Local and browser-host reports use the existing
 single bounded SSH request.
 
+## Network status
+
+Both `remote-chrome status` and `remote-chrome status HOST` show a local network
+summary for each exact managed viewer attempt over the last five minutes. The
+overview includes it beneath each session; the host-specific command also keeps
+the detailed transport and recording checks. This works with already recorded
+history immediately after a launcher update, without restarting the tunnel.
+
+The summary shows observed RX/TX average rates in Mbps (KiB/s or B/s for light
+traffic), recorded byte totals in
+MiB, peak combined RX+TX rate, retransmissions, maximum send/unsent queues, and
+ACK-progress TCP RTT p50/p95 with TCP deviation p95. Rates average only intervals
+with recorded counter deltas, including valid idle intervals; the observed
+duration is shown instead of treating gaps as zero traffic. RX and TX are from
+the display host's SSH socket and include its forwarded channels, rather than
+all traffic on a network interface or only encoded video bytes.
+
+TCP deviation is a delay-variation proxy, not a measurement of frame pacing,
+one-way jitter or input latency. Idle RTT estimates do not supply fresh delay
+observations. Missing counters, absent ACK freshness fields, explicit-off
+recording and unknown attempts stay unavailable rather than becoming zero.
+Samples must belong to the selected attempt, session, target and current boot.
+Sample age, stale state, TCP coverage, gaps and partial-read warnings remain
+visible. These observations do not assign an overall network quality score.
+
+The view reuses local bounded, read-only history. It adds no network probe or
+SSH request; `diagnostics HOST --since 5m` remains the way to compare both
+endpoints and investigate incidents in more detail.
+
+
 ## Recorded data
 
 | Observation | Frequency |

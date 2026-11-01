@@ -77,6 +77,13 @@ Browser exit, Ctrl-C, TERM, and HUP clean its owned resources. In detached mode,
 closing Chrome can leave the `yubikey` window and forwarding running; use `stop`
 for the whole session.
 
+Both `remote-chrome status` and `remote-chrome status remote-host` show the last
+five minutes of locally recorded SSH traffic, ACK-progress TCP RTT, delay
+variation and retransmissions. The overview shows each managed session;
+the host-specific command adds detailed transport and recording checks. Missing
+or stale measurements remain explicit. See [network status](diagnostics.md#network-status)
+for units, coverage and measurement limits.
+
 ## Reset
 
 ```bash

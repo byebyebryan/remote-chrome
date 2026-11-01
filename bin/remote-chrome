@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.8.3"
+VERSION="1.8.4"
 
 usage() {
   cat <<USAGE
@@ -3988,6 +3988,14 @@ chrome_status_all() {
       echo "    windows unavailable (session may have exited)" >&2
       code=1
     fi
+    if chrome_reset_read_pane "$session" 2>/dev/null &&
+      chrome_reset_parse_pane_host "$chrome_reset_pane_command" 2>/dev/null; then
+      chrome_status_diagnostics "$chrome_reset_host" "$session" --network-only |
+        sed 's/^status: /    /' ||
+        echo '    network last 5m: unavailable (local diagnostic store could not be read)'
+    else
+      echo '    network last 5m: unavailable (launch metadata could not be read)'
+    fi
   done < <(chrome_managed_sessions)
   [ "$found_sessions" = "1" ] || echo "  none"
 
@@ -4140,6 +4148,21 @@ chrome_transport_status() {
   fi
 }
 
+chrome_status_diagnostics() {
+  local host="$1" session="$2"
+  shift 2
+  local diagnostics_saved="" diagnostics_attempt="" diagnostics_policy=unknown
+  diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+  if [[ "$diagnostics_saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
+    diagnostics_attempt="${BASH_REMATCH[1]}"
+    diagnostics_policy=on
+  elif [[ "$diagnostics_saved" =~ ^off:[0-9]+:[0-9]+:-$ ]]; then
+    diagnostics_policy=off
+  fi
+  chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" \
+    --recording-policy "$diagnostics_policy" "$@"
+}
+
 chrome_status_current() {
   local host="$1"
   local session="$2"
@@ -4169,16 +4192,7 @@ chrome_status_current() {
   fi
 
   chrome_transport_status "$host" "$session" || code=1
-  local diagnostics_saved="" diagnostics_attempt="" diagnostics_policy=unknown
-  diagnostics_saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
-  if [[ "$diagnostics_saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
-    diagnostics_attempt="${BASH_REMATCH[1]}"
-    diagnostics_policy=on
-  elif [[ "$diagnostics_saved" =~ ^off:[0-9]+:[0-9]+:-$ ]]; then
-    diagnostics_policy=off
-  fi
-  chrome_diagnostics_command status "$host" --session "$session" --attempt "$diagnostics_attempt" \
-    --recording-policy "$diagnostics_policy" ||
+  chrome_status_diagnostics "$host" "$session" ||
     echo "status: diagnostics: degraded (local diagnostic store unavailable)"
   yk_prepare_for_launch "$host"
   if yk_load_state; then
@@ -9691,7 +9705,8 @@ class Analysis:
         for group in self.groups.values():
             s = group['stats']
             output = {k: v for k, v in s.items() if k not in ('rtt_hist', 'variation_hist', 'legacy_rtt_hist')}
-            output.update(rtt_p95_ms=hist_percentile(s['rtt_hist']),
+            output.update(rtt_p50_ms=hist_percentile(s['rtt_hist'], .5),
+                          rtt_p95_ms=hist_percentile(s['rtt_hist']),
                           rttvar_p95_ms=hist_percentile(s['variation_hist']),
                           legacy_rtt_p95_ms=hist_percentile(s['legacy_rtt_hist']),
                           traffic_peak_bytes_sec=s['rate_peak'] if s['traffic_seconds'] else None,
@@ -9994,18 +10009,68 @@ def mark(args):
     return 0
 
 
+def network_lines(summary, age, state):
+    """Local connection observations, with missing values distinct from idle."""
+    samples = summary.get('samples', 0)
+    if not samples:
+        yield 'unavailable (no current-boot samples for this attempt in the last 5m)'
+        return
+    def fmt(value, suffix='', scale=1):
+        return 'unavailable' if value is None else f'{value / scale:.2f}{suffix}'
+    def rate(value):
+        if value is None:
+            return 'unavailable'
+        if value >= 12500:
+            return fmt(value, ' Mbps', 125000)
+        return fmt(value, ' KiB/s', 1024) if value >= 1024 else fmt(value, ' B/s')
+    seconds = summary.get('traffic_seconds', 0)
+    rx, tx = summary.get('rx_bytes'), summary.get('tx_bytes')
+    rx_rate, tx_rate = (rx / seconds, tx / seconds) if seconds else (None, None)
+    yield ('local SSH traffic: RX observed avg ' + rate(rx_rate) +
+           '; TX observed avg ' + rate(tx_rate) +
+           '; peak RX+TX ' + rate(summary.get('traffic_peak_bytes_sec')) +
+           f'; {seconds:.1f}s of recorded intervals')
+    yield ('recorded totals RX ' + fmt(rx if seconds else None, ' MiB', 1048576) +
+           '; TX ' + fmt(tx if seconds else None, ' MiB', 1048576) +
+           '; retransmissions ' + str(summary.get('retrans') if summary.get('retrans') is not None else 'unavailable') +
+           '; max send queue ' + fmt(summary.get('queue'), ' KiB', 1024) +
+           '; max unsent ' + fmt(summary.get('unsent'), ' KiB', 1024))
+    eligible = summary.get('rtt_eligible', 0)
+    if eligible:
+        yield ('ACK-progress TCP RTT p50 ' + fmt(summary.get('rtt_p50_ms'), ' ms') +
+               '; p95 ' + fmt(summary.get('rtt_p95_ms'), ' ms') +
+               '; TCP deviation p95 ' + fmt(summary.get('rttvar_p95_ms'), ' ms') +
+               f' (variation proxy); eligible samples {eligible}')
+    else:
+        tracked = (summary.get('recording') or {}).get('ack_tracking_samples', 0)
+        reason = 'no recent ACK progress (idle/baseline or outstanding data)' if tracked else 'ACK freshness fields unavailable'
+        yield 'TCP RTT and variation unavailable: ' + reason
+    latest = 'fresh' if age is not None and 0 <= age < 8 else 'stale' if age is not None and age >= 0 else 'unverified'
+    yield (f'latest sample {latest}' + (f' ({age:.1f}s old)' if age is not None and age >= 0 else '') +
+           f'; TCP {samples - summary.get("unavailable", 0)}/{samples} samples; '
+           f'gaps {summary.get("gaps", "unknown")}; recorder {state}')
+
+
 def status_cli(args):
-    print('status: diagnostics launcher: ' + (args.version or 'unknown'))
+    def emit(message):
+        if not args.network_only:
+            print(message)
+    def unavailable(reason):
+        print('status: network last 5m: unavailable (' + reason + ')')
+    emit('status: diagnostics launcher: ' + (args.version or 'unknown'))
     if args.recording_policy == 'off':
-        print('status: diagnostics: off for this attempt (recorded policy)')
+        emit('status: diagnostics: off for this attempt (recorded policy)')
+        unavailable('diagnostics off for this attempt')
         return 0
     if not args.attempt:
-        print('status: diagnostics: unknown (no recorded attempt identity; checked on next deliberate launch/reset)')
+        emit('status: diagnostics: unknown (no recorded attempt identity; checked on next deliberate launch/reset)')
+        unavailable('no recorded attempt identity')
         return 0
     try:
         store = Store(args.days, args.cap, create=False)
     except FileNotFoundError:
-        print('status: diagnostics: degraded (recorded attempt has no store)')
+        emit('status: diagnostics: degraded (recorded attempt has no store)')
+        unavailable('recorded attempt has no diagnostic store')
         return 0
     try:
         wall, mono = time.time(), time.monotonic()
@@ -10047,23 +10112,28 @@ def status_cli(args):
             'degraded' if running or owner_live or not identity else 'off' if identified else 'unknown'
         latest = sample['utc'] if sample else 'unavailable in last 5m'
         age_text = f'; age={age:.1f}s' if age is not None and age >= 0 else ''
-        print(f'status: diagnostics: {state}; attempt={args.attempt}; last sample={latest}{age_text}; {store.path}')
+        emit(f'status: diagnostics: {state}; attempt={args.attempt}; last sample={latest}{age_text}; {store.path}')
         if state in ('degraded', 'unknown'):
-            print(f'status: diagnostics identity: collector={"live" if running else "unverified or absent"}; '
+            emit(f'status: diagnostics identity: collector={"live" if running else "unverified or absent"}; '
                   f'owner={"live" if owner_live else "unverified or absent"}; recent sample={"fresh" if fresh else "stale or unavailable"}')
         groups = summarize(rows)
         summary = groups[0] if groups else dict(samples=0, unavailable=0, gaps=0, rtt_eligible=0,
                                                 recording=recording_stats(identity))
         for line in recording_lines(summary):
-            print('status: diagnostics last 5m: ' + line)
+            emit('status: diagnostics last 5m: ' + line)
+        current_rows = [row for row in rows if row.get('boot') == BOOT]
+        network_summary = summarize(current_rows)[0] if current_rows else {}
+        for line in network_lines(network_summary, age, state):
+            print('status: network last 5m: ' + line)
         versions = summary['recording']['launchers']
         def version(value):
             return tuple(map(int, value.split('.'))) if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value) else None
         installed = version(args.version)
         if installed and any(version(item) and version(item) < installed for item in versions):
-            print('status: diagnostics note: collector predates this launcher; next deliberate launch/reset adopts the installed recorder')
+            emit('status: diagnostics note: collector predates this launcher; next deliberate launch/reset adopts the installed recorder')
         if partial:
-            print('status: diagnostics coverage: PARTIAL: ' + '; '.join(partial))
+            emit('status: diagnostics coverage: PARTIAL: ' + '; '.join(partial))
+            print('status: network last 5m: coverage PARTIAL: ' + '; '.join(partial))
     finally:
         store.close()
     return 0
@@ -10097,6 +10167,7 @@ def main(argv=None):
     parser.add_argument("--version", default="")
     parser.add_argument("--policy", default="")
     parser.add_argument('--recording-policy', choices=('on', 'off', 'unknown'), default='unknown')
+    parser.add_argument('--network-only', action='store_true')
     args = parser.parse_args(argv)
     if not 1 <= args.days <= 30 or not 2 * CHUNK <= args.cap <= 1073741824:
         raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")
