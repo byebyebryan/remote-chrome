@@ -35,6 +35,7 @@ for Chrome transport; forwarding still needs noninteractive SSH.
 | Browser | `bash`, `waypipe` with Zstd support, `xdg-dbus-proxy`, `secret-tool` (libsecret), `ksecretd` (KWallet/Secret Service), `busctl` (systemd), and the selected Chrome executable |
 | Both, with notifications enabled | `python3` |
 | Both, with session diagnostics enabled | `python3`; `ss` and `ip` (iproute2) for TCP/network observations; optional `tailscale` for passive path context |
+| Display, for `monitor` | `python3` with its standard-library `curses` module and an interactive terminal |
 | Both, for interactive headless notifications | Python D-Bus and GLib bindings (`python-dbus` and `python-gobject` on Arch; `python3-dbus` and `python3-gi` on Debian) |
 | Display, for existing-daemon informational forwarding | `notify-send` (libnotify); `busctl` detects body markup support |
 | Display, for bounded notification diagnostics, cleanup, and incoming stop requests | `timeout` (coreutils) |

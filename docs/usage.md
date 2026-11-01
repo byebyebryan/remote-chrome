@@ -16,6 +16,7 @@ prerequisites, defaults, and implementation contracts.
 remote-chrome remote-host
 remote-chrome attach remote-host
 remote-chrome status remote-host
+remote-chrome monitor remote-host
 remote-chrome doctor remote-host
 remote-chrome stop remote-host
 ```
@@ -89,6 +90,16 @@ observed transport and the complete Traffic, TCP Delay, Delivery and Recording
 groups, including peak rate, variation and queue maxima. Missing
 or stale measurements remain explicit. See [network status](diagnostics.md#network-status)
 for units, coverage and measurement limits.
+
+`remote-chrome monitor [HOST]` opens a live terminal dashboard. Without HOST,
+select a local session with arrows or `j`/`k` and Enter. The dashboard shows
+latest interval traffic and queues, separately aged ACK-qualified RTT,
+five-minute summaries and history graphs. Space freezes display while recording
+continues, Tab opens the session list, and `q` quits. Resize and scrolling work
+in smaller terminals. Local readings refresh about once a second; observed
+codec checks run separately every 30 seconds for the selected dashboard.
+No new collector or active network probe is started. `--session NAME` selects
+an exact custom session. Use `status` for redirected output.
 
 Use `--verbose` to see individual checks, PIDs, paths, exact recorded parameters,
 and collector versions. Available liveness checks passing does not establish

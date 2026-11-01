@@ -106,8 +106,9 @@ rows. Nonempty inventories retain their headings and exact records.
 Pair Traffic with TCP Delay, then Delivery with Recording when their actual
 content fits the terminal. Otherwise stack those same groups in reading order.
 Align labels and emphasize values; leave a blank line between group pairs. No
-boxed borders, full-screen UI, animation, cursor movement, or persistent monitor
-is needed. Below 60 columns, ordinary rows move values below labels. Group rows
+boxed borders, animation, or cursor movement are needed for one-shot commands.
+The explicit `monitor` command has its own full-screen behavior below.
+Below 60 columns, ordinary rows move values below labels. Group rows
 also stack labels and values when needed to fit. Commands wrap naturally without
 inserting characters into their shell syntax. Redirected output preserves the
 grouping without decoration and uses 80 columns unless COLUMNS is supplied.
@@ -141,3 +142,85 @@ Check color/UTF-8 detection in a real PTY; check option and browser-argument
 boundaries. Run the complete regression suite and inspect installed status on
 the fleet without restarting active tunnels. Preserve prior payloads, package
 and config state, and unrelated chezmoi work during deployment.
+
+## Live monitor
+
+`remote-chrome monitor` opens a local session overview; arrows or `j`/`k` select
+a session and Enter opens its dashboard. `remote-chrome monitor HOST` opens the
+same default session as `status HOST`; `--session NAME` targets a custom one.
+An absent requested session remains absent until that exact session appears.
+Tab switches between dashboard and overview. The monitor never launches,
+resets, attaches to, or stops a tunnel.
+
+The dashboard keeps identity and recorded transport at the top. Observed codec
+use has its own check age. Traffic and TCP Delay appear together, followed by
+Delivery and Recording; small history graphs follow. Below 76 columns the
+groups stack. Arrows, `j`/`k`, Page Up/Down and Home scroll a short terminal;
+the title and controls remain visible. Resize recomputes the layout.
+
+Illustrative layout (values are observations, not health thresholds):
+
+```text
+remote-chrome / snap / LIVE
+remote-chrome-snap / attempt 5575e9d2
+Recorded transport: h264,hw,bpf=250000 / Display carbon
+Codecs checked 8s ago: Decode hardware / Encode hardware
+
+TRAFFIC / latest interval + 5m      TCP DELAY / ACK progress
+RX latest        1.2 Mbps           RTT last ACK     30 ms
+TX latest        12 KiB/s           ACK age          0.7s old
+5m avg RX        800 KiB/s          5m RTT p50/p95   29 ms / 54 ms
+5m avg TX        8 KiB/s            Deviation* last  8 ms
+5m peak RX+TX    3 Mbps             5m dev p95*      41 ms
+
+DELIVERY                           RECORDING
+Retrans latest   0                 Recorder         active
+Retrans / 5m     2                 Sample           fresh / 0.7s old
+Send queue now   0 B               Coverage / 5m    298s / TCP 299/300
+Unsent now       0 B               Gaps / 5m        1
+5m max queue     12 KiB            Activity latest  active
+
+HISTORY / 5m / oldest -> now / blanks = no eligible observation
+RX+TX |...small bars...| 3 Mbps max
+RTT   |...small bars...| 54 ms max
+Dev*  |...small bars...| 41 ms max
+* TCP deviation is a variation proxy; RTT uses ACK progress.
+```
+
+Latest means the last recorded interval, not an instantaneous probe. Its age is
+visible in Recording. After eight seconds, latest traffic/queues/retransmission
+increments become unavailable. The last ACK-qualified RTT and deviation retain
+their separate age and an explicit `not fresh` label; five-minute percentiles
+remain historical observations. History uses five-second buckets: combined
+traffic is an interval-weighted average; RTT/deviation use the maximum eligible
+estimate. Each graph scales independently to its displayed maximum. Blank bins
+mean no eligible observations; recorded idle zeros have a visible baseline bar.
+Graph compression takes the maximum observed bin in each column. Sub-bucket
+gaps remain represented by the coverage and gap fields; graphs do not assert
+continuous coverage.
+
+Local recording reads refresh about once a second; local tmux inventory every
+five seconds. Both run in bounded subprocesses so disk or tmux stalls cannot
+block input. Only the selected dashboard checks codec state, through the same
+Waypipe telemetry used by status: one bounded local/remote check per 30 seconds,
+with its own timestamp and an outer ten-second deadline. The overview adds no
+SSH checks. No extra collector, active probe, or diagnostic write is created.
+Existing `diagnostics --watch` stays a separate textual report.
+
+Space freezes the displayed snapshot and its ages; `FROZEN` makes clear that
+recording continues. Space resumes live display. Overview selection is disabled
+while frozen; Tab returns to the live session list. `q`, Escape, Ctrl-C, TERM
+and HUP restore the terminal and cancel only the monitor's observer process
+groups. Cursor state, echo and terminal attributes are restored after an error.
+Redirected streams and `TERM=dumb` receive a clear error and `status` alternative.
+Python's standard-library curses module is required; no third-party Python
+dependency is added. `--plain` uses ASCII graphs and no colors; `--color` and
+`NO_COLOR` retain their usual precedence.
+
+The selection key includes exact session, target, attempt, recording policy,
+transport and pane identity. Changed identities invalidate data and codec
+caches, cancel old checks, and show a session-change notice. Missing, disabled,
+unknown, stale, partial and ended recordings stay explicit. Failed inventory
+reads never masquerade as a confirmed empty inventory. Recording reads retain
+the existing 32 MiB budget, current-boot filtering, and exact viewer
+origin/session/attempt restrictions. No health score is inferred.

@@ -53,6 +53,15 @@ older peers report alignment unavailable.
 every five seconds for at most one hour. It does not repeatedly SSH, send probes
 or control Chrome. It cannot be combined with `--at`, `--export` or `--probe`.
 
+For an interactive dashboard, use `remote-chrome monitor [HOST]` on the display
+host. It shows latest interval values, five-minute summaries and small history
+graphs. Local observations refresh about once a second. Only the selected
+dashboard checks observed codec use every 30 seconds, with a separate check age;
+the session overview adds no SSH checks. No extra collector or active network
+probe is started. Space freezes display while recording continues, Tab opens
+the session list, and `q` exits. Short terminals can scroll; `--plain` uses ASCII
+and no colors. See the [monitor design and measurement limits](cli-design.md#live-monitor).
+
 `--probe [DURATION]` explicitly requests one ICMP packet per second for at most
 120 seconds to the latest observed owned TCP peer address. It requires recent
 local connection evidence. Packet counts and ping RTT are stored as a separate

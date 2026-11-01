@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.9.1"
+VERSION="1.10.0"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -364,6 +364,7 @@ usage() {
     chrome_ui_section Everyday
     chrome_ui_row HOST 'Open a tunnel; repeat to restart its session'
     chrome_ui_row 'status [HOST]' 'Inspect sessions and five-minute network history'
+    chrome_ui_row 'monitor [HOST]' 'Live dashboard (q quit, Space freeze, Tab sessions)'
     chrome_ui_row 'reset [HOST]' 'Restart the selected session (may lose in-page state)'
     chrome_ui_row 'stop [HOST]' 'Clean up one session, or all managed sessions'
     chrome_ui_section 'More commands'
@@ -386,6 +387,7 @@ Usage:
   $PROGRAM launch HOST [-- CHROME_ARGS...]
   $PROGRAM stop [HOST] [--from SOURCE]
   $PROGRAM status [HOST]
+  $PROGRAM monitor [HOST] [--session NAME]
   $PROGRAM doctor HOST
   $PROGRAM attach HOST
   $PROGRAM reset [HOST] [--session NAME] [--yes]
@@ -4401,6 +4403,102 @@ chrome_reset() {
     fi
     chrome_ui_receipt restarted "$host" "$session" "$receipt_transport" "$receipt_codecs" "$yk_needed"
   fi
+}
+
+# Machine-only, read-only inventory for the monitor. Keep canonical pane parsing
+# shared with status/reset; never infer a destination from a session suffix.
+chrome_validate_host() {
+  [[ "$1" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}$ ]] || { echo 'Invalid monitor host.' >&2; return 1; }
+}
+
+chrome_validate_session() {
+  [ -n "$1" ] && [ "${#1}" -le 253 ] && [[ "$1" != *[$'\001'-$'\037'$'\177.:']* ]] || {
+    echo 'Invalid monitor session name.' >&2; return 1;
+  }
+}
+
+chrome_monitor_inventory() {
+  local session host attempt saved policy transport pane inventory
+  local requested="${1:-}"
+  command -v tmux >/dev/null || { echo 'tmux is unavailable' >&2; return 1; }
+  if ! inventory="$(tmux list-sessions -F '#{session_name}' 2>&1)"; then
+    case "$inventory" in
+      *'no server running on '*|*'no sessions'*|*'No such file or directory'*) return 0 ;;
+      *) printf '%s\n' "$inventory" >&2; return 1 ;;
+    esac
+  fi
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    if [ "$session" != "$requested" ]; then
+      case "$session" in "${REMOTE_CHROME_SESSION_PREFIX:-remote-chrome}"-*) ;; *) continue ;; esac
+    fi
+    host=- attempt=- policy=unknown transport=unknown pane=-
+    if chrome_reset_read_pane "$session" 2>/dev/null &&
+      chrome_reset_parse_pane_host "$chrome_reset_pane_command" 2>/dev/null; then
+      host="$chrome_reset_host" pane="$chrome_reset_pane_pid"
+      transport=lossless
+      if [[ "$chrome_reset_pane_command" =~ $chrome_reset_video_prefix ]]; then
+        transport="h264,${BASH_REMATCH[2]},bpf=${BASH_REMATCH[3]}"
+      fi
+      saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null || true)"
+      if [[ "$saved" =~ ^on:[0-9]+:[0-9]+:([a-f0-9-]{36})$ ]]; then
+        attempt="${BASH_REMATCH[1]}" policy=on
+      elif [[ "$saved" =~ ^off:[0-9]+:[0-9]+:-$ ]]; then
+        policy=off
+      fi
+    fi
+    # tmux disallows control characters in session names; guard all fields anyway.
+    [[ "$session$host" != *[$'\001'-$'\037'$'\177']* ]] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$session" "$host" "$attempt" "$policy" "$transport" "$pane"
+  done <<<"$inventory"
+}
+
+chrome_monitor_transport() {
+  [ "$#" = 3 ] || return 2
+  local host="$1" session="$2" attempt="$3" saved code=0
+  chrome_validate_host "$host" || return 1
+  chrome_validate_session "$session" || return 1
+  saved="$(tmux show-options -qv -t "=$session:" @remote-chrome-diagnostics 2>/dev/null)" || return 1
+  [[ "$saved" = *":$attempt" ]] || return 1
+  # Explicit semantic fields, not a parser for the one-shot human dashboard.
+  chrome_ui_check() { printf '%s\t%s\n' "$1" "$2"; }
+  chrome_ui_detail() { :; }
+  chrome_ui_rows() { cat; }
+  chrome_transport_status "$host" "$session" || code=$?
+  printf 'Attempt\t%s\n' "$attempt"
+  return "$code"
+}
+
+chrome_monitor() {
+  local host=- session=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session)
+        [ "$#" -ge 2 ] || die '--session requires a session name.'
+        session="$2"; shift 2 ;;
+      --session=*) session="${1#*=}"; shift ;;
+      -h|--help)
+        printf 'Usage: %s monitor [HOST] [--session NAME]\n\n' "$PROGRAM"
+        printf 'Local recordings refresh every second; selected codec checks every 30s.\n'
+        printf 'Enter open / Tab sessions / arrows or j,k move / Space freeze / q quit.\n'
+        return 0 ;;
+      -*) die "Unknown monitor option: $1" ;;
+      *) [ "$host" = - ] || die "Unexpected argument: $1"; host="$1"; shift ;;
+    esac
+  done
+  [ "$host" = - ] || chrome_validate_host "$host" || return 1
+  [ -z "$session" ] || { [ "$host" != - ] || die 'monitor with --session requires HOST.'; chrome_validate_session "$session" || return 1; }
+  if [ "$host" != - ] && [ -z "$session" ]; then session="$(chrome_default_session "$host")"; fi
+  [ -t 0 ] && [ -t 1 ] || die 'monitor requires an interactive terminal; use remote-chrome status [HOST] for a snapshot.'
+  [ "${TERM:-dumb}" != dumb ] || die 'monitor needs a cursor-addressable terminal; use remote-chrome status [HOST].'
+  # Python's source arrives on stdin; retain the actual terminal separately.
+  local terminal_fd code=0
+  exec {terminal_fd}<&0
+  chrome_diagnostics_command monitor "$host" --session "$session" \
+    --launcher "$(realpath -- "${BASH_SOURCE[0]}")" --terminal-fd "$terminal_fd" \
+    --monitor-plain "$chrome_ui_plain" --monitor-color "$chrome_ui_color" || code=$?
+  exec {terminal_fd}<&-
+  return "$code"
 }
 
 chrome_status_all() {
@@ -8822,7 +8920,11 @@ REMOTE_CHROME_NOTIFY_LISTENER
 }
 
 chrome_diagnostics_run() {
-  python3 - "$@" <<'REMOTE_CHROME_DIAGNOSTICS'
+  # The interactive monitor owns its foreground PID, including signals sent to
+  # the public launcher. Other helpers must return to their Bash caller.
+  local runner=()
+  [ "${1:-}" != monitor ] || runner=(exec)
+  "${runner[@]}" python3 - "$@" <<'REMOTE_CHROME_DIAGNOSTICS'
 """Embedded session diagnostics. Technical records only; never a control plane."""
 import argparse
 import collections
@@ -8846,6 +8948,8 @@ import subprocess
 import sys
 import time
 import uuid
+import tempfile
+import textwrap
 
 SCHEMA = 1
 RECORD_SCHEMA = 2
@@ -10793,9 +10897,488 @@ def status_cli(args):
     return 0
 
 
+def monitor_snapshot(args):
+    """Read one exact current attempt. No collection, pruning, SSH or probes."""
+    wall, mono = time.time(), time.monotonic()
+    result = dict(wall=wall, mono=mono, attempt=args.attempt, state='unknown',
+                  age=None, summary={}, latest={}, graphs={}, partial=[], reason='')
+    if args.recording_policy == 'off' or not args.attempt:
+        result['state'] = 'off' if args.recording_policy == 'off' else 'unknown'
+        result['reason'] = 'Recording disabled for this attempt' if args.recording_policy == 'off' else 'No recorded attempt identity'
+        return result
+    try:
+        store = Store(args.days, args.cap, create=False)
+    except FileNotFoundError:
+        result.update(state='degraded', reason='Recorded attempt has no diagnostic store')
+        return result
+    rows, identity = [], {}
+    try:
+        try:
+            for row in store.records(wall - 300, wall, args.target, socket.gethostname(),
+                                     args.session, attempt=args.attempt, newest=True,
+                                     budget=READ_LIMIT - 1048576):
+                if row['role'] == 'viewer' and row.get('boot') == BOOT:
+                    rows.append(row)
+        except ValueError as error:
+            result['partial'].append(str(error))
+        rows.sort(key=lambda row: (row['wall'], row.get('mono', 0)))
+        identity = next((row for row in reversed(rows) if row.get('collector') and row.get('owner')), {})
+        if not identity:
+            try:
+                identity = store.recording_identity(args.target, socket.gethostname(), args.session,
+                                                    args.attempt, 1048576) or {}
+            except ValueError as error:
+                result['partial'].append(str(error))
+    finally:
+        store.close()
+    samples = [row for row in rows if row['event'] == 'sample' and not row.get('carried')]
+    sample = samples[-1] if samples else {}
+    if sample:
+        result['age'] = mono - sample['mono'] if type(sample.get('mono')) in (int, float) else wall - sample['wall']
+        result['latest'] = sample
+    def live(key):
+        value = identity.get(key) or {}
+        return identity.get('boot') == BOOT and type(value.get('pid')) is int and \
+            isinstance(value.get('start'), str) and exact(value['pid'], value['start']) is not None
+    running, owner = live('collector'), live('owner')
+    fresh = result['age'] is not None and 0 <= result['age'] < 8
+    identified = all(isinstance(identity.get(k), dict) and identity[k].get('pid') and identity[k].get('start')
+                     for k in ('collector', 'owner'))
+    result['state'] = 'active' if running and owner and fresh else 'degraded' if running or owner or not identity else 'off' if identified else 'unknown'
+    result['summary'] = summarize(rows)[0] if rows else {}
+    result['graphs'] = monitor_buckets(samples, wall)
+    ack = next((r for r in reversed(samples) if
+                (r.get('quality') or sample_quality(r.get('tcp', {}), r.get('delta') or {})).get('rtt_recent_ack_progress') and
+                type(r.get('tcp', {}).get('rtt_ms')) in (int, float)), None)
+    result['ack'] = dict(rtt=ack['tcp']['rtt_ms'], deviation=ack['tcp'].get('rttvar_ms'),
+                         age=mono - ack['mono'] if type(ack.get('mono')) in (int, float) else wall - ack['wall']) if ack else {}
+    return result
+
+
+def monitor_buckets(samples, wall, count=60):
+    """Five-second bins; empty bins stay None and cannot look like idle zeros."""
+    step = 300 / count
+    end = math.floor(wall / step) * step
+    buckets = [dict(traffic=[], rtt=[], deviation=[]) for _ in range(count)]
+    for sample in samples:
+        index = int(math.floor((sample['wall'] - end) / step)) + count - 1
+        if not 0 <= index < count:
+            continue
+        tcp, delta = sample.get('tcp', {}), sample.get('delta') or {}
+        if not tcp.get('available'):
+            continue
+        bucket = buckets[index]
+        seconds = delta.get('seconds', 0)
+        if type(seconds) in (int, float) and 0 < seconds <= 5 and all(
+                type(delta.get(k)) is int and delta[k] >= 0 for k in ('bytes_sent', 'bytes_received')):
+            bucket['traffic'].append((delta['bytes_sent'] + delta['bytes_received'], seconds))
+        quality = sample.get('quality') or sample_quality(tcp, delta)
+        if quality.get('rtt_recent_ack_progress'):
+            for key, field in [('rtt', 'rtt_ms'), ('deviation', 'rttvar_ms')]:
+                value = tcp.get(field)
+                if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                    bucket[key].append(value)
+    return {key: [(sum(v[0] for v in b[key]) / sum(v[1] for v in b[key]) if key == 'traffic' else max(b[key]))
+                  if b[key] else None for b in buckets] for key in ('traffic', 'rtt', 'deviation')}
+
+
+def monitor_clean(value):
+    return ''.join(c if c.isprintable() else '?' for c in str(value))
+
+
+def monitor_inventory(raw):
+    sessions = []
+    for line in raw.splitlines():
+        fields = line.split('\t')
+        if len(fields) != 6:
+            raise ValueError('Invalid local session inventory')
+        name, host, attempt, policy, transport, pane = fields
+        if not name or any(c in name for c in '.:') or len(name) > 253 or \
+                any(not c.isprintable() for c in name) or not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}|-', host) or \
+                policy not in ('on', 'off', 'unknown') or (attempt != '-' and str(uuid.UUID(attempt)) != attempt):
+            raise ValueError('Invalid local session identity')
+        sessions.append(dict(session=name, target=host, attempt=attempt, policy=policy, transport=transport, pane=pane))
+    return sorted(sessions, key=lambda s: s['session'])
+
+
+def monitor_identity(session):
+    return tuple(session.get(k) for k in ('session', 'target', 'attempt', 'policy', 'transport', 'pane'))
+
+
+class MonitorJob:
+    """A bounded, cancellable observer. File output avoids pipe deadlocks."""
+    LIMIT = 512 * 1024
+
+    def __init__(self, command, timeout):
+        self.output = tempfile.TemporaryFile()
+        self.process = None
+        self.deadline = time.monotonic() + timeout
+        try:
+            self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=self.output,
+                                            stderr=self.output, start_new_session=True, close_fds=True)
+        except BaseException:
+            self.output.close()
+            raise
+
+    def cancel(self):
+        if self.process is not None:
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.process.wait(timeout=2)
+        self.output.close()
+
+    def poll(self):
+        code = self.process.poll()
+        oversized = os.fstat(self.output.fileno()).st_size > self.LIMIT
+        if code is None and not oversized and time.monotonic() < self.deadline:
+            return None
+        error = 'Observer output limit reached' if oversized else 'Observer timed out' if code is None else ''
+        self.output.seek(0)
+        raw = self.output.read(self.LIMIT).decode('utf-8', 'replace')
+        self.cancel()  # Also reap descendants if a helper exited early.
+        return code == 0 and not error, raw, error
+
+
+def monitor_spark(values, width, unicode=True):
+    width = max(1, width)
+    values = values or [None] * 60
+    # Combine adjacent bins, preserving visible entirely missing intervals.
+    bins = []
+    for i in range(min(width, len(values))):
+        group = values[i * len(values) // min(width, len(values)):(i + 1) * len(values) // min(width, len(values))]
+        known = [v for v in group if type(v) in (int, float) and math.isfinite(v) and v >= 0]
+        bins.append(max(known) if known else None)
+    peak = max((v for v in bins if v is not None), default=0)
+    chars = '▁▂▃▄▅▆▇█' if unicode else '._:-=+*#'
+    graph = ''.join(' ' if v is None else chars[min(len(chars) - 1, int(v / peak * (len(chars) - 1))) if peak else 0] for v in bins)
+    return graph, peak
+
+
+def monitor_lines(session, data, remote, columns, unicode=True, now_mono=None):
+    """Pure semantic view model, shared by terminal rendering and fixtures."""
+    mono = time.monotonic() if now_mono is None else now_mono
+    lines = []
+    def add(text='', role='normal'):
+        for part in textwrap.wrap(monitor_clean(text), max(12, columns), break_long_words=True, break_on_hyphens=False) or ['']:
+            lines.append((part, role))
+    if session is None:
+        add('Session absent / waiting for the requested tunnel', 'warn')
+        add('Tab opens the session overview. No tunnel is launched by the monitor.')
+        return lines
+    add(session['session'] + ' / attempt ' + session['attempt'][:8], 'dim')
+    add('Recorded transport: ' + session['transport'] + ' / Display ' + socket.gethostname(), 'dim')
+    if session['transport'] == 'lossless':
+        add('Codecs: not applicable / recorded lossless transport', 'dim')
+    elif session['attempt'] == '-':
+        add('Codecs: unavailable / no recorded attempt identity', 'warn')
+    elif remote:
+        age = max(0, mono - remote['mono'])
+        state = 'checked' if remote['ok'] else 'unavailable'
+        add('Codecs ' + state + f' {age:.0f}s ago: ' + remote['text'], 'dim' if remote['ok'] else 'warn')
+    else:
+        add('Codecs: check pending (selected session only; refresh 30s)', 'dim')
+    if not data:
+        add('Local observations pending', 'warn')
+        return lines
+    elapsed = max(0, mono - data['mono'])
+    age = data.get('age')
+    age = age + elapsed if age is not None else None
+    fresh = age is not None and 0 <= age < 8
+    sample, summary = data.get('latest') or {}, data.get('summary') or {}
+    tcp, delta = sample.get('tcp') or {}, sample.get('delta') or {}
+    seconds = delta.get('seconds', 0)
+    interval = fresh and tcp.get('available') and type(seconds) in (int, float) and 0 < seconds <= 5
+    def rate(key):
+        return delta[key] / seconds if interval and type(delta.get(key)) is int else None
+    ack = data.get('ack') or {}
+    ack_age = ack.get('age')
+    ack_age = ack_age + elapsed if ack_age is not None else None
+    ack_label = display_number(ack_age) + 's' if ack_age is not None and ack_age >= 0 else 'unverified'
+    ack_fresh = fresh and ack_age is not None and 0 <= ack_age < 8
+    eligible = summary.get('rtt_eligible', 0)
+    observed = summary.get('traffic_seconds', 0)
+    rx5 = summary.get('rx_bytes', 0) / observed if observed else None
+    tx5 = summary.get('tx_bytes', 0) / observed if observed else None
+    unavailable = summary.get('unavailable', 0)
+    counts = f"{summary.get('samples', 0) - unavailable}/{summary.get('samples', 0)}"
+    rec_age = f'{age:.1f}s old' if age is not None and age >= 0 else 'sample unavailable'
+    rec_label = 'fresh' if fresh else 'STALE' if age is not None else 'unavailable'
+    traffic = [('RX latest', display_rate(rate('bytes_received'))), ('TX latest', display_rate(rate('bytes_sent'))),
+               ('5m avg RX', display_rate(rx5)), ('5m avg TX', display_rate(tx5)),
+               ('5m peak RX+TX', display_rate(summary.get('traffic_peak_bytes_sec')))]
+    delay = [('RTT last ACK', display_metric(ack.get('rtt'))), ('ACK age', ack_label + (' old' if ack_fresh else ' / not fresh')),
+             ('5m RTT p50/p95', display_metric(summary.get('rtt_p50_ms') if eligible else None) + ' / ' + display_metric(summary.get('rtt_p95_ms') if eligible else None)),
+             ('Deviation* last', display_metric(ack.get('deviation'))),
+             ('5m dev p95*', display_metric(summary.get('rttvar_p95_ms') if eligible else None))]
+    delivery = [('Retrans latest', str(delta.get('retrans_total', 'unavailable')) if interval else 'unavailable'),
+                ('Retrans / 5m', str(summary.get('retrans')) if summary.get('retrans') is not None else 'unavailable'),
+                ('Send queue now', display_bytes(tcp.get('send_queue') if fresh and tcp.get('available') else None)),
+                ('Unsent now', display_bytes(tcp.get('notsent_bytes') if fresh and tcp.get('available') else None)),
+                ('5m max queue', display_bytes(summary.get('queue')))]
+    recording = [('Recorder', data['state']), ('Sample', rec_label + ' / ' + rec_age),
+                 ('Coverage / 5m', display_number(observed) + 's / TCP ' + counts),
+                 ('Gaps / 5m', str(summary.get('gaps', 'unknown'))),
+                 ('Activity latest', (sample.get('quality') or sample_quality(tcp, delta)).get('activity', 'unknown') if fresh else 'unavailable')]
+    def panels(left, right):
+        add()
+        width = max(12, (columns - 3) // 2)
+        def panel(title, items):
+            output = [(part, 'title') for part in textwrap.wrap(title, width if columns >= 76 else columns)]
+            for label, value in items:
+                text = label.ljust(16) + ' ' + value
+                role = 'warn' if 'unavailable' in value or 'STALE' in value or 'not fresh' in value or (label == 'Recorder' and value != 'active') else 'normal'
+                for part in textwrap.wrap(text, width if columns >= 76 else columns, subsequent_indent='  ', break_on_hyphens=False):
+                    output.append((part, role))
+            return output
+        a, b = panel(*left), panel(*right)
+        if columns >= 76:
+            for i in range(max(len(a), len(b))):
+                x, y = a[i] if i < len(a) else ('', 'normal'), b[i] if i < len(b) else ('', 'normal')
+                lines.append((x[0].ljust(width) + '   ' + y[0], 'warn' if 'warn' in (x[1], y[1]) else 'title' if i == 0 else 'normal'))
+        else:
+            lines.extend(a); add(); lines.extend(b)
+    panels(('TRAFFIC / latest interval + 5m', traffic), ('TCP DELAY / ACK progress', delay))
+    panels(('DELIVERY', delivery), ('RECORDING', recording))
+    add()
+    add('HISTORY / 5m / oldest -> now / blanks = no eligible observation', 'title')
+    for key, label in [('traffic', 'RX+TX'), ('rtt', 'RTT'), ('deviation', 'Dev*')]:
+        graph, peak = monitor_spark(data.get('graphs', {}).get(key), max(1, columns - 28) if columns >= 40 else columns - 2, unicode)
+        scale = display_rate(peak) if key == 'traffic' else display_metric(peak)
+        if columns < 40:
+            add(label + ' / ' + scale + ' max')
+            lines.append(('|' + graph + '|', 'normal'))
+        else:
+            lines.append((f'{label:5} |{graph}| {scale} max', 'normal'))
+    add('* TCP deviation is a variation proxy; RTT uses ACK progress.', 'dim')
+    add('SSH socket traffic includes forwarding; these are not frame/input latency.', 'dim')
+    if data.get('reason'):
+        add(data['reason'], 'warn')
+    if data.get('partial'):
+        add('PARTIAL: ' + '; '.join(data['partial']), 'warn')
+    versions = summary.get('recording', {}).get('launchers', [])
+    if versions:
+        add('Recorder ' + ', '.join(versions) + ' / updates on deliberate launch/reset', 'dim')
+    return lines
+
+
+def monitor_cli(args):
+    import curses
+    import copy
+    import termios
+    if args.terminal_fd < 0 or not os.isatty(args.terminal_fd) or not os.isatty(1) or os.environ.get('TERM', 'dumb') == 'dumb':
+        raise ValueError('monitor requires an interactive terminal; use status for a snapshot')
+    # The source heredoc has been consumed. curses now needs fd 0 to be the tty.
+    if args.terminal_fd != 0:
+        os.dup2(args.terminal_fd, 0)
+        os.close(args.terminal_fd)
+    original_terminal = termios.tcgetattr(0)
+    jobs, sessions, data, remote = {}, [], {}, {}
+    due = dict(inventory=0, data=0, remote=0)
+    selected = args.session or None
+    requested = args.target if args.target != '-' else None
+    overview = requested is None
+    index, scroll = 0, 0
+    inventory_error, notice = '', ''
+    inventory_mono = None
+    frozen = None
+    current_key = None
+    launcher = args.launcher
+    def stop_job(kind):
+        item = jobs.pop(kind, None)
+        if item:
+            item[0].cancel()
+    def cleanup():
+        for kind in list(jobs):
+            stop_job(kind)
+    def terminated(signum, _frame):
+        raise SystemExit(128 + signum)
+    signals = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        for sig in signals:
+            signal.signal(sig, terminated)
+        def screen_loop(screen):
+            nonlocal sessions, data, remote, selected, requested, overview, index, scroll
+            nonlocal inventory_error, inventory_mono, frozen, notice, current_key
+            screen.timeout(100)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            color = args.monitor_plain == '0' and args.monitor_color != 'never' and \
+                (args.monitor_color == 'always' or 'NO_COLOR' not in os.environ) and curses.has_colors()
+            if curses.has_colors():
+                curses.use_default_colors()
+            if color:
+                curses.init_pair(1, curses.COLOR_CYAN, -1)
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)
+            unicode = args.monitor_plain == '0' and 'UTF' in (sys.stdout.encoding or '').upper()
+            next_draw, force_draw, last_state = 0, True, None
+            while True:
+                mono = time.monotonic()
+                # Poll all owned workers without waiting. Slow SSH cannot block keys.
+                for kind, (job, identity) in list(jobs.items()):
+                    result = job.poll()
+                    if result is None:
+                        continue
+                    del jobs[kind]
+                    ok, raw, error = result
+                    try:
+                        if kind == 'inventory':
+                            if not ok:
+                                raise ValueError(error or raw or 'Local inventory failed')
+                            updated = monitor_inventory(raw)
+                            previous = {s['session']: monitor_identity(s) for s in sessions}
+                            highlighted = sessions[index]['session'] if sessions and index < len(sessions) else None
+                            sessions = updated
+                            inventory_mono, inventory_error = mono, ''
+                            if selected in previous and any(s['session'] == selected and monitor_identity(s) != previous[selected] for s in sessions):
+                                notice = 'Session changed / history reset to the current attempt'
+                            index = next((i for i, s in enumerate(sessions) if s['session'] == highlighted),
+                                         min(index, max(0, len(sessions) - 1)))
+                        elif kind == 'data':
+                            if not ok:
+                                raise ValueError(error or raw or 'Local recording read failed')
+                            value = json.loads(raw)
+                            if value.get('attempt') != identity[2]:
+                                raise ValueError('Observation attempt mismatch')
+                            data[identity] = value
+                        else:
+                            fields = dict(line.split('\t', 1) for line in raw.splitlines() if '\t' in line)
+                            valid = fields.get('Attempt') == identity[2]
+                            text = ' / '.join(k + ' ' + monitor_clean(fields[k]) for k in ('Decode', 'Encode', 'Warning') if k in fields)
+                            remote[identity] = dict(mono=mono, ok=ok and valid, text=text if ok and valid and text else error or 'Codec identity unavailable or changed')
+                    except (ValueError, TypeError, KeyError) as error:
+                        if kind == 'inventory':
+                            inventory_error = monitor_clean(error)[:180]
+                        elif kind == 'data':
+                            data[identity] = dict(wall=time.time(), mono=mono, attempt=identity[2], state='unknown',
+                                                  age=None, reason='Local read unavailable: ' + monitor_clean(error)[:180], partial=[])
+                        else:
+                            remote[identity] = dict(mono=mono, ok=False, text=monitor_clean(error)[:180])
+                if mono >= due['inventory'] and 'inventory' not in jobs:
+                    jobs['inventory'] = (MonitorJob([launcher, '_monitor-inventory', args.session], 4), None)
+                    due['inventory'] = mono + 5
+                session = next((s for s in sessions if s['session'] == selected and (requested is None or s['target'] == requested)), None)
+                identity = monitor_identity(session) if session else None
+                if identity != current_key:
+                    for kind in ('data', 'remote'):
+                        stop_job(kind)
+                        due[kind] = 0
+                    # Bounded caches; never reuse observations across attempts.
+                    data, remote = {}, {}
+                    current_key = identity
+                if overview:
+                    for kind in ('data', 'remote'):
+                        if kind in jobs:
+                            stop_job(kind)
+                            due[kind] = 0
+                if not overview and session:
+                    if session['target'] == '-':
+                        data[identity] = dict(mono=mono, wall=time.time(), state='unknown', age=None,
+                                              reason='Launch metadata unavailable / target unverified')
+                    elif mono >= due['data'] and 'data' not in jobs:
+                        attempt = '' if session['attempt'] == '-' else session['attempt']
+                        command = [launcher, '_monitor-data', session['target'], '--session', selected,
+                                   '--attempt', attempt, '--recording-policy', session['policy'],
+                                   '--days', str(args.days), '--cap', str(args.cap)]
+                        # Preserve the protocol sentinel for unrecorded attempts.
+                        jobs['data'] = (MonitorJob(command, 4), identity)
+                        due['data'] = mono + 1
+                    if mono >= due['remote'] and 'remote' not in jobs and session['attempt'] != '-' and session['target'] != '-' and session['transport'] != 'lossless':
+                        jobs['remote'] = (MonitorJob([launcher, '_monitor-transport', session['target'], selected, session['attempt']], 10), identity)
+                        due['remote'] = mono + 30
+                # Freeze an immutable display snapshot while all reads continue.
+                state = dict(session=session, data=data.get(identity), remote=remote.get(identity),
+                             sessions=sessions, error=inventory_error, notice=notice, mono=mono,
+                             inventory_mono=inventory_mono)
+                view = frozen or state
+                if force_draw or mono >= next_draw:
+                    next_draw, force_draw = mono + 1, False
+                    last_state = copy.deepcopy(view)
+                    height, width = screen.getmaxyx()
+                    cols = max(12, width - 4)
+                    title = 'remote-chrome / sessions' if overview else 'remote-chrome / ' + (view['session']['target'] if view['session'] else requested or selected or 'session')
+                    title += ' / FROZEN' if frozen else ' / LIVE'
+                    content = []
+                    if overview:
+                        content.append(('LOCAL SESSIONS / Enter opens a tunnel dashboard', 'title'))
+                        if not view['sessions']:
+                            content.append(('No managed sessions / waiting for a launch', 'warn'))
+                        for i, item in enumerate(view['sessions']):
+                            content.append((('> ' if i == index else '  ') + item['session'] + ' / browser ' + item['target'], 'title' if i == index else 'normal'))
+                            content.append(('    ' + item['transport'] + ' / recording ' + item['policy'] + ' / ' + item['attempt'][:8], 'dim'))
+                        content.append(('', 'normal'))
+                        content.append(('Display ' + socket.gethostname() + ' / overview reads local metadata only', 'dim'))
+                    else:
+                        content = monitor_lines(view['session'], view['data'], view['remote'], cols, unicode, view['mono'])
+                        if view['notice']:
+                            content.insert(0, (view['notice'], 'warn'))
+                    inv_age = mono - inventory_mono if inventory_mono is not None else None
+                    if inventory_error or inv_age is None or inv_age >= 10:
+                        warning = 'Inventory unavailable: ' + inventory_error if inventory_error else 'Inventory pending' if inv_age is None else f'Inventory STALE / {inv_age:.0f}s old'
+                        content.insert(0, (warning, 'warn'))
+                    screen.erase()
+                    def put(row, text, role='normal'):
+                        if 0 <= row < height:
+                            attr = curses.A_BOLD if role == 'title' else curses.A_DIM if role == 'dim' else 0
+                            if color and role in ('title', 'warn'):
+                                attr |= curses.color_pair(1 if role == 'title' else 2)
+                            try:
+                                screen.addnstr(row, 2 if width >= 16 else 0, monitor_clean(text), max(0, width - 4), attr)
+                            except curses.error:
+                                pass  # Resize or the bottom-right terminal cell.
+                    put(0, title, 'title')
+                    visible = max(0, height - 4)
+                    offset = max(0, index * 2 - visible + 4) if overview else min(scroll, max(0, len(content) - visible))
+                    for row, (text, role) in enumerate(content[offset:offset + visible], 2):
+                        put(row, text, role)
+                    footer = 'q quit / Space freeze / Enter open / arrows select' if overview else 'q quit / Space freeze / Tab sessions / arrows scroll'
+                    if frozen:
+                        footer = 'FROZEN / recording continues / Space resume / q quit'
+                    if not overview and len(content) > visible:
+                        footer += f' / {offset + 1}-{min(offset + visible, len(content))}/{len(content)}'
+                    put(height - 1, footer, 'dim')
+                    screen.refresh()
+                key = screen.getch()
+                if key != -1:
+                    force_draw = True
+                if key in (ord('q'), ord('Q'), 27):
+                    return 0
+                if key == ord(' '):
+                    frozen = None if frozen else copy.deepcopy(last_state or state)
+                elif key in (9, ord('b')):
+                    overview = not overview
+                    frozen, scroll = None, 0
+                    if not overview and sessions:
+                        selected, requested = sessions[index]['session'], None
+                elif key in (10, 13, curses.KEY_ENTER) and overview:
+                    if sessions and not frozen:
+                        selected, requested = sessions[index]['session'], None
+                        overview, frozen, scroll = False, None, 0
+                elif key in (curses.KEY_UP, ord('k'), curses.KEY_DOWN, ord('j'), curses.KEY_NPAGE, curses.KEY_PPAGE):
+                    change = -1 if key in (curses.KEY_UP, ord('k'), curses.KEY_PPAGE) else 1
+                    if overview:
+                        if not frozen:
+                            index = max(0, min(index + change, len(sessions) - 1))
+                    else:
+                        scroll = max(0, min(scroll + change * (visible if key in (curses.KEY_NPAGE, curses.KEY_PPAGE) else 1), max(0, len(content) - visible)))
+                elif key == curses.KEY_HOME:
+                    scroll = 0
+        return curses.wrapper(screen_loop)
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        cleanup()
+        termios.tcsetattr(0, termios.TCSANOW, original_terminal)
+        for sig, handler in signals.items():
+            signal.signal(sig, handler)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("collect", "query", "query-local", "mark", "status"))
+    parser.add_argument("action", choices=("collect", "query", "query-local", "mark", "status", "monitor", "monitor-data"))
     parser.add_argument("target")
     parser.add_argument("--session", default="")
     parser.add_argument("--origin", default="")
@@ -10824,11 +11407,22 @@ def main(argv=None):
     parser.add_argument('--network-only', action='store_true')
     parser.add_argument('--ui-rows', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--ui-overview', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--launcher', default='')
+    parser.add_argument('--terminal-fd', type=int, default=-1)
+    parser.add_argument('--monitor-plain', choices=('0', '1'), default='0')
+    parser.add_argument('--monitor-color', choices=('auto', 'always', 'never'), default='auto')
     args = parser.parse_args(argv)
     if not 1 <= args.days <= 30 or not 2 * CHUNK <= args.cap <= 1073741824:
         raise ValueError("diagnostic retention must be 1..30 days and 8 MiB..1 GiB")
-    if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}", args.target):
+    if not (args.action == 'monitor' and args.target == '-') and not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.@:-]{0,252}", args.target):
         raise ValueError("invalid diagnostic target")
+    if args.action == 'monitor':
+        return monitor_cli(args)
+    if args.action == 'monitor-data':
+        value = monitor_snapshot(args)
+        value['attempt'] = args.attempt or '-'
+        print(json.dumps(value, separators=(',', ':'), allow_nan=False))
+        return 0
     if args.action == "collect":
         uuid.UUID(args.attempt)
         return collect(args)
@@ -10858,7 +11452,7 @@ main() {
   # Internal subprocesses carry machine arguments and must retain their exact
   # protocol. Presentation options are for human entry points only.
   case "${1:-}" in
-    _diagnostics-query|_yubikey-run|_notify-listener|_notify-status) ;;
+    _diagnostics-query|_yubikey-run|_notify-listener|_notify-status|_monitor-inventory|_monitor-data|_monitor-transport) ;;
     *) chrome_ui_options "$@"; set -- "${chrome_ui_args[@]}" ;;
   esac
   local subcommand="${1:-}"
@@ -10875,6 +11469,21 @@ main() {
     status)
       shift
       chrome_status "$@"
+      ;;
+    monitor)
+      shift
+      chrome_monitor "$@"
+      ;;
+    _monitor-inventory)
+      chrome_monitor_inventory "${2:-}"
+      ;;
+    _monitor-transport)
+      shift
+      chrome_monitor_transport "$@"
+      ;;
+    _monitor-data)
+      shift
+      chrome_diagnostics_run monitor-data "$@" --version "$VERSION"
       ;;
     doctor)
       shift
