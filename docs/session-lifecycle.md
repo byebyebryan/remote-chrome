@@ -41,6 +41,9 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
   exit ends the session. Idle traffic and brief interruptions are allowed;
   persistent SSH unresponsiveness ends the transport through its keepalive
   policy. A broken USB control connection stops forwarding independently.
+  A missing listener or confirmed refusal on the same safe control socket is
+  treated as dead. Unsafe, inaccessible, changed or timed-out socket evidence
+  remains unknown and does not authorize cleanup of a possible replacement.
 - Forwarding intent is separate from cleanup debt. Removal or `usb stop` latches
   intent off, including after initially required forwarding. A later reset
   does not require or automatically re-export that key. A fresh required launch
@@ -53,6 +56,9 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
   is 45 seconds per stop phase and the CLI request has a 65-second outer limit.
   A timed-out helper and its descendants are terminated; ownership ledgers
   retain every unconfirmed obligation. There is no background retry loop.
+  Nested cleanup `timeout` requests use `--foreground` to remain in the
+  worker's process group, so an in-flight SSH child cannot escape that group
+  kill. Shared daemons created before cleanup remain outside the worker.
 - Transport outcome and its first end timestamp are retained separately from
   cleanup attempts/completion. Unexpected exits remain visible after successful
   cleanup. One best-effort local failure notice supplies the exact reset command;
@@ -62,6 +68,13 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
   observable. Reset can use that state after local processes exit, verifies the
   remote generation, boot and process identities, and refuses ambiguous ownership.
   Remote inspection/termination requests each have a ten-second deadline.
+  Reset captures the local record's generation once. Lease acquisition checks
+  that generation under the record lock; subsequent reads and local stop use
+  the same generation. A concurrent replacement makes the old reset refuse
+  further action instead of switching to the new session.
+  The generation is checked again after confirmation before remote TERM.
+  Readers reopen a displaced, unlinked inode after an atomic save, with a
+  bounded retry and all private-file/hardlink checks repeated on the new path.
 - Background sudo must be noninteractive. Scope passwordless permissions to
   the required USB/IP cleanup operations; do not depend on a terminal's cached
   authentication. Foreground launch remains available for debugging.

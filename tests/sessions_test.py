@@ -190,6 +190,45 @@ tmux() {{ echo 'UNEXPECTED TMUX' >&2; return 97; }}
         with self.assertRaisesRegex(ValueError, 'unsafe session record'):
             s.load(self.name)
 
+    def test_atomic_replacement_between_open_and_stat_reopens_named_record(self):
+        self.reserve()
+        replacement = s.load(self.name)
+        replacement['reason'] = 'transport-failed'
+        original_stat = os.fstat
+        replaced = False
+
+        def replace_before_stat(fd):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                s.save(replacement)
+                self.assertEqual(original_stat(fd).st_nlink, 0)
+            return original_stat(fd)
+
+        with patch.object(s.os, 'fstat', side_effect=replace_before_stat):
+            row = s.load(self.name)
+        self.assertEqual(row['reason'], 'transport-failed')
+        self.assertEqual(s.path_for(self.name).stat().st_nlink, 1)
+
+    def test_generation_replacement_during_json_read_cannot_return_old_view(self):
+        generation = self.reserve()
+        self.update(phase='stopped')
+        original_load = json.load
+        replacement = None
+        replaced = False
+
+        def replace_during_read(stream):
+            nonlocal replacement, replaced
+            if not replaced:
+                replaced = True
+                replacement = self.reserve()
+            return original_load(stream)
+
+        with patch.object(s.json, 'load', side_effect=replace_during_read):
+            with self.assertRaisesRegex(ValueError, 'generation changed'):
+                s.current(self.name, generation)
+        self.assertEqual(s.load(self.name)['generation'], replacement)
+
     def test_world_readable_record_is_rejected(self):
         self.reserve()
         s.path_for(self.name).chmod(0o644)
@@ -240,6 +279,120 @@ tmux() {{ echo 'UNEXPECTED TMUX' >&2; return 97; }}
         value['owner']['start'] = 'old'
         lease.write_text(json.dumps(value))
         self.assertTrue(self.reserve())
+
+    def test_generation_bound_lease_refuses_replacement_before_publishing(self):
+        generation = self.reserve()
+        self.update(phase='stopped')
+        replacement = self.reserve()
+        before = s.path_for(self.name).read_bytes()
+        with self.assertRaisesRegex(ValueError, 'generation changed'):
+            s.claim_lease(self.name, self.pid, generation)
+        self.assertFalse(s.path_for(self.name).with_suffix('.lease').exists())
+        self.assertEqual(s.path_for(self.name).read_bytes(), before)
+        self.assertNotEqual(generation, replacement)
+
+    def test_generation_bound_reads_and_service_check_refuse_replacement(self):
+        generation = self.reserve()
+        self.update(phase='stopped')
+        self.reserve()
+        before = s.path_for(self.name).read_bytes()
+        for action in ('read', 'read-live', 'check-service'):
+            with self.subTest(action=action), patch.object(s, 'service', side_effect=AssertionError('replacement must not be probed')):
+                with self.assertRaisesRegex(ValueError, 'generation changed'):
+                    s.main([action, self.name, generation])
+        self.assertEqual(s.path_for(self.name).read_bytes(), before)
+
+    def replacement_script(self):
+        script = self.base / 'replacement.py'
+        args = [self.name, 'test-host', 'waypipe --no-gpu ssh test-host echo new-browser',
+                'off', 'off:30:1073741824:-', 'lossless', 'test-origin', str(self.fake),
+                self.pid, str(self.runtime / 'usb.sock'), '1050:0407', '3240', '']
+        script.write_text('import runpy,sys\n' +
+                          'm=runpy.run_path(' + repr(str(self.module)) + ')\n' +
+                          'args=' + repr(args) + '\nargs[8]=sys.argv[1]\n' +
+                          'm["reserve"](args)\n' +
+                          'row=m["load"](args[0]);row["phase"]="starting";m["save"](row)\n')
+        return script
+
+    def test_reset_replacement_before_lease_is_preserved_without_remote_probe(self):
+        generation = self.reserve(canonical='waypipe --no-gpu ssh test-host echo old-browser', mode='off')
+        self.update(phase='stopped', reason='transport-failed')
+        script = self.replacement_script()
+        p = self.shell('''
+chrome_service_preflight() { :; }
+eval "$(declare -f chrome_session_manager | sed '1s/chrome_session_manager/original_manager/')"
+chrome_session_manager() {
+  if [ "$1" = check-service ]; then
+    original_manager read "$2" "${3:-}" >/dev/null || return
+    python3 ''' + shlex.quote(str(script)) + ' ' + self.pid + ''' >/dev/null
+    return
+  fi
+  if [ "$1" = stop ]; then echo WOULD-STOP-REPLACEMENT >&2; return 97; fi
+  original_manager "$@"
+}
+chrome_reset_remote_identity() { echo WOULD-PROBE-REMOTE >&2; return 1; }
+chrome_reset test-host --session remote-chrome-test --yes
+''')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('generation changed', p.stderr)
+        self.assertNotIn('WOULD-', p.stdout + p.stderr)
+        row = s.load(self.name)
+        self.assertNotEqual(row['generation'], generation)
+        self.assertEqual(row['phase'], 'starting')
+        self.assertIn('new-browser', row['command'])
+        self.assertFalse(s.path_for(self.name).with_suffix('.lease').exists())
+
+    def test_reset_rechecks_original_generation_before_local_stop(self):
+        generation = self.reserve(canonical='waypipe --no-gpu ssh test-host echo old-browser', mode='off')
+        self.update(phase='stopped', reason='transport-failed')
+        script = self.replacement_script()
+        p = self.shell('''
+chrome_service_preflight() { :; }
+eval "$(declare -f chrome_session_manager | sed '1s/chrome_session_manager/original_manager/')"
+chrome_session_manager() {
+  if [ "$1" = check-service ]; then original_manager read "$2" "${3:-}" >/dev/null; return; fi
+  if [ "$1" = stop ]; then echo WOULD-STOP-REPLACEMENT >&2; return 97; fi
+  original_manager "$@"
+}
+chrome_validate_launch_artifacts() { :; }
+chrome_reset_remote_identity() {
+  # The reset owner can legally reserve a replacement under its own lease.
+  # Even then, the old reset must not switch its captured generation to it.
+  python3 ''' + shlex.quote(str(script)) + ''' "$BASHPID" >/dev/null
+  return 1
+}
+chrome_reset test-host --session remote-chrome-test --yes
+''')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('generation changed', p.stderr)
+        self.assertNotIn('WOULD-STOP', p.stdout + p.stderr)
+        self.assertNotEqual(s.load(self.name)['generation'], generation)
+        self.assertEqual(s.load(self.name)['phase'], 'starting')
+
+    def test_reset_rechecks_original_generation_before_remote_stop(self):
+        generation = self.reserve(canonical='waypipe --no-gpu ssh test-host echo old-browser', mode='off')
+        self.update(phase='stopped', reason='transport-failed')
+        script = self.replacement_script()
+        p = self.shell('''
+chrome_service_preflight() { :; }
+eval "$(declare -f chrome_session_manager | sed '1s/chrome_session_manager/original_manager/')"
+chrome_session_manager() {
+  if [ "$1" = check-service ]; then original_manager read "$2" "${3:-}" >/dev/null; return; fi
+  original_manager "$@"
+}
+chrome_validate_launch_artifacts() { :; }
+chrome_reset_remote_identity() {
+  python3 ''' + shlex.quote(str(script)) + ''' "$BASHPID" >/dev/null
+  chrome_reset_remote_pid=123 chrome_reset_remote_pgid=123
+  return 0
+}
+chrome_reset_remote_stop() { echo WOULD-STOP-REMOTE >&2; return 97; }
+chrome_reset test-host --session remote-chrome-test --yes
+''')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('generation changed', p.stderr)
+        self.assertNotIn('WOULD-STOP', p.stdout + p.stderr)
+        self.assertNotEqual(s.load(self.name)['generation'], generation)
 
     def test_live_supervisor_cannot_be_cleaned_by_old_hook(self):
         generation = self.reserve()
@@ -362,6 +515,57 @@ if sys.argv[1] == '_session-resources' and sys.argv[-1] == 'usb':
         scopes = [r[-1] for r in self.calls() if r[0] == '_session-resources']
         self.assertEqual(scopes, ['notifications', 'bootstrap', 'usb'])
         self.assertIsNone(s.process(int((self.base / 'slow-child').read_text())))
+
+    def test_cleanup_deadline_contains_real_timeout_wrapped_requests(self):
+        generation = self.reserve()
+        token = self.ready_usb(generation)
+        private_bin = self.base / 'bin'
+        private_bin.mkdir()
+        child_file = self.base / 'ssh-child.json'
+        fake_ssh = private_bin / 'ssh'
+        fake_ssh.write_text('''#!/usr/bin/env python3
+import json,os,time
+from pathlib import Path
+pid=os.getpid()
+start=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[19]
+Path(''' + repr(str(child_file)) + ''').write_text(json.dumps(dict(pid=pid,start=start,pgid=os.getpgrp())))
+time.sleep(60)
+''')
+        fake_ssh.chmod(0o755)
+        notify_state = self.base / 'notify.state'
+        notify_state.write_text('private fixture\n')
+        notify_state.chmod(0o600)
+        self.fake.write_text('#!/bin/bash\nsource ' + shlex.quote(str(LAUNCHER)) + '\n' + '''
+[ "$1" = _session-resources ] || exit 0
+shift
+yk_prepare_for_launch() { :; }
+yk_load_state() { yk_attempt_token=''' + shlex.quote(token) + '''; }
+yk_stop() { yk_ssh_request fixture.invalid true; }
+notify_set_runtime_paths() { notify_state_file=''' + shlex.quote(str(notify_state)) + '''; }
+notify_state_field() { printf '%s\\n' /private/notify.sock; }
+notify_stop_listener() { notify_remove_remote_socket fixture.invalid /private/notify.sock; }
+chrome_remove_bootstrap_script() { :; }
+_chrome_session_resources "$@"
+''')
+        row = self.update(notify_socket='/private/notify.sock')
+        row['environment'].update(PATH=str(private_bin) + ':' + os.environ['PATH'], REMOTE_CHROME_SSH_TIMEOUT='60')
+        unrelated = subprocess.Popen(['sleep', '60'], start_new_session=True)
+        self.addCleanup(lambda: (unrelated.terminate(), unrelated.wait(timeout=3)))
+        for scope in ('usb', 'notifications'):
+            with self.subTest(scope=scope):
+                child_file.unlink(missing_ok=True)
+                try:
+                    started = time.monotonic()
+                    self.assertEqual(s.resource_call(row, scope, time.monotonic() + .7), {scope})
+                    self.assertLess(time.monotonic() - started, 2)
+                    child = json.loads(child_file.read_text())
+                    self.assertIsNone(s.process(child['pid']), 'deadline left the timeout-wrapped SSH child alive')
+                    self.assertIsNone(unrelated.poll(), 'cleanup signalled a process outside its worker')
+                finally:
+                    if child_file.exists():
+                        child = json.loads(child_file.read_text())
+                        if s.process(child['pid']) == {'pid': child['pid'], 'start': child['start']}:
+                            os.killpg(child['pgid'], signal.SIGKILL)
 
     def test_reset_ended_forced_session_without_key_replays_settings(self):
         canonical = 'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=500000 --remote-bin waypipe-remote-chrome ssh test-host echo custom-browser'

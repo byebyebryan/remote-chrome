@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="1.12.0"
+VERSION="1.12.1"
 
 # Presentation receives facts from the existing checks; it never parses their
 # human output to decide whether an operation succeeded.
@@ -3544,6 +3544,7 @@ chrome_attach() {
 chrome_reset_pane_id=""
 chrome_reset_pane_pid=""
 chrome_reset_pane_command=""
+chrome_reset_backend=""
 chrome_reset_host=""
 chrome_reset_remote_socket=""
 chrome_reset_remote_pgid=""
@@ -3559,9 +3560,11 @@ chrome_reset_video_prefix='^waypipe-remote-chrome[[:space:]]+--compress[[:space:
 chrome_reset_read_pane() {
   local session="$1"
   if chrome_service_known "$session"; then
+    chrome_reset_backend=systemd
     chrome_service_read "$session"
     return $?
   fi
+  chrome_reset_backend=tmux
   local pane_output=""
   local line_count=0
   local pane_line
@@ -4277,6 +4280,7 @@ chrome_reset() {
   local diagnostics_saved="" diagnostics_previous="" diagnostics_mode=""
   local reset_service_backend=0
   local reset_generation=""
+  local reset_record_generation=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -4337,13 +4341,16 @@ chrome_reset() {
   chrome_reset_read_pane "$session" || return 1
   chrome_reset_parse_pane_host "$chrome_reset_pane_command" || return 1
   pane_host="$chrome_reset_host"
-  if chrome_service_known "$session"; then reset_service_backend=1; fi
+  if [ "$chrome_reset_backend" = systemd ]; then
+    reset_service_backend=1
+    reset_record_generation="$chrome_service_generation"
+  fi
   if [ -n "$host" ] && [ "$host" != "$pane_host" ]; then
     die "The selected chrome pane targets $pane_host, not requested host $host; refusing reset."
   fi
   host="$pane_host"
   chrome_transport_defaults || return 1
-  diagnostics_saved="$(chrome_session_diagnostics_policy "$session" 2>/dev/null || true)"
+  diagnostics_saved="$(chrome_session_diagnostics_policy "$session" "$reset_record_generation" 2>/dev/null || true)"
   if [ -n "$diagnostics_saved" ]; then
     if [[ "$diagnostics_saved" =~ ^off:([0-9]+):([0-9]+):-$ ]]; then
       chrome_diagnostics=off
@@ -4375,7 +4382,7 @@ chrome_reset() {
   if [ "$reset_service_backend" = 1 ]; then
     # An ended record is useful without a live supervisor or SSH descendant.
     # Inspecting the expected unit still refuses a changed live service owner.
-    chrome_session_manager check-service "$session" || return $?
+    chrome_session_manager check-service "$session" "$reset_record_generation" || return $?
     chrome_reset_remote_socket="$chrome_service_remote_socket"
     if [ "$chrome_service_recovery" = 1 ]; then reset_generation="$chrome_service_generation"; fi
     if [ "$chrome_service_phase" = running ] &&
@@ -4386,7 +4393,7 @@ chrome_reset() {
     chrome_reset_find_local_ssh "$chrome_reset_pane_pid" "$host" || return 1
   fi
   if [ "$chrome_detached_backend" = systemd ]; then
-    chrome_session_manager lease "$session" "${BASHPID:-$$}" || return $?
+    chrome_session_manager lease "$session" "${BASHPID:-$$}" "$reset_record_generation" || return $?
   fi
 
   notify_set_runtime_paths "$session"
@@ -4403,15 +4410,15 @@ chrome_reset() {
     notify_reset_state=1
   fi
 
-  if chrome_service_known "$session"; then
+  if [ "$reset_service_backend" = 1 ]; then
     yk_control_socket="$chrome_service_usb_socket"
     yk_usb_id="$chrome_service_usb_id"
     yk_usbip_port="$chrome_service_usb_port"
   fi
   yk_prepare_for_launch "$host"
   runtime_path_present "$yk_state_file" && yk_state_present=1
-  if chrome_service_known "$session"; then
-    chrome_service_read "$session" || return $?
+  if [ "$reset_service_backend" = 1 ]; then
+    chrome_service_read "$session" "$reset_record_generation" || return $?
     [ "$chrome_service_usb_state" = off ] || yk_window_present=1
   elif tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null |
     grep -qx yubikey; then
@@ -4444,6 +4451,9 @@ chrome_reset() {
         echo "Reset canceled; the existing session is unchanged." >&2
         return 1
       fi
+      if [ "$reset_service_backend" = 1 ]; then
+        chrome_session_manager read "$session" "$reset_record_generation" >/dev/null || return $?
+      fi
       chrome_reset_remote_stop "$host" "$chrome_reset_remote_socket" \
         "$chrome_reset_remote_pgid" || return 1
       # Verify the captured identities after TERM. Only the exact preexisting
@@ -4468,9 +4478,9 @@ chrome_reset() {
       ;;
   esac
 
-  if chrome_service_known "$session"; then
-    chrome_service_read "$session" || return $?
-    chrome_session_manager stop "$session" "$chrome_service_generation" || return $?
+  if [ "$reset_service_backend" = 1 ]; then
+    chrome_service_read "$session" "$reset_record_generation" || return $?
+    chrome_session_manager stop "$session" "$reset_record_generation" || return $?
   else
   if session_probe_output="$(LC_ALL=C tmux has-session -t "=$session" 2>&1)"; then
     session_probe_code=0
@@ -11936,7 +11946,7 @@ chrome_service_known() {
 chrome_service_read() {
   local output
   local -a fields=()
-  output="$(chrome_session_manager read "$1")" || return $?
+  output="$(chrome_session_manager read "$1" "${2:-}")" || return $?
   mapfile -t fields <<<"$output"
   [ "${#fields[@]}" = 19 ] || [ "${#fields[@]}" = 20 ] || [ "${#fields[@]}" = 27 ] || return 1
   chrome_reset_pane_command="${fields[0]}"
@@ -11981,7 +11991,7 @@ chrome_session_exists() {
 
 chrome_session_diagnostics_policy() {
   if chrome_service_known "$1"; then
-    chrome_service_read "$1" || return $?
+    chrome_service_read "$1" "${2:-}" || return $?
     printf '%s\n' "$chrome_service_saved_diagnostics"
   else
     tmux show-options -qv -t "=$1:" @remote-chrome-diagnostics 2>/dev/null
@@ -12063,6 +12073,11 @@ _chrome_session_resources() {
   # Every background privilege request fails promptly rather than trying to
   # prompt on a journal stream or relying on a terminal's sudo timestamp.
   sudo() { command sudo -n -k "$@"; }
+  # GNU timeout normally moves its command into another process group. Keep
+  # nested deadlines in this worker's group so the supervisor's group kill
+  # also reaches an in-flight SSH request. This entry point runs in its own
+  # process; the override does not change ordinary foreground requests.
+  timeout() { command timeout --foreground "$@"; }
   if [ "$token" != - ]; then
     yk_control_socket="$socket"
     yk_prepare_for_launch "$host" --usb-id "$usb_id" --port "$port"
@@ -12108,15 +12123,50 @@ _chrome_session_socket() {
   printf '%s\n' "$chrome_reset_remote_socket"
 }
 
+_chrome_session_usb_socket_identity() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+try:
+    info = os.lstat(sys.argv[1])
+except FileNotFoundError:
+    raise SystemExit(1)
+except OSError:
+    raise SystemExit(2)
+
+mode = stat.S_IMODE(info.st_mode)
+if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or
+        mode != 0o600 or info.st_nlink != 1):
+    raise SystemExit(2)
+print(f'{info.st_dev}:{info.st_ino}:{info.st_uid}:{mode:o}:{info.st_nlink}:'
+      f'{info.st_ctime_ns}:{info.st_mtime_ns}:socket')
+PY
+}
+
 _chrome_session_usb_check() {
-  local yk_control_socket="$1" status=0
+  local yk_control_socket="$1" status=0 identity_status=0 socket_before="" socket_after=""
+  local ssh_status=0 ssh_output=""
   yk_control_socket_status || status=$?
-  [ "$status" != 1 ] || return 1
+  if [ "$status" = 1 ]; then
+    _chrome_session_usb_socket_identity "$yk_control_socket" >/dev/null 2>&1 || identity_status=$?
+    [ "$identity_status" = 1 ] && return 1
+    return 2
+  fi
   [ "$status" = 0 ] || return 2
-  timeout --kill-after=1 2 ssh -S "$yk_control_socket" -O check "$2" >/dev/null 2>&1 && return 0
-  status=0
-  yk_control_socket_status || status=$?
-  [ "$status" = 1 ] && return 1
+  socket_before="$(_chrome_session_usb_socket_identity "$yk_control_socket" 2>/dev/null)" || return 2
+
+  ssh_output="$(LC_ALL=C timeout --kill-after=1 1 ssh -S "$yk_control_socket" -O check "$2" 2>&1)" || ssh_status=$?
+  socket_after="$(_chrome_session_usb_socket_identity "$yk_control_socket" 2>/dev/null)" || return 2
+  [ "$socket_after" = "$socket_before" ] || return 2
+
+  [ "$ssh_status" = 0 ] && return 0
+  ssh_output="${ssh_output%$'\r'}"
+  if [ "$ssh_status" = 255 ] &&
+    [ "$ssh_output" = "Control socket connect($yk_control_socket): Connection refused" ]; then
+    return 1
+  fi
   return 2
 }
 
@@ -12319,12 +12369,37 @@ def path_for(session):
 
 
 def read_file(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd) as stream:
-        s = os.fstat(stream.fileno())
-        if not stat.S_ISREG(s.st_mode) or s.st_uid != UID or s.st_mode & 0o077 or s.st_nlink != 1 or s.st_size > 262144:
+    def validate(info):
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != UID or info.st_mode & 0o077 or info.st_size > 262144 or info.st_nlink > 1:
             raise ValueError('unsafe session record: ' + str(path))
-        return json.load(stream)
+
+    def fingerprint(info):
+        return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_size,
+                info.st_nlink, info.st_ctime_ns, info.st_mtime_ns)
+
+    for _ in range(4):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as stream:
+            before = os.fstat(stream.fileno())
+            validate(before)
+            if before.st_nlink == 0:
+                # An atomic save displaced the opened inode. Reopen the named
+                # record and validate it afresh; do not read an unlinked view
+                # or relax the hardlink checks.
+                continue
+            value = json.load(stream)
+            after = os.fstat(stream.fileno())
+            validate(after)
+            if after.st_nlink == 0:
+                continue
+            try:
+                named = path.lstat()
+            except FileNotFoundError:
+                continue
+            if fingerprint(before) != fingerprint(after) or fingerprint(after) != fingerprint(named):
+                continue
+            return value
+    raise ValueError('session record changed during read; retry shortly: ' + str(path))
 
 
 def load(session):
@@ -12482,11 +12557,13 @@ def check_lease(session, owner):
         raise ValueError('another session command owns this session; retry after it finishes')
 
 
-def claim_lease(session, owner):
+def claim_lease(session, owner, generation=''):
     identity = process(owner)
     if not identity:
         raise ValueError('reset owner exited')
     with locked(session):
+        if generation:
+            current(session, generation)
         check_lease(session, identity)
         path = path_for(session).with_suffix('.lease')
         fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=ROOT)
@@ -13010,7 +13087,7 @@ def main(argv):
     elif action == 'recoverable':
         return 0 if failed(load(args[0])) else 1
     elif action == 'check-service':
-        value = load(args[0])
+        value = current(args[0], args[1]) if len(args) > 1 and args[1] else load(args[0])
         if value['boot'] == BOOT:
             if not service(value) and exact(value.get('supervisor')):
                 raise ValueError('supervisor is live but the expected service is absent; preserving it')
@@ -13020,7 +13097,7 @@ def main(argv):
             if (mode == 'active' and active(row)) or (mode == 'inspect' and (active(row) or failed(row))) or (mode == 'recoverable' and failed(row)):
                 print(row['session'])
     elif action in ('read', 'read-live'):
-        value = load(args[0])
+        value = current(args[0], args[1]) if len(args) > 1 and args[1] else load(args[0])
         if action == 'read-live' and (value['boot'] != BOOT or not exact(value.get('supervisor'))):
             raise ValueError('managed supervisor is absent or its identity changed')
         read_metadata(value)

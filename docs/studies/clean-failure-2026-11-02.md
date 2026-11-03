@@ -73,3 +73,37 @@ notice and performs no real USB/IP, remote SSH or browser-profile operation.
 
 Real physical key removal, host suspension and actual browser window closure
 remain daily-use acceptance; these fixtures do not claim those observations.
+
+## Review corrections: November 3, 2026
+
+The 1.12.0 acceptance missed three cases. A new launch could replace an ended
+record before reset obtained its lease, after which reset reloaded and targeted
+the replacement. A nested GNU `timeout` put an SSH cleanup child in another
+process group, allowing it to survive the worker deadline. A killed USB SSH
+master left its socket file behind and was classified as unknown forever.
+
+Launcher 1.12.1 binds reset to its first local generation: lease acquisition
+checks it atomically, later metadata reads reject a change, and stop receives
+the captured generation. Cleanup keeps nested timeout requests in the worker
+group with `--foreground`. USB liveness distinguishes a confirmed dead control
+listener from ambiguous evidence while rechecking the owned socket identity.
+None of these paths reconnects or restarts Chrome automatically.
+
+The regression set includes replacements before lease acquisition and before
+the final local stop, plus the production timeout-wrapped USB and notification
+requests. The pipeline cases fail against 1.12.0 and pass with the corrections.
+A disposable public-command/user-service race confirms that the stale reset
+refuses while the replacement keeps running. Private real OpenSSH coverage
+checks a live master and its retained socket after forced master termination;
+unsafe, replaced, timed-out and otherwise ambiguous evidence stays unknown.
+
+The full gate also exposed an existing atomic-read race: replacement between
+open and fstat left the opened inode unlinked, so it was falsely classified as
+unsafe. Readers now reopen the named record with a bounded retry, reapplying
+ownership, permissions, type and hardlink checks rather than accepting the
+unlinked view. File and named-path fingerprints are checked after parsing too,
+so a replacement during the JSON read cannot pass an old-generation check.
+Deterministic open/replace/stat and parse-time replacement regressions cover
+both windows.
+The generation is rechecked after confirmation before remote TERM as well as
+before local stop, including when the same reset owner reserves a replacement.

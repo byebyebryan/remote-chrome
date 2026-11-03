@@ -39,6 +39,7 @@ the behavioral and Python test suites, and `git diff --check`:
 | Suite | Contract |
 | --- | --- |
 | `tests/sessions_test.py` | Private records, generations, service identity, independent USB lifecycle, supervisor exit and automatic events |
+| `tests/usb_liveness_test.py` | Owned USB control sockets, real killed-master detection, ambiguous failures and replacement safety |
 | `tests/logs_test.py` | Retained journal discovery without runtime records, generation/time selection, follow ownership and legacy pane capture |
 | `tests/recovery_test.py` | Exact remote-generation ownership, reset request deadlines, and a private SSH server/proxy proving idle survival and failure on dropped traffic |
 | `tests/cli_test.py` | Human CLI, width/color/plain behavior and grouped status |
