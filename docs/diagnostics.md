@@ -329,7 +329,7 @@ required for diagnostics delivery.
 
 ## Session lifecycle events
 
-New background sessions record `session_started`, `session_stopped`,
+New background sessions record `session_started`, `session_ended`, `session_stopped`,
 `session_cleanup_failed`, `usb_started`, `usb_stopped`, and
 `usb_cleanup_failed` automatically, without a manual mark. Reasons distinguish
 physical removal, requested stop, setup interruption and transport exit. These
@@ -339,6 +339,10 @@ launcher supports that protocol; older or unavailable helpers remain `unknown`.
 The same resource details appear in status and monitor attention messages.
 New lifecycle records also include the launch generation, so a diagnostic
 attempt can be matched to `logs --generation ID` without a runtime record.
+Transport end events and cleanup outcomes retain the original end timestamp and
+exit status. Cleanup retries have separate timestamps and do not overwrite the
+transport's first failure. Status/monitor keep ended failures visible and label
+their recorder off or stale; they do not imply live rendering or network health.
 
 `remote-chrome logs HOST --since 2h` shows retained operational stdout and stderr
 across launches. `--list` finds launch generations and `--generation ID` selects

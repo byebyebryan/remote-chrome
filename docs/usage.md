@@ -138,22 +138,41 @@ remote-chrome reset remote-host
 remote-chrome reset remote-host --session work-browser
 ```
 
-Reset restarts the exact managed Chrome/Waypipe stream and any recorded YubiKey
-forwarding. It accepts new background sessions and existing tmux sessions. Reset
+Reset restarts the exact managed Chrome/Waypipe stream and wanted YubiKey
+forwarding. It accepts retained running or ended background sessions and
+existing live tmux sessions. Reset
 without a host selects the sole session under the configured default prefix;
-when several exist, specify a host or `--session NAME`.
+when several exist, specify a host or `--session NAME`. If no active session
+exists, hostless reset can select a single retained failed session.
 
 Reset preserves the canonical launch command, including compression, and the
-YubiKey mode: automatic, required, or disabled. Forwarding state supplies the
+YubiKey startup mode: automatic, required, or disabled. Removal or an explicit
+`usb stop` turns forwarding intent off; reset then continues without the key,
+including a key that was initially required. `usb start` enables it again.
+Forwarding state supplies the
 USB ID and port. Older sessions without mode metadata use automatic detection;
 pre-1.3 sessions may
 fall back to a direct pane command. Wrapped pane metadata is never decoded.
 
-The launcher validates the recorded supervisor (or legacy pane), SSH reverse socket, remote process
-group, and runtime artifacts before stopping Chrome. It refuses ambiguous or
+The launcher validates its retained generation, expected service, SSH reverse
+socket, remote process group and runtime artifacts before stopping Chrome.
+New sessions retain the socket and remote generation so reset does not require
+the original local SSH process to remain alive. It refuses ambiguous or
 unreachable ownership. `--yes` skips restart or confirmed-absence warnings,
 while ownership checks still apply. Reset recreates the stream rather than
 resuming it transparently.
+
+The transport's SSH keepalives allow brief interruptions but end a persistently
+unresponsive connection after approximately 45 seconds while the host is awake.
+Cleanup is bounded and preserves pending remote obligations. `status` and
+`monitor` show an ended failed session and its exact restart command. A local
+failure notice is best effort; unavailable desktop notification support does
+not prevent cleanup. Normal closure and physical key removal are quiet.
+
+If the browser host is still unreachable, reset returns an error and retains
+the recovery state. Retry when connectivity returns. Existing running sessions
+keep their original transport/bootstrap until a deliberate reset; installing a
+launcher alone does not change their failure timing.
 
 After exact teardown, reset also recreates the session if its last pane exited
 and tmux shut down its server. Permission errors and other uncertain tmux

@@ -115,6 +115,20 @@ class MonitorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'cleanup resource'):
             d.monitor_inventory(raw.rsplit('\t', 1)[0] + '\tbad-resource')
 
+    def test_failed_ended_session_has_restart_hint_and_keeps_recording_warning(self):
+        raw = f'remote-chrome-snap\tsnap\t{ATTEMPT}\ton\tlossless\t123\tstopped\toff\tsession-ended\t-\tfailed\t1234'
+        session = d.monitor_inventory(raw)[0]
+        alerts = d.monitor_attention(session, dict(state='off', age=20, mono=10), None, now_mono=10)
+        self.assertIn('Session ended unexpectedly', alerts)
+        self.assertIn('Restart: remote-chrome reset snap', alerts)
+        self.assertIn('Recorder off', alerts)
+        self.assertTrue(any('STALE' in row for row in alerts))
+
+    def test_usb_transport_failure_is_visible_without_marking_chrome_ended(self):
+        alerts = d.monitor_attention(self.session(phase='running', usb='off', usb_reason='transport-exited'), None, None)
+        self.assertIn('USB forwarding unavailable / Chrome kept running', alerts)
+        self.assertFalse(any('Session ended' in row for row in alerts))
+
     def test_idle_zero_has_bar_missing_and_idle_ack_do_not(self):
         idle = sample(delta=dict(seconds=1, bytes_sent=0, bytes_received=0, bytes_acked=0, retrans_total=0))
         buckets = d.monitor_buckets([idle], idle['wall'])

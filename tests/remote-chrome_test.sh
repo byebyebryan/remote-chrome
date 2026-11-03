@@ -48,6 +48,7 @@ ssh() { test_block_external_command ssh "$@"; }
 # Keep the suite's function-based SSH mocks behind the transport boundary.
 # Deadline regressions restore the real leaf and use a private fake executable.
 yk_ssh_request() { ssh "$@"; }
+chrome_reset_ssh_request() { ssh "$@"; }
 sudo() { test_block_external_command sudo "$@"; }
 
 fail() {
@@ -1391,16 +1392,16 @@ FAKE_WAYPIPE_COMPRESSION
         fail "$mode/$setting launch failed: $output"
       case "$mode" in
         video-*)
-          [ "$(sed -n '1,8p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
-            "$(printf '%s\n' --compress "$expected" --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host)" ] ||
+          [ "$(sed -n '1,20p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
+            "$(printf '%s\n' --compress "$expected" --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ControlMaster=no -o ControlPath=none test-host)" ] ||
             fail "$mode/$setting used the wrong video transport"
           if command grep -qx -- --disable-gpu "$REMOTE_CHROME_TEST_WAYPIPE_ARGS"; then
             fail "video launch disabled Chrome GPU rendering"
           fi
           ;;
         *)
-          [ "$(sed -n '1,5p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
-            "$(printf '%s\n' --no-gpu --compress "$expected" ssh test-host)" ] ||
+          [ "$(sed -n '1,17p' "$REMOTE_CHROME_TEST_WAYPIPE_ARGS")" = \
+            "$(printf '%s\n' --no-gpu --compress "$expected" ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ControlMaster=no -o ControlPath=none test-host)" ] ||
             fail "$mode/$setting used the wrong Waypipe compression or host"
           ;;
       esac
@@ -1469,7 +1470,7 @@ test_video_command_and_configuration_round_trip() (
   chrome_set_transport_command zstd=1 "$chrome_transport" "$chrome_video_codecs"
   command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome \
     chrome_libsecret_os_crypt_password_v2 '' '' '' /tmp/remote-chrome-test.bootstrap.sh)"
-  assert_contains "$command_line" 'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh test-host'
+  assert_contains "$command_line" 'waypipe-remote-chrome --compress zstd=1 --video h264,hw,bpf=250000 --remote-bin waypipe-remote-chrome ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ControlMaster=no -o ControlPath=none test-host'
   chrome_reset_parse_pane_host "$command_line" || fail "video command cannot reset"
   [ "$chrome_reset_host" = test-host ] || fail "video command reset targets wrong host"
   chrome_launch_target test-host --transport video --video-codecs=software --session=video-test
@@ -1492,7 +1493,7 @@ test_video_command_and_configuration_round_trip() (
         command_line="$(chrome_secure_command_line "$compression" test-host google-chrome-stable chrome \
           chrome_libsecret_os_crypt_password_v2 /tmp/remote-notify.sock /tmp/local-notify.sock '' \
           /tmp/remote-chrome-test.bootstrap.sh)"
-        assert_contains "$command_line" "--video h264,$codec,bpf=$bpf --remote-bin waypipe-remote-chrome ssh -R"
+        assert_contains "$command_line" "--video h264,$codec,bpf=$bpf --remote-bin waypipe-remote-chrome ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ControlMaster=no -o ControlPath=none -R"
         chrome_reset_parse_pane_host "$command_line" || fail "$bpf/$codec/$compression reset rejected"
         [ "$chrome_reset_host" = test-host ] || fail "$bpf/$codec/$compression reset lost host"
       done
@@ -1607,7 +1608,7 @@ test_secure_bootstrap_encodes_minimal_proxy_policy() (
   assert_contains "$script" "--password-store=gnome-libsecret"
 
   command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable chrome chrome_libsecret_os_crypt_password_v2 "" "" "" /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
-  [[ "$command_line" == waypipe\ --no-gpu\ --compress\ zstd=1\ ssh\ test-host\ * ]] ||
+  [[ "$command_line" == waypipe\ --no-gpu\ --compress\ zstd=1\ ssh\ -o\ ServerAliveInterval=15\ -o\ ServerAliveCountMax=3\ -o\ ConnectTimeout=5\ -o\ ConnectionAttempts=1\ -o\ ControlMaster=no\ -o\ ControlPath=none\ test-host\ * ]] ||
     fail "secure detached command did not preserve the direct Waypipe SSH prefix"
   assert_contains "$command_line" 'bash\ -s\ --\ google-chrome-stable\ chrome\ chrome_libsecret_os_crypt_password_v2'
   assert_contains "$command_line" "< /tmp/remote-chrome-test-host.bootstrap.sh"
@@ -2292,7 +2293,7 @@ test_secure_command_shape_recreates_through_reset_parser() (
   command_line="$(chrome_secure_command_line zstd=1 test-host google-chrome-stable \
     chrome chrome_libsecret_os_crypt_password_v2 "" "" "" \
     /tmp/remote-chrome-test-host.bootstrap.sh --new-window)"
-  [ "${command_line#waypipe --no-gpu --compress zstd=1 ssh test-host}" != "$command_line" ] ||
+  [ "${command_line#waypipe --no-gpu --compress zstd=1 ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -o ConnectionAttempts=1 -o ControlMaster=no -o ControlPath=none test-host}" != "$command_line" ] ||
     fail "generated secure pane command lost its direct Waypipe SSH prefix"
   [[ "$command_line" != *$'\n'* ]] || fail "generated secure pane command contains a literal newline"
 

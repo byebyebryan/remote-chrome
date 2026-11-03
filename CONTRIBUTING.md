@@ -15,16 +15,16 @@ Bug reports and focused pull requests are welcome.
 ## Development
 
 The check runner needs `shellcheck`, `tmux`, `python3`, `dbus-daemon`,
-`xdg-dbus-proxy`, and Python D-Bus/GLib bindings. On Arch:
+`xdg-dbus-proxy`, OpenSSH client/server tools, and Python D-Bus/GLib bindings. On Arch:
 
 ```bash
-sudo pacman -S --needed shellcheck tmux python python-dbus python-gobject dbus xdg-dbus-proxy
+sudo pacman -S --needed shellcheck tmux python python-dbus python-gobject dbus xdg-dbus-proxy openssh
 ```
 
 On Debian/Ubuntu (matching the CI dependency set):
 
 ```bash
-sudo apt-get install --yes shellcheck tmux python3 python3-dbus python3-gi dbus-daemon xdg-dbus-proxy
+sudo apt-get install --yes shellcheck tmux python3 python3-dbus python3-gi dbus-daemon xdg-dbus-proxy openssh-server
 ```
 
 Then run:
@@ -40,6 +40,7 @@ the behavioral and Python test suites, and `git diff --check`:
 | --- | --- |
 | `tests/sessions_test.py` | Private records, generations, service identity, independent USB lifecycle, supervisor exit and automatic events |
 | `tests/logs_test.py` | Retained journal discovery without runtime records, generation/time selection, follow ownership and legacy pane capture |
+| `tests/recovery_test.py` | Exact remote-generation ownership, reset request deadlines, and a private SSH server/proxy proving idle survival and failure on dropped traffic |
 | `tests/cli_test.py` | Human CLI, width/color/plain behavior and grouped status |
 | `tests/monitor_test.py` | Read-only model, chart layout, PTY help, resize and exit |
 | `tests/remote-chrome_test.sh` | CLI, tmux identity, launch/reset/stop, forwarding readiness/recovery, signal rollback, and unsafe runtime paths |

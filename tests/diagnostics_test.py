@@ -228,6 +228,21 @@ class DiagnosticsTests(unittest.TestCase):
             d.main(['lifecycle', 'snap', '--event', 'session_cleanup_failed',
                     '--cleanup-resources', 'made-up'])
 
+    def test_transport_end_context_survives_query_without_manual_mark(self):
+        ended = time.time() - 1
+        self.assertEqual(d.main(['lifecycle', 'snap', '--attempt', str(uuid.uuid4()),
+                                 '--session', 'remote-chrome-snap', '--origin', socket.gethostname(),
+                                 '--event', 'session_ended', '--reason', 'transport-failed',
+                                 '--ended-wall', str(ended), '--transport-exit', '255']), 0)
+        result = d.query(self.query_args(include_records=True))
+        event = result['summaries'][0]['events'][0]
+        self.assertEqual(event['event'], 'session_ended')
+        self.assertEqual(event['transport_exit'], 255)
+        self.assertEqual(event['transport_ended_wall'], ended)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            d.report('Viewer', result)
+        self.assertIn('exit 255', output.getvalue())
+
     def test_query_read_limit_is_explicit(self):
         s = self.store()
         s.append(record())

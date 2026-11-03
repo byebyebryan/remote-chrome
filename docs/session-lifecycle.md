@@ -5,6 +5,11 @@
 New detached launches use a transient systemd user service. One supervisor owns
 the Waypipe/SSH lifetime, notification listener and optional USB forwarding.
 There is no permanent remote-chrome daemon and no automatic browser restart.
+The main and USB SSH connections send keepalives after 15 seconds of silence
+and stop after three unanswered checks (approximately 45 seconds while awake).
+These are per-command options, not changes to global SSH or server policy.
+The browser transport uses its own SSH connection rather than a shared control
+master, so it owns its failure timing and TCP observations.
 Closing the launching terminal leaves the session running. Closing the last
 managed Chrome window ends the transport and cleans up forwarding. Closing one
 of several windows leaves the session running. Managed Chrome disables its
@@ -33,10 +38,30 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
   retaining it for other exports remains possible.
 - The supervisor observes its transport child and the exact local USB device.
   A local removal starts bounded, noninteractive USB cleanup. Actual transport
-  exit ends the session; a slow or temporarily stalled connection does not.
+  exit ends the session. Idle traffic and brief interruptions are allowed;
+  persistent SSH unresponsiveness ends the transport through its keepalive
+  policy. A broken USB control connection stops forwarding independently.
+- Forwarding intent is separate from cleanup debt. Removal or `usb stop` latches
+  intent off, including after initially required forwarding. A later reset
+  does not require or automatically re-export that key. A fresh required launch
+  still requires the key, and `usb start` explicitly enables forwarding again.
 - A systemd post-stop hook retries exact generation-owned cleanup even when
   the supervisor crashes. Unreachable remote state remains unresolved rather
   than being silently declared absent. A hard reboot cannot execute cleanup.
+- New cleanup attempts share a 30-second deadline. Notification and bootstrap
+  cleanup run before potentially stalled USB cleanup. The service stop limit
+  is 45 seconds per stop phase and the CLI request has a 65-second outer limit.
+  A timed-out helper and its descendants are terminated; ownership ledgers
+  retain every unconfirmed obligation. There is no background retry loop.
+- Transport outcome and its first end timestamp are retained separately from
+  cleanup attempts/completion. Unexpected exits remain visible after successful
+  cleanup. One best-effort local failure notice supplies the exact reset command;
+  normal browser closure, requested stop and physical key removal stay quiet.
+- New bootstraps publish their launch generation in incoming-session metadata.
+  The supervisor retains the generated remote socket when its SSH child is
+  observable. Reset can use that state after local processes exit, verifies the
+  remote generation, boot and process identities, and refuses ambiguous ownership.
+  Remote inspection/termination requests each have a ten-second deadline.
 - Background sudo must be noninteractive. Scope passwordless permissions to
   the required USB/IP cleanup operations; do not depend on a terminal's cached
   authentication. Foreground launch remains available for debugging.
@@ -54,6 +79,12 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
   both new sessions and legacy tmux sessions. Existing sessions are preserved;
   their next deliberate reset adopts the new backend. `attach` still works for
   legacy sessions and explains `logs` for new sessions.
+  Status/monitor also retain ended failed sessions as needing recovery, without
+  counting them as active or relabelling old observations as fresh. Reset accepts
+  retained ended records and restores transport, browser, diagnostic and
+  notification settings. Bare HOST recovers a retained failure; normal ended
+  sessions keep the ordinary fresh-launch behavior. Hostless reset selects an
+  active session first, then an unambiguous retained failure.
 
 ## Acceptance gates
 
@@ -78,3 +109,8 @@ PID, process start, boot, attempt, socket and file identities remain authoritati
 
 Physical token removal and real Chrome window closure remain distinct from
 mocked hardware and disposable process acceptance; report those boundaries.
+An isolated real SSH server and drop proxy exercise idle keepalives and bounded
+loss detection without changing system SSH configuration or host networking.
+Responsive SSH with frozen rendering still requires a manual reset. Runtime
+records are per boot; recovery of launch settings across a full reboot is not
+provided by the operational journal.
